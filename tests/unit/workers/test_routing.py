@@ -123,6 +123,14 @@ def test_sandbox_app_consumes_only_its_queue_and_declares_nothing() -> None:
     assert conf.worker_enable_remote_control is False
 
 
+def test_no_worker_takes_remote_control_commands() -> None:
+    # Unused, a command channel for any broker client, and its transient
+    # reply queues are refused by RabbitMQ 4.3.
+    assert (
+        build_celery(BrokerSettings(), role="platform").conf.worker_enable_remote_control is False
+    )
+
+
 def test_every_secret_compose_mounts_is_generated() -> None:
     script = _generate_secrets()
     spec = importlib.util.spec_from_file_location("pki", ROOT / "scripts" / "internal_pki.py")

@@ -442,6 +442,22 @@ purpose with its variable, digest included, e.g.
    exist.
 4. `docker compose pull` or `docker compose build`, then `docker compose up -d`.
 
+A stack that ran RabbitMQ 4.1 (the default before; its community support ended in
+January 2026) cannot move straight to 4.3, which the stack runs now: 4.3 upgrades
+only from 4.2 with every feature flag enabled. Drain the queues (stop the beat and
+let the workers finish), then either remove the `rabbitmq-data` volume - the
+definitions are imported again at start - or go through 4.2 first:
+
+```bash
+docker compose exec rabbitmq rabbitmqctl enable_feature_flag all
+```
+
+```bash
+RABBITMQ_IMAGE=rabbitmq:4.2-alpine docker compose up -d rabbitmq
+```
+
+then enable all feature flags again and start the stack with the new default.
+
 A stack set up before internal TLS existed (its `secrets/redis_app_url` still
 begins with `redis://`) also needs `python scripts/generate_secrets.py --tls-urls`
 before step 4: it rewrites the Redis and broker URLs for TLS and keeps their
