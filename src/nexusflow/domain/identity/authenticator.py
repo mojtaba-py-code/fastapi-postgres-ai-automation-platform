@@ -10,6 +10,7 @@ short-lived token happens to expire.
 from __future__ import annotations
 
 from datetime import timedelta
+from uuid import UUID
 
 from nexusflow.core.clock import Clock
 from nexusflow.core.errors import AuthenticationError, PermissionDeniedError
@@ -17,10 +18,27 @@ from nexusflow.domain.authorization.principal import Principal, PrincipalType
 from nexusflow.domain.authorization.roles import permissions_for, role_covers
 from nexusflow.domain.identity.api_keys import CredentialKind, parse_credential
 from nexusflow.domain.identity.tokens import TokenCodec
+from nexusflow.domain.organizations.model import OrganizationSettings
 from nexusflow.domain.shared.security import TokenHasher
 from nexusflow.domain.shared.unit_of_work import TenantScope, UnitOfWorkFactory
 
 _LAST_USED_RESOLUTION = timedelta(minutes=5)
+
+
+def network_not_allowed(internal_detail: str | None = None) -> PermissionDeniedError:
+    return PermissionDeniedError(
+        "The organization does not allow access from this network.",
+        code="ip_not_allowed",
+        internal_detail=internal_detail,
+    )
+
+
+def _require_allowed_network(
+    policy: OrganizationSettings, client_ip: str | None, *, org_id: UUID, credential: str
+) -> None:
+    if not policy.allows_ip(client_ip):
+        # Logged (with the credential, never its secret) and counted by the API.
+        raise network_not_allowed(f"org={org_id} credential={credential} ip={client_ip}")
 
 
 def _unauthenticated() -> AuthenticationError:
@@ -41,17 +59,22 @@ class Authenticator:
         self._codec = token_codec
         self._hasher = token_hasher
 
-    async def authenticate(self, credential: str) -> Principal:
+    async def authenticate(self, credential: str, *, client_ip: str | None = None) -> Principal:
+        """The principal behind ``credential``, used from ``client_ip``.
+
+        An organization with a network allowlist is reached only from those
+        networks - through its members' sessions and its API keys alike.
+        """
         parsed = parse_credential(credential)
         if parsed is not None:
             if parsed.kind is CredentialKind.API_KEY:
-                return await self._authenticate_api_key(parsed.prefix, parsed.full_token)
+                return await self._authenticate_api_key(parsed.prefix, parsed.full_token, client_ip)
             return await self._authenticate_service(parsed.prefix, parsed.full_token)
         if credential.startswith(("nxf_", "nxs_")):
             raise _unauthenticated()  # malformed/garbled key: fail before any DB access
-        return await self._authenticate_access_token(credential)
+        return await self._authenticate_access_token(credential, client_ip)
 
-    async def _authenticate_access_token(self, token: str) -> Principal:
+    async def _authenticate_access_token(self, token: str, client_ip: str | None) -> Principal:
         now = self._clock.now()
         claims = self._codec.decode_access_token(token, now=now)
         scope = TenantScope(org_id=claims.org_id, user_id=claims.user_id)
@@ -80,6 +103,9 @@ class Authenticator:
                 raise PermissionDeniedError(
                     "This organization requires multi-factor authentication.", code="mfa_required"
                 )
+            _require_allowed_network(
+                organization.policy, client_ip, org_id=organization.id, credential=f"user:{user.id}"
+            )
             return Principal.for_user(
                 user_id=user.id,
                 org_id=claims.org_id,
@@ -88,7 +114,9 @@ class Authenticator:
                 label=user.email,
             )
 
-    async def _authenticate_api_key(self, prefix: str, token: str) -> Principal:
+    async def _authenticate_api_key(
+        self, prefix: str, token: str, client_ip: str | None
+    ) -> Principal:
         now = self._clock.now()
         async with self._uow_factory(TenantScope.auth()) as uow:
             key = await uow.api_keys.find_by_prefix(prefix)
@@ -102,6 +130,12 @@ class Authenticator:
             organization = await uow.organizations.get(key.org_id)
             if organization is None or not organization.is_active:
                 raise _unauthenticated()
+            _require_allowed_network(
+                organization.policy,
+                client_ip,
+                org_id=organization.id,
+                credential=f"api_key:{prefix}",
+            )
             # A key never outlives or outranks the member who created it: it
             # stops working when they leave, and acts with at most their
             # *current* role (a demoted admin's keys are demoted with them).

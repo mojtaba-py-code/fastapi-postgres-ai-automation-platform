@@ -83,7 +83,7 @@ for the role matrix.
 | GET | `/users/me/sessions` | My signed-in sessions: device (a coarse description such as "Firefox on Windows"), IP address, times, MFA, and which one this request uses. Signed-in users only - never with an API key (`403 session_required`) |
 | DELETE | `/users/me/sessions/{id}` | End one of my sessions: its access and refresh tokens stop working at once (audited as `auth.session.revoked`); another user's session is `404` |
 | GET | `/organizations` | Organizations of the current user |
-| GET/PATCH | `/organizations/current` | View / update [org:update]. `settings` is a partial update |
+| GET/PATCH | `/organizations/current` | View / update [org:update]. `settings` is a partial update; `allowed_ip_ranges` (up to 100 CIDRs, IPv4 or IPv6; `null` lifts it) confines members' sessions and API keys to those networks - a change that would exclude the caller's own address is `422 would_lock_you_out` |
 | POST | `/organizations/current/automation-freeze` | Tenant kill switch with reason [workflows:disable] |
 | POST | `/organizations/current/deletion` | Request deletion (slug confirmation, 7-day grace) [org:delete] |
 | GET, PATCH, DELETE | `/organizations/current/members[/{id}]` | Members and roles [members:read / members:manage] |

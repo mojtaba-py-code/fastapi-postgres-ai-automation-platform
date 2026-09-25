@@ -110,6 +110,13 @@ residual risk in the threat model. The full record is in
   counts toward lockout (a stolen access token is no password oracle).
 * Breached passwords are refused: 72,985 of 12 characters or more from public
   corpora, including the UK NCSC's 100,000 most used.
+* Organizations can confine access to their own networks (`allowed_ip_ranges`):
+  members' sessions and API keys work only from the listed CIDR ranges. Refusals are
+  counted and alerted (`NetworkAllowlistDenials`), valid sign-ins from outside are
+  audited, administrators cannot lock themselves out, and operators can lift a list
+  (`nexusflow org clear-network-allowlist`).
+* Every Prometheus alert and Grafana query is checked against the metrics and labels
+  the platform exports, so a misspelt rule cannot fail silently.
 * Users list their signed-in sessions (`GET /api/v1/users/me/sessions`) and end any
   one of them at once; API keys cannot manage sessions.
 * A daily job verifies every audit hash chain; a break is alerted
@@ -152,6 +159,10 @@ residual risk in the threat model. The full record is in
   lost its queues when recreated; delayed retries held worker slots; nginx kept a
   recreated API's old address; worker memory recycling exceeded the container
   limit; development certificates depended on the umask.
+* The edge (nginx) refused to start - a timeout directive was set twice for the
+  download routes - so the platform was unreachable; found by the first run of the
+  full stack in CI (R11-1). CI now tests the edge configuration before starting
+  the stack.
 
 ## [Unreleased]
 

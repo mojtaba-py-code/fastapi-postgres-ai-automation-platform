@@ -67,7 +67,9 @@ async def get_principal(
 ) -> Principal:
     if credentials is None or credentials.scheme.lower() != "bearer" or not credentials.credentials:
         raise AuthenticationError("Authentication is required.", code="authentication_required")
-    principal = await state.container.authenticator.authenticate(credentials.credentials.strip())
+    principal = await state.container.authenticator.authenticate(
+        credentials.credentials.strip(), client_ip=getattr(request.state, "client_ip", None)
+    )
     request.state.principal = principal
     structlog.contextvars.bind_contextvars(
         principal_type=principal.type.value,

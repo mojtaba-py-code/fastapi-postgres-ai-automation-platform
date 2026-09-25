@@ -160,6 +160,21 @@ async def kill_status(c: Container, args: argparse.Namespace) -> dict[str, Any]:
     return {"kill_switch": "engaged" if engaged else "released"}
 
 
+# ------------------------------------------------------------ organizations
+
+
+async def org_clear_network_allowlist(c: Container, args: argparse.Namespace) -> dict[str, Any]:
+    org = await c.organizations.clear_network_allowlist(
+        UUID(args.org), reason=args.reason, meta=CLI_META
+    )
+    await _platform_audit(
+        c,
+        AuditAction.ORG_NETWORK_ALLOWLIST_CLEARED,
+        {"org_id": str(org.id), "reason": args.reason},
+    )
+    return {"organization_id": org.id, "allowed_ip_ranges": None}
+
+
 # -------------------------------------------------------- keys and audit
 
 
@@ -298,6 +313,17 @@ def build_parser() -> argparse.ArgumentParser:
     release.add_argument("--reason", required=True)
     release.set_defaults(handler=kill_release)
     kill.add_parser("status").set_defaults(handler=kill_status)
+
+    org = sub.add_parser("org", help="organization recovery").add_subparsers(
+        dest="action", required=True
+    )
+    clear = org.add_parser(
+        "clear-network-allowlist",
+        help="remove an organization's network allowlist (it locked itself out)",
+    )
+    clear.add_argument("--org", required=True, help="organization ID")
+    clear.add_argument("--reason", required=True)
+    clear.set_defaults(handler=org_clear_network_allowlist)
 
     keys = sub.add_parser("keys", help="encryption key maintenance").add_subparsers(
         dest="action", required=True

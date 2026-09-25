@@ -64,6 +64,9 @@ class AuditAction(StrEnum):
     PASSWORD_RESET_REQUESTED = "auth.password.reset_requested"  # noqa: S105 - event name  # nosec B105
     PASSWORD_RESET_COMPLETED = "auth.password.reset_completed"  # noqa: S105 - event name  # nosec B105
     ORG_SWITCHED = "auth.org_switched"
+    # A member's valid sign-in or switch into the organization, refused (or
+    # started without the organization) by its network allowlist.
+    NETWORK_ACCESS_DENIED = "auth.network_denied"
     ACCOUNT_DELETED = "auth.account_deleted"
     # organization & membership
     ORG_CREATED = "org.created"
@@ -71,6 +74,7 @@ class AuditAction(StrEnum):
     ORG_DELETION_REQUESTED = "org.deletion_requested"
     ORG_AUTOMATION_FROZEN = "org.automation_frozen"
     ORG_AUTOMATION_UNFROZEN = "org.automation_unfrozen"
+    ORG_NETWORK_ALLOWLIST_CLEARED = "org.network_allowlist_cleared"  # operator recovery
     MEMBER_INVITED = "member.invited"
     MEMBER_INVITATION_REVOKED = "member.invitation_revoked"
     MEMBER_JOINED = "member.joined"

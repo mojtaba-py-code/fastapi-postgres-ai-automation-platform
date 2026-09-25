@@ -51,6 +51,12 @@ the [threat model](THREAT_MODEL.md).
   third-party images (Compose, CI) are pinned to digests, and CI fails if one
   loses its digest (`make pin-images` refreshes them); Dependabot proposes updates
   weekly.
+* The workflows themselves are audited by zizmor (pedantic persona, with online
+  checks for impostor commits and known-vulnerable actions): no findings. Once
+  the repository is public, dependency review blocks a pull request that adds a
+  vulnerable (moderate or worse) or GPL/AGPL-3.0 dependency, and OpenSSF Scorecard
+  grades the repository weekly; both are skipped on the private repository, like
+  CodeQL.
 * A version tag runs the release workflow: both images are scanned, pushed to
   GHCR with SBOM and provenance attestations, and signed keyless with cosign.
   No release has been published yet.

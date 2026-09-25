@@ -56,6 +56,10 @@ jobs:
           uv run pip-audit -r requirements.lock --require-hashes --disable-pip
       - name: n8n workflow security lint
         run: uv run python scripts/validate_n8n_workflows.py
+      - name: zizmor (GitHub Actions security)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # online audits: impostor commits, known-vulnerable actions
+        run: pipx run --spec zizmor==1.30.1 zizmor --persona pedantic .github/workflows
       - name: Semgrep
         run: |
           pipx run --spec semgrep==1.178.0 semgrep scan --error --metrics=off \
@@ -107,7 +111,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with: {persist-credentials: false}
       - name: Build ${{ matrix.image.name }}
-        run: docker build -f ${{ matrix.image.dockerfile }} -t ${{ matrix.image.name }}:ci .
+        env:  # values reach the shell as data, never as script text
+          DOCKERFILE: ${{ matrix.image.dockerfile }}
+          IMAGE: ${{ matrix.image.name }}
+        run: docker build -f "$DOCKERFILE" -t "$IMAGE:ci" .
       - name: Trivy - fail on fixable HIGH/CRITICAL
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         with:
@@ -147,6 +154,8 @@ jobs:
           sed 's/^NEXUSFLOW_DOMAIN=.*/NEXUSFLOW_DOMAIN=localhost/' .env.example > .env
       - name: Compose file is valid
         run: $COMPOSE config --quiet
+      - name: Edge configuration is valid (nginx -t)
+        run: $COMPOSE run --rm --no-deps --entrypoint nginx nginx -t
       - name: Start the stack
         run: $COMPOSE up -d --build
       - name: Wait until the platform is ready behind the edge

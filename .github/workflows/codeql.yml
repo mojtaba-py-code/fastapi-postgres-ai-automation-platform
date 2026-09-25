@@ -10,8 +10,13 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   analyze:
+    name: CodeQL (Python, security-extended)
     # Code scanning needs a public repository (or GitHub Advanced Security on a
     # private one); until then the job is skipped rather than failing.
     if: ${{ !github.event.repository.private }}
@@ -19,7 +24,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
-      security-events: write
+      security-events: write  # upload the results to code scanning
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with: {persist-credentials: false}

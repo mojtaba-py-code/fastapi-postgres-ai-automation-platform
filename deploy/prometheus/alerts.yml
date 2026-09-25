@@ -91,6 +91,16 @@ groups:
         labels: {severity: critical}
         annotations:
           summary: "An audit hash chain failed verification - see INCIDENT_RESPONSE.md"
+      - alert: NetworkAllowlistDenials
+        # Valid credentials used from outside an organization's allowed networks:
+        # a leaked API key or token, or an allowlist that no longer matches the
+        # organization's egress addresses. The request_failed log lines
+        # (error_code=ip_not_allowed) name the organization, the credential
+        # (user, or API-key prefix) and the address.
+        expr: sum(increase(nexusflow_authorization_denials_total{permission="ip_not_allowed"}[15m])) > 20
+        labels: {severity: warning}
+        annotations:
+          summary: "Requests refused by a network allowlist - leaked credential or stale allowlist"
       - alert: AuthorizationDenialsSpike
         expr: sum(increase(nexusflow_authorization_denials_total[15m])) > 50
         labels: {severity: warning}

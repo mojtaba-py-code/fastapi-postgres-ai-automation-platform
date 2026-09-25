@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -25,10 +26,45 @@ class OrganizationSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     require_mfa: bool = False
+    # Networks (CIDR) the organization's data may be reached from - by its
+    # users' sessions and its API keys. Empty or unset: from anywhere.
+    allowed_ip_ranges: list[str] | None = Field(default=None, max_length=100)
     allowed_source_domains: list[str] | None = Field(default=None, max_length=200)
     ai_external_processing: bool = False
     automation_frozen: bool = False
     default_retention_days: int = Field(default=180, ge=7, le=3650)
+
+    @field_validator("allowed_ip_ranges")
+    @classmethod
+    def _normalize_networks(cls, value: list[str] | None) -> list[str] | None:
+        if not value:
+            return None
+        networks = set()
+        for raw in value:
+            try:
+                if "%" in raw:  # an IPv6 zone names a local interface, never a remote client
+                    raise ValueError(raw)
+                network = ipaddress.ip_network(raw.strip(), strict=False)
+            except ValueError as exc:
+                raise ValueError(f"invalid network: {raw[:60]!r}") from exc
+            if network.prefixlen == 0:
+                raise ValueError("0.0.0.0/0 and ::/0 would allow everyone; leave the list empty")
+            networks.add(network)
+        return [str(n) for n in sorted(networks, key=lambda n: (n.version, n))]
+
+    def allows_ip(self, ip: str | None) -> bool:
+        """Whether ``ip`` may reach the organization's data (fails closed)."""
+        if not self.allowed_ip_ranges:
+            return True
+        if not ip:
+            return False
+        try:
+            address = ipaddress.ip_address(ip)
+        except ValueError:
+            return False
+        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+            address = address.ipv4_mapped
+        return any(address in ipaddress.ip_network(net) for net in self.allowed_ip_ranges)
 
     @field_validator("allowed_source_domains")
     @classmethod

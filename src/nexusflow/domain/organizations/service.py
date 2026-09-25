@@ -117,6 +117,14 @@ class OrganizationService:
                     raise InvalidInputError(
                         "Invalid organization settings.", code="invalid_settings"
                     ) from exc
+                if merged.allowed_ip_ranges != before.allowed_ip_ranges and not merged.allows_ip(
+                    meta.ip
+                ):
+                    # Never let an administrator lock the organization out by mistake.
+                    raise InvalidInputError(
+                        "The network allowlist must include the address you are using.",
+                        code="would_lock_you_out",
+                    )
                 org.update_policy(merged, now)
                 changes["settings"] = {
                     key: value
@@ -158,6 +166,39 @@ class OrganizationService:
                 resource_type="organization",
                 resource_id=org.id,
                 metadata={"reason": clean_text(reason, max_length=200)},
+            )
+            await uow.commit()
+            return org
+
+    async def clear_network_allowlist(
+        self, org_id: UUID, *, reason: str, meta: RequestMeta
+    ) -> Organization:
+        """Operator recovery for an organization locked out by its own allowlist.
+
+        Reachable only from the operator CLI, never from the tenant API. The
+        organization's own audit trail records it, with the reason, so its
+        administrators see exactly what was changed and why.
+        """
+        cleaned = clean_text(reason, max_length=200)
+        if len(cleaned) < 3:
+            raise InvalidInputError("A reason is required.", code="reason_required")
+        now = self._clock.now()
+        async with self._uow_factory(TenantScope.system(org_id)) as uow:
+            org = await uow.organizations.get_for_update(org_id)
+            if org is None:
+                raise NotFoundError()
+            removed = org.policy.allowed_ip_ranges or []
+            org.update_policy(org.policy.model_copy(update={"allowed_ip_ranges": None}), now)
+            org.updated_at = now
+            await self._audit.record(
+                uow.audit,
+                action=AuditAction.ORG_NETWORK_ALLOWLIST_CLEARED,
+                principal=Principal.system(),
+                meta=meta,
+                org_id=org.id,
+                resource_type="organization",
+                resource_id=org.id,
+                metadata={"reason": cleaned, "removed": removed},
             )
             await uow.commit()
             return org

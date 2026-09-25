@@ -157,6 +157,10 @@ class OrganizationSettingsPatch(RequestModel):
     """
 
     require_mfa: bool | None = None
+    # Networks (CIDR, IPv4 or IPv6) the organization may be reached from, by
+    # members and API keys alike; null or [] allows every network. A change
+    # that would exclude the caller's own address is refused.
+    allowed_ip_ranges: list[str] | None = Field(default=None, max_length=100)
     allowed_source_domains: list[str] | None = Field(default=None, max_length=200)
     ai_external_processing: bool | None = None
     default_retention_days: int | None = Field(default=None, ge=7, le=3650)

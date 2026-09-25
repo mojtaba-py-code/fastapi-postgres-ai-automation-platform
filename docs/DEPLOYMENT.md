@@ -26,6 +26,16 @@ limits).
   forwarded headers from. If that range is taken on the host, set another one in
   `NEXUSFLOW_EDGE_SUBNET` (`.env`).
 
+### Client addresses behind another proxy
+
+The API sees the real client address because the edge (nginx) overwrites
+`X-Forwarded-For` with its peer and the API trusts that header only from the edge
+subnet (`NEXUSFLOW_APP__TRUSTED_PROXIES`). If a load balancer or CDN sits in front of
+the edge, configure nginx's `real_ip` module (`set_real_ip_from` with the balancer's
+ranges, `real_ip_header X-Forwarded-For`) so the edge forwards the client's address,
+not the balancer's. Otherwise per-IP rate limits, sign-in risk and organization
+network allowlists all see one address - the balancer's.
+
 ### Egress firewall (required)
 
 The `egress` network is the only one with internet access. It is shared by the

@@ -38,6 +38,7 @@ from nexusflow.domain.audit.model import AuditAction, AuditResult
 from nexusflow.domain.audit.recorder import AuditRecorder
 from nexusflow.domain.authorization.principal import Principal
 from nexusflow.domain.authorization.roles import Role
+from nexusflow.domain.identity.authenticator import network_not_allowed
 from nexusflow.domain.identity.login_risk import (
     LoginAssessment,
     LoginRisk,
@@ -420,7 +421,7 @@ class AuthService:
         mfa_verified: bool,
         prior_failures: int = 0,
     ) -> TokenPair:
-        org_id, role = await self._resolve_login_org(uow, user, requested_org)
+        org_id, role = await self._resolve_login_org(uow, user, requested_org, meta)
         # Before the success resets the failure counters the assessment looks at.
         assessment = await self._assess_login(uow, user, meta, now, prior_failures)
         user.register_successful_login(now)
@@ -461,19 +462,58 @@ class AuthService:
         return replace(tokens, login_risk=assessment.risk)
 
     async def _resolve_login_org(
-        self, uow: UnitOfWork, user: User, requested: UUID | None
+        self, uow: UnitOfWork, user: User, requested: UUID | None, meta: RequestMeta
     ) -> tuple[UUID | None, Role | None]:
+        """The organization the new session opens in.
+
+        An organization's network allowlist is enforced here too: signing in to
+        it by name from elsewhere is refused; when it was only the default, the
+        session starts without an organization - the account stays reachable,
+        the organization's data does not.
+        """
         if requested is not None:
             await uow.switch_tenant(requested)
             membership = await uow.memberships.get(requested, user.id)
             org = await uow.organizations.get(requested) if membership else None
             if membership is None or org is None or not org.is_active:
                 raise AuthenticationError(_INVALID_CREDENTIALS, code="invalid_credentials")
+            if not org.policy.allows_ip(meta.ip):
+                await self._record_network_denied(uow, user.id, membership, meta, via="sign_in")
+                await uow.commit()
+                raise network_not_allowed(f"org={org.id} credential=user:{user.id} ip={meta.ip}")
             return requested, membership.role
         membership = await uow.memberships.first_for_user(user.id)
         if membership is None:
             return None, None
+        await uow.switch_tenant(membership.org_id)
+        org = await uow.organizations.get(membership.org_id)
+        if org is not None and not org.policy.allows_ip(meta.ip):
+            await self._record_network_denied(uow, user.id, membership, meta, via="sign_in")
+            return None, None
         return membership.org_id, membership.role
+
+    async def _record_network_denied(
+        self,
+        uow: UnitOfWork,
+        user_id: UUID,
+        membership: Membership,
+        meta: RequestMeta,
+        *,
+        via: str,
+    ) -> None:
+        """Tell the organization a member's valid credentials came from outside."""
+        await self._audit.record(
+            uow.audit,
+            action=AuditAction.NETWORK_ACCESS_DENIED,
+            principal=Principal.for_user(
+                user_id=user_id, org_id=membership.org_id, role=membership.role, session_id=None
+            ),
+            meta=meta,
+            result=AuditResult.DENIED,
+            resource_type="organization",
+            resource_id=membership.org_id,
+            metadata={"via": via},
+        )
 
     async def _assess_login(
         self,
@@ -723,6 +763,10 @@ class AuthService:
                 raise PermissionDeniedError(
                     "This organization requires multi-factor authentication.", code="mfa_required"
                 )
+            if not org.policy.allows_ip(meta.ip):
+                await self._record_network_denied(uow, user_id, membership, meta, via="switch")
+                await uow.commit()
+                raise network_not_allowed(f"org={org_id} credential=user:{user_id} ip={meta.ip}")
             session.org_id = org_id
             session.last_used_at = now
             await self._audit.record(

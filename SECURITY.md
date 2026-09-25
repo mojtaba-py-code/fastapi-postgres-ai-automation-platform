@@ -36,6 +36,14 @@ Details are in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) and
   a rotated token revokes the whole session family and notifies the user.
 * TOTP MFA rejects code replay and uses single-use recovery codes. Organizations can
   require MFA.
+* Organizations can confine access to their own networks: with an allowlist of CIDR
+  ranges, members' sessions and API keys work only from those addresses (the real
+  client address, taken from forwarding headers only when they come from the trusted
+  edge). A valid sign-in from elsewhere opens no access to the organization (the
+  session starts without it; naming the organization, or switching to it, is
+  refused) and shows in the organization's audit trail. An administrator cannot save
+  a list that excludes their own address, and an operator can lift a list that
+  locked an organization out (audited in the organization's trail, with the reason).
 * Accounts lock out exponentially after repeated failures. Authentication endpoints
   also have fail-closed rate limits per IP and per account.
 * API keys (`nxf_…`) are scoped to a subset of a role's permissions and expire; they

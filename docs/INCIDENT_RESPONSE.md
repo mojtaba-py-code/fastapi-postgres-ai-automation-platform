@@ -58,9 +58,20 @@ network, or a new device or network right after several wrong passwords.
    change revokes all other sessions and increments the token version.
 3. Review the audit trail for the actor: `GET /api/v1/audit?actor_id=...`.
 
-### 3.3 Leaked API key or service token
+### 3.3 Leaked API key or service token (alert `NetworkAllowlistDenials`)
 * API key: `DELETE /api/v1/api-keys/{id}` (immediate). Review `last_used_at` and the
   audit trail by `actor_type=api_key`.
+* `NetworkAllowlistDenials` means valid credentials are being used from outside an
+  organization's allowed networks. The `request_failed` log lines with
+  `error_code=ip_not_allowed` name the organization, the credential (`user:<id>` or
+  `api_key:<prefix>`) and the address; the organization's audit trail shows refused
+  sign-ins (`auth.network_denied`). Revoke the key or the user's sessions if the
+  address is not the customer's; if it is (a new office or ISP), the customer updates
+  the list.
+* An organization that locked itself out (its egress address changed):
+  `nexusflow org clear-network-allowlist --org <id> --reason "<ticket>"` lifts the
+  list after the customer's identity has been verified out of band. It is recorded in
+  the organization's audit trail and the platform chain.
 * n8n service token: `nexusflow service-account rotate --workflow-key <key>`, then
   update the n8n credential. `disable` first if the token is being actively abused.
 

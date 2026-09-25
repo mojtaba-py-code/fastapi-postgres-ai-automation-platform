@@ -1,0 +1,56 @@
+name: Supply chain
+
+# Dependency review blocks a pull request that adds a dependency with a known
+# vulnerability (moderate or worse) or an incompatible licence. OpenSSF
+# Scorecard grades the repository's supply-chain practices every week and on
+# every push to main. Both need a public repository (or GitHub Advanced
+# Security); on a private one they are skipped rather than failing.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "37 5 * * 2"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supply-chain-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependency-review:
+    name: Dependency review
+    if: ${{ github.event_name == 'pull_request' && !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with: {persist-credentials: false}
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294  # v5.0.0
+        with:
+          fail-on-severity: moderate
+          deny-licenses: AGPL-3.0-only, AGPL-3.0-or-later, GPL-3.0-only, GPL-3.0-or-later
+
+  scorecard:
+    name: OpenSSF Scorecard
+    if: ${{ github.event_name != 'pull_request' && !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write  # upload the results to code scanning
+      id-token: write  # publish the results to the OpenSSF API (signed with OIDC)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with: {persist-credentials: false}
+      - uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc  # v2.4.4
+        with:
+          results_file: scorecard.sarif
+          results_format: sarif
+          publish_results: true
+      - uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
+        with:
+          sarif_file: scorecard.sarif

@@ -31,6 +31,7 @@ for an independent assessment:
 | R8 | Test-driven review: hostile uploads and rate limits | Hand-built hostile CSV/XLSX files (zip bombs, traversal names, encrypted parts, macros, XXE, entity expansion, sparse sheets, invalid UTF-8) through intake, the parser and the API; every rate-limit scope, its budget and its failure policy - 143 tests | 6 defects (strict failing tests first), 3 gaps closed |
 | R9 | Second completion pass | Reports at scale, backup and restore, request correlation, sign-in risk | 6 findings |
 | R10 | Adversarial review of the day's new code | Change analytics, sign-in risk, password change, request correlation, rate limiting, uploads, operations and CI workflows | 1 finding |
+| R11 | First run of the full stack (CI) | The Compose stack built and started behind the TLS edge on a CI runner | 1 High (startup) |
 
 In R4 and R5, every defect was first committed as a *strict expected failure*
 (the test fails because of the bug), then fixed, which turned the test into a
@@ -38,7 +39,7 @@ permanent regression test.
 
 ## 2. Findings and resolutions
 
-Severities in R1 and R2 are the reviewers'; in R4-R10 they were assigned when the defect was fixed. "Test" names the regression test that pins the fix.
+Severities in R1 and R2 are the reviewers'; in R4-R11 they were assigned when the defect was fixed. "Test" names the regression test that pins the fix.
 
 ### R1 - adversarial code review
 
@@ -192,11 +193,23 @@ untrusted expressions in `run:`), nginx and the image pinning script. Noted,
 not a defect: the request ID deliberately stops at the sandbox-to-gateway hop -
 the internal API does not trust request IDs from the sandbox.
 
+### R11 - first run of the full stack
+
+The end-to-end CI job built both images and started the whole stack for the
+first time. R7 had reviewed the startup statically - and missed this:
+
+| # | Severity | Finding | Resolution | Evidence |
+|---|---|---|---|---|
+| R11-1 | High | nginx refused to start (`"proxy_read_timeout" directive is duplicate`): the export and report-download location raised the read timeout and then included the shared proxy snippet, which set it again. The edge never served a request - the platform was unreachable | The upstream timeouts are set once per server block; the download location overrides only the read timeout. CI now runs `nginx -t` before starting the stack, and a unit test parses the configuration (snippets included) for repeated single-value directives - it fails on the old file | `tests/unit/test_edge_config.py`, `.github/workflows/ci.yml` |
+
+The lesson is R7's own caveat made concrete: a static review of a deployment is
+no substitute for starting it.
+
 ## 3. Checklist (specification section 39)
 
 | Item | How it is addressed | Evidence |
 |---|---|---|
-| Authentication | Argon2id; EdDSA access tokens (10 min) with key IDs; rotating refresh tokens with reuse detection; TOTP with replay protection; lockout; API keys capped by the creator's membership | `tests/integration/test_identity_flows.py`, `tests/security/` |
+| Authentication | Argon2id; breached passwords refused; EdDSA access tokens (10 min) with key IDs; rotating refresh tokens with reuse detection; TOTP with replay protection; lockout; sign-in risk; session list and revocation; API keys capped by the creator's membership; per-organization network allowlists for sessions and API keys | `tests/integration/test_identity_flows.py`, `tests/security/` (incl. `test_network_allowlist.py`) |
 | Authorization | Permission checks at the route and in every service method; roles and scoped keys | `test_api_security.py`, `test_idor_sweep.py` |
 | Input validation | Strict request models (`extra="forbid"`), bounded sizes, lengths, counts and depth; typed dataset schemas | `test_api_security.py`, `test_stages.py` |
 | Output encoding | CSV formula neutralisation, XLSX string cells, XML-escaped PDF text, JSON only in APIs | `test_files_and_reports.py` |
@@ -213,7 +226,7 @@ the internal API does not trust request IDs from the sandbox.
 | Replay attacks | Webhook timestamp window plus nonce plus unique row; refresh-token reuse detection; TOTP step replay | `test_business_api.py`, identity tests |
 | Idempotency | `Idempotency-Key` on commands; idempotent workers; failure ledger idempotent per execution | `test_business_api.py`, `test_failure_ledger.py` |
 | Error leakage | Uniform error schema; internals only in logs; validation errors never echo input | `test_api_security.py` |
-| Dependency vulnerabilities | Hash-locked `uv.lock`, pip-audit, Trivy, CodeQL, Semgrep, Gitleaks, Dependabot | CI |
+| Dependency vulnerabilities | Hash-locked `uv.lock`, pip-audit, Trivy, CodeQL, Semgrep, Gitleaks, Dependabot; images and actions pinned by digest and SHA (checked in CI); zizmor audits the workflows (pedantic, with online checks for impostor commits and vulnerable actions); dependency review and OpenSSF Scorecard once the repository is public | CI |
 
 ## 4. What remains
 
