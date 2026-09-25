@@ -17,6 +17,25 @@ import httpx2
 from nexusflow.core.errors import PayloadTooLargeError, PermanentError, TransientError
 
 _TICKET_HEADER = "X-Sandbox-Ticket"
+# Answers that make a job moot rather than failed - there is nothing to report:
+# a stale ticket (401), a run that finished or moved on, or an attempt whose
+# result is already in (409).
+MOOT_CODES = frozenset({"invalid_ticket", "run_closed", "no_input"})
+
+
+async def _error_code(response: httpx2.Response) -> str | None:
+    """The platform's error code from a (small) error answer, if it has one."""
+    body = b""
+    async for chunk in response.aiter_bytes():
+        body += chunk
+        if len(body) > 4096:  # not one of the platform's error answers
+            return None
+    try:
+        document = json.loads(body)
+    except ValueError:
+        return None
+    code = document.get("error") if isinstance(document, dict) else None
+    return code if isinstance(code, str) else None
 
 
 class SandboxGatewayClient:
@@ -40,17 +59,20 @@ class SandboxGatewayClient:
         return f"/internal/v1/sandbox/orgs/{org_id}/runs/{run_id}/{leaf}"
 
     @staticmethod
-    def _raise_for(response: httpx2.Response) -> None:
-        if response.status_code >= 500 or response.status_code == 429:
-            raise TransientError(
-                code="gateway_unavailable", internal_detail=f"HTTP {response.status_code}"
-            )
-        if response.status_code == 409:
-            raise PermanentError(code="run_closed")  # retried/finished elsewhere: stop quietly
-        if response.status_code >= 400:
-            raise PermanentError(
-                code="gateway_rejected", internal_detail=f"HTTP {response.status_code}"
-            )
+    async def _raise_for(response: httpx2.Response) -> None:
+        status = response.status_code
+        if status >= 500 or status == 429:
+            raise TransientError(code="gateway_unavailable", internal_detail=f"HTTP {status}")
+        if status == 401:
+            # A stale ticket: the run was handed to a new attempt meanwhile.
+            raise PermanentError(code="invalid_ticket")
+        if status == 409:
+            code = await _error_code(response)
+            raise PermanentError(code=code if code in MOOT_CODES else "run_closed")
+        if status >= 400:
+            # The result itself was refused (too large, malformed...): a failure.
+            detail = f"HTTP {status} {await _error_code(response)}"
+            raise PermanentError(code="gateway_rejected", internal_detail=detail)
 
     async def download_input(
         self, org_id: UUID, run_id: UUID, *, ticket: str, destination: Path, max_bytes: int
@@ -60,7 +82,7 @@ class SandboxGatewayClient:
             async with self._client.stream(
                 "GET", self._path(org_id, run_id, "input"), headers={_TICKET_HEADER: ticket}
             ) as response:
-                self._raise_for(response)
+                await self._raise_for(response)
                 received = 0
                 with destination.open("wb") as handle:
                     async for chunk in response.aiter_bytes():
@@ -91,18 +113,24 @@ class SandboxGatewayClient:
             if error_code is not None
             else {"items": items or [], "truncated": truncated, "detail": detail or {}}
         )
-        payload = json.dumps(body, ensure_ascii=False, default=str, separators=(",", ":")).encode()
+        try:
+            # Standard JSON only: NaN and Infinity would be refused by the gateway.
+            text = json.dumps(
+                body, ensure_ascii=False, allow_nan=False, default=str, separators=(",", ":")
+            )
+        except ValueError as exc:
+            raise PermanentError(code="invalid_result", internal_detail=str(exc)[:200]) from exc
         try:
             response = await self._client.post(
                 self._path(org_id, run_id, "result"),
-                content=payload,
+                content=text.encode(),
                 headers={_TICKET_HEADER: ticket, "Content-Type": "application/json"},
             )
         except httpx2.HTTPError as exc:
             raise TransientError(
                 code="gateway_unreachable", internal_detail=type(exc).__name__
             ) from exc
-        self._raise_for(response)
+        await self._raise_for(response)
 
     async def aclose(self) -> None:
         await self._client.aclose()

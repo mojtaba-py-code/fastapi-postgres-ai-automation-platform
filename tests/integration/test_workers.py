@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import time
 from types import SimpleNamespace
 from typing import Any
@@ -39,6 +40,7 @@ from nexusflow.apps.workers.sandbox import UploadJob, parse_uploaded_file
 from nexusflow.bootstrap.container import Container
 from nexusflow.bootstrap.sandbox import SandboxComponents, build_sandbox
 from nexusflow.core.config import SandboxSettings
+from nexusflow.core.errors import PermanentError, TransientError
 from nexusflow.domain.shared.unit_of_work import TenantScope
 from nexusflow.domain.webhooks.signatures import build_signature_header
 from nexusflow.infrastructure.messaging.celery_app import (
@@ -283,7 +285,7 @@ class TestSandboxBoundary:
         accepted = await internal_api.post(_result_url(org_id, run_id), json=body, headers=headers)
         assert accepted.status_code == 202, accepted.text
 
-    async def test_upload_input_is_single_use_and_a_sandbox_failure_frees_the_file(
+    async def test_upload_input_is_the_attempts_and_a_sandbox_failure_frees_the_file(
         self, api: httpx2.AsyncClient, internal_api: httpx2.AsyncClient, container: Container
     ) -> None:
         owner = await signup(api)
@@ -304,20 +306,58 @@ class TestSandboxBoundary:
 
         downloaded = await internal_api.get(input_url, headers=headers)
         assert (downloaded.status_code, downloaded.content) == (200, csv_bytes)
-        # A copied ticket is worthless once the owning worker has its input.
-        replayed = await internal_api.get(input_url, headers=headers)
-        assert (replayed.status_code, replayed.json()["error"]) == (409, "no_input")
+        # The attempt's job, retried, needs its input again (until its result is in).
+        again = await internal_api.get(input_url, headers=headers)
+        assert (again.status_code, again.content) == (200, csv_bytes)
 
         failed = await internal_api.post(
             _result_url(org_id, run_id), json={"error_code": "parse_failed"}, headers=headers
         )
         assert failed.status_code == 202
+        closed = await internal_api.get(input_url, headers=headers)
+        assert (closed.status_code, closed.json()["error"]) == (409, "run_closed")
         [upload] = (await owner.get(uploads_url)).json()["items"]
         assert (upload["status"], upload["rejection_reason"]) == ("failed", "parse_failed")
         run = (await owner.get(f"/api/v1/runs/{run_id}")).json()
         assert (run["status"], run["error_code"]) == ("failed", "parse_failed")
         retry = await owner.post(uploads_url, files=csv_file)
         assert retry.status_code == 201, retry.text  # the failed file may be uploaded again
+
+    async def test_an_upload_job_retried_after_its_download_completes_the_run(
+        self,
+        api: httpx2.AsyncClient,
+        internal_app: FastAPI,
+        container: Container,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        owner, source_id, dataset_id = await _upload_source(api)
+        csv_bytes = b"SKU,Title,Price,Email\r\nB-1,Bolt,1.25,a@example.com\r\n"
+        org_id, run_id, job = await _upload_job(owner, container, source_id, csv_bytes)
+        # The gateway is busy with another large result: the first attempt of the
+        # job downloads and parses the file, then its submission gets a 503.
+        monkeypatch.setattr(sandbox_gateway, "_SMALL_BODY", 0)
+        monkeypatch.setattr(sandbox_gateway, "_SLOT_WAIT_SECONDS", 0.05)
+        sandbox = _sandbox(internal_app)
+        try:
+            await sandbox_gateway._LARGE_RESULTS.acquire()
+            try:
+                with pytest.raises(TransientError):
+                    await parse_uploaded_file(sandbox, job)
+            finally:
+                sandbox_gateway._LARGE_RESULTS.release()
+            await parse_uploaded_file(sandbox, job)  # the Celery retry: same job, same ticket
+            # Its result is in: the input is gone for that ticket, and the job is moot.
+            with pytest.raises(PermanentError) as moot:
+                await parse_uploaded_file(sandbox, job)
+            assert moot.value.code == "no_input"
+        finally:
+            await sandbox.aclose()
+
+        await collect_dispatch(_deps(container)[0], RunMessage(org_id=org_id, run_id=run_id))
+        run = (await owner.get(f"/api/v1/runs/{run_id}")).json()
+        assert run["status"] == "succeeded", run
+        records = (await owner.get(f"/api/v1/datasets/{dataset_id}/records")).json()["items"]
+        assert [r["record_key"] for r in records] == ["B-1"]
 
     async def test_an_xlsx_upload_is_parsed_end_to_end(
         self, api: httpx2.AsyncClient, internal_app: FastAPI, container: Container
@@ -342,6 +382,52 @@ class TestSandboxBoundary:
         assert (await owner.get(f"/api/v1/runs/{run_id}")).json()["status"] == "succeeded"
         records = (await owner.get(f"/api/v1/datasets/{dataset_id}/records")).json()["items"]
         assert [(r["record_key"], r["data"]["title"]) for r in records] == [("X-1", "Crate")]
+
+    async def test_items_holding_braces_in_their_text_are_accepted(
+        self, api: httpx2.AsyncClient, internal_api: httpx2.AsyncClient, container: Container
+    ) -> None:
+        owner = await signup(api)
+        org_id, run_id, _ = await _website_run(owner)
+        deps, dispatcher = _deps(container)
+        await collect_dispatch(deps, RunMessage(org_id=org_id, run_id=run_id))
+        headers = {"X-Sandbox-Ticket": dispatcher.sent[0][1]["ticket"]}
+        cap = container.settings.scraping.max_items_per_run * 4 + 16  # objects in a result
+        # Flat items whose text holds more "{" than the result may hold objects.
+        items = [{"sku": f"S-{n}", "title": "{" * 40} for n in range(cap // 40 + 1)]
+        accepted = await internal_api.post(
+            _result_url(org_id, run_id), json={"items": items}, headers=headers
+        )
+        assert accepted.status_code == 202, accepted.text
+
+        owner = await signup(api)
+        org_id, run_id, _ = await _website_run(owner)
+        await collect_dispatch(deps, RunMessage(org_id=org_id, run_id=run_id))
+        headers = {"X-Sandbox-Ticket": dispatcher.sent[-1][1]["ticket"]}
+        objects = {"items": [{"sku": "S-1"}], "detail": {"pad": [{} for _ in range(cap)]}}
+        refused = await internal_api.post(
+            _result_url(org_id, run_id), json=objects, headers=headers
+        )
+        assert (refused.status_code, refused.json()["error"]) == (422, "invalid_result")
+
+    async def test_a_non_finite_number_never_leaves_the_sandbox(
+        self, api: httpx2.AsyncClient, internal_app: FastAPI, container: Container
+    ) -> None:
+        owner = await signup(api)
+        org_id, run_id, _ = await _website_run(owner)
+        deps, dispatcher = _deps(container)
+        await collect_dispatch(deps, RunMessage(org_id=org_id, run_id=run_id))
+        sandbox = _sandbox(internal_app)
+        try:
+            with pytest.raises(PermanentError) as refused:
+                await sandbox.gateway.submit(
+                    org_id,
+                    run_id,
+                    ticket=dispatcher.sent[0][1]["ticket"],
+                    items=[{"sku": math.inf}],
+                )
+        finally:
+            await sandbox.aclose()
+        assert refused.value.code == "invalid_result"  # reported as the run's failure
 
     async def test_upload_is_parsed_by_the_sandbox_via_its_ticket(
         self,

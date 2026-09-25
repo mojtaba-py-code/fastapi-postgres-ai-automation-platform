@@ -11,10 +11,17 @@ import pytest
 import structlog
 
 from nexusflow.apps.workers import messages as m
+from nexusflow.apps.workers import sandbox
 from nexusflow.apps.workers import tasks as tasks_module
 from nexusflow.apps.workers.runtime import ProcessRuntime
 from nexusflow.apps.workers.tasks import TaskSpec, _execute
-from nexusflow.core.errors import InvalidInputError, NotFoundError, TransientError
+from nexusflow.core.errors import (
+    InvalidInputError,
+    NotFoundError,
+    PayloadTooLargeError,
+    PermanentError,
+    TransientError,
+)
 from nexusflow.domain.shared.outbox import TaskName
 
 
@@ -178,6 +185,72 @@ def test_periodic_failures_do_not_create_dead_letters() -> None:
     finally:
         runtime.close()
     assert letters.recorded == []
+
+
+@dataclass
+class FakeGateway:
+    reports: list[str | None] = field(default_factory=list)
+
+    async def submit(
+        self, org_id: Any, run_id: Any, *, ticket: str, error_code: str | None = None, **_: Any
+    ) -> None:
+        self.reports.append(error_code)
+
+
+def _sandbox_runtime() -> tuple[ProcessRuntime[Any], FakeGateway]:
+    gateway = FakeGateway()
+
+    async def close(_: Any) -> None:
+        return None
+
+    return ProcessRuntime(lambda: SimpleNamespace(gateway=gateway), close), gateway
+
+
+def _upload_job() -> dict[str, Any]:
+    return {
+        "org_id": str(uuid4()),
+        "run_id": str(uuid4()),
+        "ticket": "a" * 64,
+        "max_items": 10,
+        "config": {"kind": "file_upload", "format": "csv", "column_mapping": {"sku": "SKU"}},
+    }
+
+
+@pytest.mark.parametrize(
+    ("error", "reported"),
+    [
+        # The gateway refused the result (413, 422): the run fails with that reason.
+        pytest.param(PermanentError(code="gateway_rejected"), ["gateway_rejected"], id="rejected"),
+        pytest.param(PermanentError(code="invalid_result"), ["invalid_result"], id="unsendable"),
+        pytest.param(PayloadTooLargeError(), ["payload_too_large"], id="input-too-large"),
+        # Moot: the run finished or moved on, or this attempt's result is in.
+        pytest.param(PermanentError(code="run_closed"), [], id="run-closed"),
+        pytest.param(PermanentError(code="no_input"), [], id="result-in"),
+        pytest.param(PermanentError(code="invalid_ticket"), [], id="new-attempt"),
+    ],
+)
+def test_a_permanent_sandbox_failure_fails_the_run_unless_it_is_moot(
+    error: Exception, reported: list[str]
+) -> None:
+    runtime, gateway = _sandbox_runtime()
+
+    async def handler(parts: Any, job: Any) -> None:
+        raise error
+
+    task = FakeTask(0)
+    try:
+        sandbox._execute_job(
+            task,
+            runtime,
+            "nexusflow.sandbox.parse_upload",
+            sandbox.UploadJob,
+            handler,
+            _upload_job(),
+        )
+    finally:
+        runtime.close()
+    assert gateway.reports == reported
+    assert task.countdowns == []  # not retried: it would fail the same way
 
 
 class RecordingLog:

@@ -211,7 +211,7 @@ class CollectionService:
         if isinstance(config, FileUploadConfig):
             upload = await uow.data.uploads.get_by_run(run.org_id, run.id)
             if upload is not None and upload.status is UploadStatus.PROCESSING:
-                # A new attempt (new ticket) gets a new single-use download.
+                # A new attempt (new ticket) starts from a pending input again.
                 upload.status = UploadStatus.ACCEPTED
         await uow.commit()
         if isinstance(config, WebsiteConfig):
@@ -296,16 +296,19 @@ class CollectionService:
         return self._max_items, None
 
     async def sandbox_input(self, *, org_id: UUID, run_id: UUID, ticket: str) -> SandboxInput:
-        """The uploaded file behind an upload run - for the ticket holder, once.
+        """The uploaded file behind an upload run - for this attempt's ticket only.
 
-        The download moves the upload to ``PROCESSING`` under the run's row
-        lock, so a copied ticket is worthless once the worker that owns the job
-        has fetched its input (a retry issues a new ticket and resets it).
+        The first download moves the upload to ``PROCESSING`` under the run's
+        row lock. The attempt's own job may fetch it again - its retry after a
+        busy gateway or a lost answer needs the file - until its result is in
+        (``PROCESSED``): from then on the ticket gets nothing (``no_input``),
+        and a new attempt issues a new ticket that invalidates this one.
         """
         async with self._uow_factory(TenantScope.system(org_id)) as uow:
             run = self._check_ticket(await uow.data.runs.get_for_update(org_id, run_id), ticket)
             upload = await uow.data.uploads.get_by_run(org_id, run.id)
-            if upload is None or upload.status is not UploadStatus.ACCEPTED:
+            pending = (UploadStatus.ACCEPTED, UploadStatus.PROCESSING)
+            if upload is None or upload.status not in pending:
                 raise ConflictError("No pending upload for this run.", code="no_input")
             upload.status = UploadStatus.PROCESSING
             await uow.commit()

@@ -32,7 +32,12 @@ from nexusflow.apps.workers.runtime import ProcessRuntime
 from nexusflow.bootstrap.sandbox import SandboxComponents, build_sandbox
 from nexusflow.core.config import SandboxSettings
 from nexusflow.core.correlation import CORRELATION_KWARG, valid_correlation_id
-from nexusflow.core.errors import NexusFlowError, PermanentError, TransientError
+from nexusflow.core.errors import (
+    NexusFlowError,
+    PayloadTooLargeError,
+    PermanentError,
+    TransientError,
+)
 from nexusflow.core.resilience import backoff_delay
 from nexusflow.domain.sources.model import FileUploadConfig, WebsiteConfig
 from nexusflow.domain.uploads.model import inspect_file
@@ -44,6 +49,7 @@ from nexusflow.infrastructure.messaging.celery_app import (
 )
 from nexusflow.infrastructure.observability.logging import get_logger
 from nexusflow.infrastructure.observability.metrics import TASK_DURATION, TASKS
+from nexusflow.infrastructure.sandbox.gateway import MOOT_CODES
 
 _log = get_logger("nexusflow.sandbox")
 _RETRIES = 3
@@ -159,11 +165,24 @@ def _execute_job[J: _Job](
             return
         try:
             runtime.run(lambda parts: handler(parts, job))
-        except PermanentError as exc:
-            result = "moot" if exc.code == "run_closed" else "failed"
+        except (PermanentError, PayloadTooLargeError) as exc:
+            if exc.code in MOOT_CODES:  # the run finished or moved on: nothing to report
+                result = "moot"
+                _log.info(
+                    "sandbox_job_moot", task=name, error_code=exc.code, run_id=str(job.run_id)
+                )
+                return
+            # E.g. the gateway refused the result (too large, malformed): the run
+            # fails now, with the reason, instead of waiting for the reaper.
+            result = "failed"
             _log.warning(
-                "sandbox_job_stopped", task=name, error_code=exc.code, run_id=str(job.run_id)
+                "sandbox_job_stopped",
+                task=name,
+                error_code=exc.code,
+                detail=exc.internal_detail,
+                run_id=str(job.run_id),
             )
+            _report_failure(runtime, name, job, exc.code)
         except Exception as exc:
             if task.request.retries < _RETRIES:
                 result = "retry"
@@ -176,17 +195,24 @@ def _execute_job[J: _Job](
             _log.error(
                 "sandbox_job_failed", task=name, error=type(exc).__name__, run_id=str(job.run_id)
             )
-            try:
-                runtime.run(
-                    lambda parts: parts.gateway.submit(
-                        job.org_id, job.run_id, ticket=job.ticket, error_code=code
-                    )
-                )
-            except Exception as report_error:  # noqa: BLE001 - the reaper will recover the run
-                _log.error("sandbox_report_failed", task=name, error=type(report_error).__name__)
+            _report_failure(runtime, name, job, code)
     finally:
         TASKS.labels(task=name, result=result).inc()
         TASK_DURATION.labels(task=name).observe(time.monotonic() - started)
+
+
+def _report_failure(
+    runtime: ProcessRuntime[SandboxComponents], name: str, job: _Job, code: str
+) -> None:
+    """Fail the run through the gateway (best effort: the reaper recovers it otherwise)."""
+    try:
+        runtime.run(
+            lambda parts: parts.gateway.submit(
+                job.org_id, job.run_id, ticket=job.ticket, error_code=code
+            )
+        )
+    except Exception as report_error:  # noqa: BLE001 - the reaper will recover the run
+        _log.error("sandbox_report_failed", task=name, error=type(report_error).__name__)
 
 
 def create_sandbox_app(

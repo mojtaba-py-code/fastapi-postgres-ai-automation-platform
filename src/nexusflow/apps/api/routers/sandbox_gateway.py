@@ -2,21 +2,23 @@
 
 The sandbox worker has no database, storage or secrets. For each run it holds
 a ticket (``X-Sandbox-Ticket``) bound to ``(org, run, attempt)``; with it, it
-can download that run's input file once and submit that run's results -
-nothing else. See :mod:`nexusflow.domain.pipeline.collection`.
+can download that run's input file until the attempt's result is in, and
+submit that run's results - nothing else. See
+:mod:`nexusflow.domain.pipeline.collection`.
 
 Result submissions are verified *before* the body is read: an invalid ticket
 costs one indexed lookup, never a large parse. Accepted bodies are capped per
-run, pre-checked for their object count and parsed off the event loop - large
+run, bounded in their number of objects and parsed off the event loop - large
 ones one at a time, so even valid tickets cannot exhaust the process memory.
 """
 
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Annotated, Any
@@ -61,12 +63,35 @@ def _reject_constant(name: str) -> Any:
     raise ValueError(f"invalid JSON constant {name}")  # NaN/Infinity are not JSON
 
 
+class _TooManyObjectsError(Exception):
+    pass
+
+
+def _counting_objects(limit: int) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    """An ``object_hook`` that stops the parse once more than ``limit`` objects exist."""
+    built = itertools.count(1)
+
+    def hook(document: dict[str, Any]) -> dict[str, Any]:
+        if next(built) > limit:
+            raise _TooManyObjectsError
+        return document
+
+    return hook
+
+
 def _parse(body: bytes | bytearray, max_items: int) -> Any:
-    # A C-speed upper bound on the number of objects, before building any.
-    if body.count(b"{") > max_items * 4 + 16:
-        raise InvalidInputError("The result holds too many objects.", code="invalid_result")
+    limit = max_items * 4 + 16
+    # Every object starts with "{", so a C-speed count bounds them before any is
+    # built. Braces inside strings count too, though (extracted text may hold
+    # thousands): above the bound, the objects are counted exactly as they are
+    # built instead, and the parse stops at the limit.
+    hook = _counting_objects(limit) if body.count(b"{") > limit else None
     try:
-        return json.loads(body, parse_constant=_reject_constant)
+        return json.loads(body, parse_constant=_reject_constant, object_hook=hook)
+    except _TooManyObjectsError as exc:
+        raise InvalidInputError(
+            "The result holds too many objects.", code="invalid_result"
+        ) from exc
     except RecursionError as exc:  # CPython's parser bounds nesting depth itself
         raise InvalidInputError("The result is nested too deeply.", code="json_too_deep") from exc
     except (ValueError, UnicodeDecodeError) as exc:
@@ -105,7 +130,7 @@ async def _large_result_slot() -> AsyncIterator[None]:
 @router.get(
     "/orgs/{org_id}/runs/{run_id}/input",
     response_class=StreamingResponse,
-    summary="Download the uploaded file of an upload run (once per attempt, ticket holder only)",
+    summary="Download the uploaded file of an upload run (the attempt's ticket, until its result)",
 )
 async def download_input(
     org_id: UUID, run_id: UUID, ticket: Ticket, container: ContainerDep
