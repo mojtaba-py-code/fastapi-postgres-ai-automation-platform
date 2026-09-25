@@ -8,6 +8,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
+    DateTime,
     and_,
     delete,
     func,
@@ -173,6 +174,17 @@ class SqlCollectionRunRepository(TenantRepository[CollectionRun]):
         )
         return list((await self._s.execute(statement)).scalars().all())
 
+    async def latest_collected_at(self, org_id: UUID, source_id: UUID) -> datetime | None:
+        runs = d.collection_runs
+        collected = runs.c.stats["collected_at"].astext.cast(DateTime(timezone=True))
+        statement = select(func.max(collected)).where(
+            runs.c.org_id == org_id,
+            runs.c.source_id == source_id,
+            runs.c.status == RunStatus.SUCCEEDED.value,
+        )
+        latest: datetime | None = (await self._s.execute(statement)).scalar_one_or_none()
+        return latest
+
 
 class SqlRunPayloadRepository:
     """Collected items staged between receipt and ingestion - sealed as a whole:
@@ -299,13 +311,15 @@ class SqlRecordRepository:
         self._s.add_all(versions)
         await self._s.flush()
 
-    async def touch(self, record_ids: Sequence[UUID], *, run_id: UUID, now: datetime) -> None:
+    async def touch(
+        self, record_ids: Sequence[UUID], *, run_id: UUID, source_id: UUID, now: datetime
+    ) -> None:
         if not record_ids:
             return
         await self._s.execute(
             update(d.records)
             .where(d.records.c.id.in_(list(record_ids)))
-            .values(last_seen_at=now, last_run_id=run_id)
+            .values(last_seen_at=now, last_run_id=run_id, source_id=source_id)
             .execution_options(synchronize_session=False)
         )
 

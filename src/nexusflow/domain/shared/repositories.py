@@ -73,6 +73,11 @@ class CollectionRunRepository(TenantRepository[CollectionRun], Protocol):
         self, org_id: UUID, workflow_run_id: UUID
     ) -> list[CollectionRun]: ...
 
+    async def latest_collected_at(self, org_id: UUID, source_id: UUID) -> datetime | None:
+        """When the newest data applied from the source was collected (the
+        ``collected_at`` of its succeeded runs), if any run recorded it."""
+        ...
+
 
 class RunPayloadRepository(Protocol):
     async def put(
@@ -97,7 +102,12 @@ class RecordRepository(Protocol):
 
     async def add_versions(self, versions: Sequence[RecordVersion]) -> None: ...
 
-    async def touch(self, record_ids: Sequence[UUID], *, run_id: UUID, now: datetime) -> None: ...
+    async def touch(
+        self, record_ids: Sequence[UUID], *, run_id: UUID, source_id: UUID, now: datetime
+    ) -> None:
+        """Mark unchanged records as seen by this run - and owned by its source,
+        which alone infers their deletion from its full snapshots."""
+        ...
 
     async def missing_from_run(
         self, dataset_id: UUID, source_id: UUID, run_id: UUID, *, limit: int
