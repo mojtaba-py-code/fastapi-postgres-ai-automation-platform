@@ -32,6 +32,8 @@ for an independent assessment:
 | R9 | Second completion pass | Reports at scale, backup and restore, request correlation, sign-in risk | 6 findings |
 | R10 | Adversarial review of the day's new code | Change analytics, sign-in risk, password change, request correlation, rate limiting, uploads, operations and CI workflows | 1 finding |
 | R11 | First run of the full stack (CI) | The Compose stack built and started behind the TLS edge on a CI runner; the end-to-end suite, backup and restore, and a passive DAST scan of every API operation | 1 High, 2 Medium |
+| R12 | Six parallel reviews | Identity and access; pipeline and data lifecycle; workers, sandbox and browser; alerting, AI, notifications and reports; the database (measured on PostgreSQL); the deployment (checked against upstream sources) | 53 unique findings: 5 High, 28 Medium, 20 Low |
+| R13 | What fixing R12 surfaced | The first weekly scan of the third-party images, CI coverage, DAST, and the accepted sign-up enumeration | 1 High, 3 Medium, 1 Low |
 
 In R4 and R5, every defect was first committed as a *strict expected failure*
 (the test fails because of the bug), then fixed, which turned the test into a
@@ -39,7 +41,7 @@ permanent regression test.
 
 ## 2. Findings and resolutions
 
-Severities in R1 and R2 are the reviewers'; in R4-R11 they were assigned when the defect was fixed. "Test" names the regression test that pins the fix.
+Severities in R1, R2 and R12 are the reviewers'; in R4-R11 and R13 they were assigned when the defect was fixed. "Test" names the regression test that pins the fix.
 
 ### R1 - adversarial code review
 
@@ -65,7 +67,7 @@ Severities in R1 and R2 are the reviewers'; in R4-R11 they were assigned when th
 | R2-3 | Medium | Argon2 hashing under a row lock: a login flood could exhaust the pool | Three phases: read, verify outside the transaction, apply under `FOR UPDATE` with re-checks | `tests/security/test_login_locking.py` |
 | R2-4 | Medium | RLS context can be set by the application role; no all-tables RLS test | Limitation documented (THREAT_MODEL 4.7); a test enumerates every table and requires forced RLS with a policy | `test_database_security.py` |
 | R2-5 | Medium | Supply chain: actions on mutable tags; browser image not scanned | Actions pinned to commit SHAs; both images scanned (Trivy) with SBOMs; n8n pinned to a current release | CI |
-| R2-6 | Low | Sign-up reveals whether an e-mail is registered | **Accepted**: fail-closed rate limit (10/hour/IP); disable sign-up after bootstrapping | - |
+| R2-6 | Low | Sign-up reveals whether an e-mail is registered | Accepted at the time (fail-closed rate limit); **resolved** by R13-1: sign-up proves the address first and answers alike for every address | `tests/integration/test_signup.py` |
 | - | - | Found while fixing R2-1: account deletion always failed (audit tenant mismatch) | Fixed | `test_api_key_lifecycle.py` |
 
 ### R4 - test-driven review of the adapters
@@ -208,11 +210,120 @@ passive DAST scan. R7 had reviewed the startup statically - and missed R11-1:
 The lesson is R7's own caveat made concrete: a static review of a deployment is
 no substitute for starting it.
 
+### R12 - six parallel reviews
+
+Six reviewers, each with its own scope, worked at the same time and wrote a
+reproduction for every finding before it was fixed: **A** identity and access,
+**B** the pipeline and the data lifecycle, **C** the workers, the sandbox and the
+browser, **D** alerting, AI analysis, notifications and reports, **E** the
+database (measured on PostgreSQL with the production statement timeout), and **F**
+the deployment (every Compose, nginx, Docker and operations file, checked against
+the upstream sources). 58 findings; five were found twice (D-4 = C-7, D-5 = B-6,
+D-7 = B-5, D-8 = B-11, D-12 = C-8), leaving 53: 5 High, 28 Medium, 20 Low. All are
+fixed except D-n2, accepted with its reason. Every fix has a regression test that
+fails on the old code, or, for deployment files, the file named as evidence.
+
+**A - identity and access**
+
+| # | Severity | Finding | Resolution | Evidence |
+|---|---|---|---|---|
+| A-1 | Medium | Enabling or disabling MFA and erasing the account checked the password but counted no failure, ignored a lockout and hashed under the row lock: a stolen access token - or an API key, which acts for its creator - was an unlimited password oracle | One password confirmation for all of them: sessions only, a locked account refused, a wrong password counted toward the lockout and audited, the hash outside any transaction | `tests/security/test_password_confirmation.py` |
+| A-2 | Medium | In an organization that requires MFA, every request of a session without it was refused - the enrolment endpoints included - so a member without MFA, or an owner who had just turned the policy on, could never recover | The enrolment endpoints authenticate in a set-up mode (the account, no organization); confirming MFA marks the session MFA-verified | `tests/security/test_mfa_enforcement.py` |
+| A-3 | Low | The network allowlist was enforced on every request, at sign-in and on switching - but not on renewal: a stolen refresh token kept an organization session alive from anywhere | Renewal from outside is refused (audited) without spending the token | `tests/security/test_network_allowlist.py` |
+
+**B - the pipeline and the data lifecycle**
+
+| # | Severity | Finding | Resolution | Evidence |
+|---|---|---|---|---|
+| B-1 | High | Key rotation skipped rows other transactions held and reported success, and re-wrapped only the first 500 webhook secrets: an operator following the procedure could retire a key-encryption key still in use and lose that data | `keys rewrap` counts what is still under an old key (without locks), exits 3 with the counts per tenant until nothing is left, retries held rows (`--passes`, `--wait-seconds`); webhook secrets are paged by id | `tests/integration/test_field_encryption.py` (`TestKeyRotation`), `tests/integration/test_cli.py` |
+| B-2 | Medium | Version retention deleted the version change detection still had to compare with | A version goes only once its successor has been diffed | `tests/integration/test_data_lifecycle.py` (`TestRecordRetention`) |
+| B-3 | Low | Record keys longer than 512 characters were cut after de-duplication: two records sharing a prefix became one | Keys are bounded first: prefix, `#` and the SHA-256 of the whole key | `tests/unit/pipeline/test_stages.py`, `tests/integration/test_pipeline_integrity.py` |
+| B-4 | Medium | One item with an unreadable URL port failed the whole run; IPv6 hosts lost their brackets | Such an item is `invalid_url` (any unexpected item error `invalid_item`); brackets kept; unstorable text refused per item | `tests/unit/pipeline/test_stages.py`, `tests/integration/test_pipeline_integrity.py` |
+| B-5 | Medium | Marking a field `sensitive` sealed new values only: every stored value (records, history, change diffs) stayed in clear | A job seals them in batches after waiting for ingestions that read the old schema; detection reads the schema under a share lock | `tests/integration/test_field_encryption.py` (`TestMarkedSensitiveLater`) |
+| B-6 | Medium | Deleting a dataset, source or project left its uploaded files and reports on disk for ever, and the organization purge missed them | The deleting transaction reads the storage keys and queues a job that deletes the tenant's own unreferenced files; the organization purge removes the tenant's directories; re-wrap and delete share a lock | `tests/integration/test_stored_files.py` |
+| B-7 | Medium | A record seen unchanged by another source kept its old owner, so the deletion detection of the source that now had it never saw it disappear | The source that last saw a record owns it | `tests/integration/test_pipeline_integrity.py` (`TestOwnership`) |
+| B-8 | Medium | Runs finishing out of order applied an older full snapshot over a newer one | Each run records when its data was collected; an older full snapshot is skipped as `superseded` | `tests/integration/test_pipeline_integrity.py` (`TestSnapshotOrder`) |
+| B-9, D-6 | Medium | Retention handled the first 200 datasets of a tenant only, and changes (old and new values) were never purged | Every dataset, in batches; changes follow the dataset's retention once their alerts are evaluated | `tests/integration/test_data_lifecycle.py` |
+| B-10 | Low | The next-page cursor after a long non-ASCII name exceeded the cursor length limit: the next page was refused | UTF-8 JSON cursors, limit 1,024 (the longest possible is 708) | `tests/unit/core/test_core_utilities.py`, `tests/integration/test_business_api.py` |
+| B-11 | Low | Idempotency keys were truncated (collisions), scoped to the whole organization, and never expired (the TTL setting was unused) | Stored whole (`req:` and SHA-256), bound to the request they started (reuse for another answers 409 `idempotency_key_reused`), released after `idempotency_keys_hours` | `tests/integration/test_idempotency.py` |
+| B-12 | Low | A stored file without the sealed header was served as legacy plaintext - write access to the volume could plant content | Refused | `tests/unit/security/test_file_sealing.py` |
+| B-13 | Low | Plaintext copies left by a killed process were never removed | Purged at start-up and daily | `tests/unit/security/test_file_sealing.py`, `tests/integration/test_stored_files.py` |
+| B-x | Low | Webhook items beyond the source's limit were dropped without a trace | The run and the receipt report `truncated` | `tests/integration/test_business_api.py` |
+
+**C - workers, sandbox and browser**
+
+| # | Severity | Finding | Resolution | Evidence |
+|---|---|---|---|---|
+| C-1 | High | Every XLSX upload failed in the sandbox: it stores its input without an extension, and openpyxl refuses such a path (the unit tests named their files `*.xlsx`) | The workbook is opened from a file object; a number that is not finite is a malformed upload | `tests/unit/test_upload_parsing.py`, `tests/integration/test_workers.py` (an XLSX through the real sandbox) |
+| C-2 | Medium | The renderer read a page's content without a timeout: a page that never yields kept its slot for ever | Navigation, the final-address check and the content share one deadline; the context is always closed and the slot released | `tests/unit/security/test_browser_guard.py` |
+| C-3 | Medium | The robots.txt matcher was quadratic: a hostile robots.txt kept a sandbox worker busy for up to an hour | Linear matching within caps (10,000 rules, 128 KiB), a path cap derived from the policy | `tests/unit/adapters/test_robots_policy.py` |
+| C-4 | Medium | The content type was checked before the status: an outage answered with an HTML error page failed a run for good instead of being retried | The type is checked for successful answers only | `tests/unit/http/test_ssrf_protection.py` |
+| C-5 | Medium | A retry after the gateway was busy could not download its input again; refusals by the gateway were never reported; the item count was fooled by braces in text | The attempt's input stays available until its result is in; permanent refusals fail the run; items are counted while parsing; non-finite numbers refused | `tests/integration/test_workers.py` (`TestSandboxBoundary`), `tests/unit/workers/test_task_policy.py` |
+| C-6 | Medium | A run the reaper gave up on emitted no event and counted no failure: `run_failed` alerts never fired and its workflow run stayed open | Failed like any failed run, in the reaper's transaction | `tests/integration/test_core_chain.py` (`TestCrashRecovery`) |
+| C-7, D-4 | Medium | Retrying a dead letter did nothing for most task types; a report failed for good on its first error | A retry resets its entity (run, delivery, analysis, report); reports fail only once their retries are spent | `tests/integration/test_core_chain.py` (`TestDeadLetterRetries`) |
+| C-8, D-12 | Low | `isdigit()` accepted non-ASCII digits in `Retry-After`, `Content-Length` and the webhook timestamp: server errors instead of refusals | ASCII digits only; an unexpected sender error is retried like a transient one | `tests/unit/http/test_ssrf_protection.py`, webhook signature tests |
+
+**D - alerting, AI analysis, notifications and reports**
+
+| # | Severity | Finding | Resolution | Evidence |
+|---|---|---|---|---|
+| D-1 | High | One evaluation handled 500 changes and nothing evaluated the rest until the next event - alerts were silently late or never raised | Up to 2,000 per evaluation in batches of their own, a follow-up job for any backlog, and a periodic sweep in both orchestration modes | `tests/integration/test_core_chain.py` (`TestAlertBacklog`) |
+| D-2 | Medium | Collected data reached Slack unescaped: `<!channel>` pinged everyone, `<https://evil|Sign in>` disguised a link | Slack's own escaping, markdown off | `tests/unit/adapters/test_notification_senders.py` |
+| D-3 | Medium | The filter that keeps AI output to links on hosts found in the data was bypassed with `?`, `#`, `\` or user-info | The host is the one a browser would open; ASCII host names only; bare hosts with a path removed | `tests/unit/test_ai_safety.py` |
+| D-9 | Low | A project report listed alerts from other projects | Only alerts of its own rules | `tests/integration/test_business_api.py` (`TestReports`) |
+| D-10 | Low | Changes left out of the prompt by its budget were marked analysed | Only the changes the model saw; the offline analyser covers a change too large for any prompt | `tests/unit/test_ai_safety.py`, `tests/integration/test_core_chain.py` |
+| D-11 | Low | The trend sentence compared the halves of an odd-length period by totals | By daily averages | `tests/unit/reports/test_report_analytics.py` |
+| D-13 | Low | `GET /sources/{id}/uploads` answered 200 with an empty list for a foreign source, where its siblings answer 404 | 404; the IDOR sweep covers the route | `tests/security/test_idor_sweep.py` |
+| D-n1 | Low | Eleven repository queries of the pipeline relied on row-level security alone, against the threat model's "every query also filters by `org_id`" | An explicit tenant filter in each; a static test fails on any new one | `tests/unit/test_repository_tenant_filters.py` |
+| D-n2 | Low | A member who may read records can page through a whole dataset; only exports are audited in the tenant's trail and budgeted | **Accepted**: reading records is what the permission grants; pages are rate-limited and every request is logged with its principal and organization; exports stay the audited bulk path (threat model 4.7) | - |
+
+**E - the database**
+
+| # | Severity | Finding | Resolution | Evidence |
+|---|---|---|---|---|
+| E-1 | High | Foreign keys whose parent rows are deleted had no index on the child: retention, source and dataset deletes and purges scanned whole tables, hit the 15 s statement timeout and rolled back - that tenant's retention never ran again | Migration 0007 adds the indexes, built concurrently | `tests/integration/test_database_hygiene.py` (an index for every foreign key that can fire) |
+| E-2 | Medium | The reaper, the retention and change listings scanned whole tables per tenant | Partial and tenant-led indexes (0007) | migration 0007 |
+| E-3 | Medium | Deleting a large dataset or organization was one cascading statement, longer than the timeout | Large tables are deleted bottom-up in batches, each its own transaction | `tests/integration/test_data_lifecycle.py` (`TestLargePurges`) |
+| E-4 | Medium | Audit verification stopped after 100,000 entries and reported success | The daily job and the CLI check whole chains; the API's bounded check says `complete: false` | `tests/integration/test_audit_verification_bounds.py` |
+| E-5 | Medium | The audit purge deleted by time, stamped before the chain lock orders appends: a cut could leave a gap, reported as tampering for ever | It deletes a prefix of each chain | `tests/integration/test_database_hygiene.py` |
+| E-6 | Low | Listing changes by time or score had no index | Indexes (0007) | migration 0007 |
+| E-7 | Medium | One organization's failed purge stopped the purge of the others | Each organization is purged on its own, oldest request first; failures are reported and retried | `tests/integration/test_data_lifecycle.py` |
+
+The test harness now runs with the production engine timeouts and the production
+database privileges, so a query too slow or a grant too wide fails in tests too.
+
+**F - the deployment**
+
+| # | Severity | Finding | Resolution | Evidence |
+|---|---|---|---|---|
+| F-1 | High | The documented egress firewall dropped the containers' DNS on hosts whose resolver sits in a private range (most clouds): nothing on `egress` resolved | Name resolution let through first, new outbound connections from the public network dropped, and a command to check | [DEPLOYMENT.md](DEPLOYMENT.md) section 1 |
+| F-2 | Medium | An IPv6 client reached nginx through Docker's proxy and appeared as the bridge gateway - to rate limits, sign-in risk and network allowlists | Ports published on IPv4; IPv6 through a load balancer | `docker-compose.yml`, DEPLOYMENT.md |
+| F-3 | Medium | Real edge certificates could not be used as documented (nginx's uid could not read the key, Let's Encrypt's symlinks dangled) nor renewed without downtime | `scripts/install_edge_cert.sh`; the edge serves ACME challenges for `certbot --webroot` | `tests/unit/test_edge_config.py` |
+| F-4 | Medium | RabbitMQ sized its memory watermark from the host's RAM, not its 768 MiB limit | An absolute watermark | `deploy/rabbitmq/rabbitmq.conf` |
+| F-5 | Medium | ClamAV had 2 GiB (upstream's minimum is 3): killed on its first signature update, it stayed "running" while every upload was refused | 4 GiB, unprivileged; scans counted; `MalwareScannerUnavailable` alerts | `tests/unit/adapters/test_malware_scanning.py`, `tests/unit/observability/test_alert_rules.py` |
+| F-6 | Medium | Dependabot could not read how the images were pinned - no base or third-party image would ever get an update proposed; the BuildKit frontend was unpinned | Literal `FROM` lines and whole-value Compose defaults; the frontend pinned; a weekly scan of every third-party image | `tests/unit/test_image_pins.py`, `.github/workflows/supply-chain.yml` |
+| F-7 | Medium | The secret tooling could not add a secret a new release needs without re-keying everything; no upgrade path to internal TLS; the internal PKI was undocumented | Add-missing mode (half-present groups refused), `--tls-urls`, `internal_pki.py --check`, the documentation | `tests/unit/test_internal_pki.py`, DEPLOYMENT.md |
+| F-8 | Low | Restores ran the dumps' SQL as the superuser, and the manifest proved integrity, not origin | Each database restored by its owner role; manifests signed and verified | the CI backup round trip |
+| F-9 | Low | Worker metrics of exited children accumulated on `/tmp` | Their own tmpfs, cleared at start; exiting children drop their gauges | `tests/unit/workers/test_worker_metrics.py` |
+| F-10 | Low | n8n always started, and its owner account waited for whoever claimed it first | Opt-in (a Compose profile); claim the owner at once | `docker-compose.yml`, DEPLOYMENT.md |
+| F-11 | Low | Earlier Docker engines expose ports published on 127.0.0.1 to the local network; the `public` network could open connections | Docker 28 required; a firewall rule for `public` | DEPLOYMENT.md |
+| F-12 | Low | Tracing could not reach a collector; empty SMTP dead-lettered every account mail; Alertmanager's SMTP password could not be mounted; PostgreSQL and ClamAV ran as root | Collector placement documented; account mail skipped and logged; the secret mounted; both run as their own users | `tests/unit/workers/test_account_mail.py`, `docker-compose.yml` |
+
+### R13 - what fixing R12 surfaced
+
+| # | Severity | Finding | Resolution | Evidence |
+|---|---|---|---|---|
+| R13-1 | Medium | Sign-up answered `409 email_taken` - anyone could learn who has an account (R2-6, accepted until now) - and created the account at once, so anyone could open one in someone else's name, with a password of their choosing | Sign-up proves the address first: the same answer for every address, a link (or a notice) by e-mail, the account created by whoever opens the link | `tests/integration/test_signup.py`, `tests/security/test_api_security.py` |
+| R13-2 | Medium | Personal data without an end: sign-in sessions (address, browser) and expired tokens were kept for ever; nothing produced a person's copy of their data; audit entries could not be removed after any retention period | Daily identity retention; `GET /users/me/export` and `nexusflow user export`; `nexusflow user erase`; `nexusflow audit purge` as the migrator (never the application) | `tests/integration/test_privacy.py`, [PRIVACY.md](PRIVACY.md) |
+| R13-3 | High | The first weekly scan of the third-party images failed seven: Grafana ran from a repository that had stopped receiving releases, Prometheus from a long-term-support line out of support, nginx from a superseded mainline | Maintained lines (Grafana 12.4, Prometheus 3.13 LTS, nginx 1.30 slim, current n8n); what the newest releases still carry is accepted only when unreachable here, with its reason and an expiry date; n8n's findings are reported, not failed on | `.trivyignore.yaml`, `.github/workflows/supply-chain.yml`, SECURITY.md |
+| R13-4 | Medium | n8n became opt-in (F-10) and so silently left CI's end-to-end stack; nothing checked the monitoring stack after it started | CI starts n8n again; end-to-end tests check Grafana's provisioned dashboard and data source, and a Prometheus with every alert rule, every target and Alertmanager | `tests/e2e/test_monitoring.py`, `.github/workflows/ci.yml` |
+| R13-5 | Low | OWASP ZAP reported a "credit card number" in a response: nginx's 32-digit hexadecimal request ID now and then holds a Luhn-valid run of 13 digits | Request IDs shaped like UUIDs at the edge (no run beyond 12 digits), in the logs, the edge's errors and the forwarded header | `tests/unit/test_edge_config.py`, `tests/e2e/test_edge.py` |
+
 ## 3. Checklist (specification section 39)
 
 | Item | How it is addressed | Evidence |
 |---|---|---|
-| Authentication | Argon2id; breached passwords refused; EdDSA access tokens (10 min) with key IDs; rotating refresh tokens with reuse detection; TOTP with replay protection; lockout; sign-in risk; session list and revocation; API keys capped by the creator's membership; per-organization network allowlists for sessions and API keys | `tests/integration/test_identity_flows.py`, `tests/security/` (incl. `test_network_allowlist.py`) |
+| Authentication | Argon2id; breached passwords refused; e-mail-verified sign-up; EdDSA access tokens (10 min) with key IDs; rotating refresh tokens with reuse detection; TOTP with replay protection; lockout; password confirmations counted like sign-ins; sign-in risk; session list and revocation; API keys capped by the creator's membership; per-organization network allowlists for sessions, renewals and API keys | `tests/integration/test_identity_flows.py`, `tests/security/` (incl. `test_network_allowlist.py`) |
 | Authorization | Permission checks at the route and in every service method; roles and scoped keys | `test_api_security.py`, `test_idor_sweep.py` |
 | Input validation | Strict request models (`extra="forbid"`), bounded sizes, lengths, counts and depth; typed dataset schemas | `test_api_security.py`, `test_stages.py` |
 | Output encoding | CSV formula neutralisation, XLSX string cells, XML-escaped PDF text, JSON only in APIs | `test_files_and_reports.py` |
@@ -224,12 +335,12 @@ no substitute for starting it.
 | Logging exposure | Structured logs with key and value redaction; no local variables in tracebacks; scrubbed dead-letter messages | `tests/unit/observability/test_log_redaction.py` |
 | Rate limiting | GCRA limits per scope in Redis, fail-closed for authentication, exports, AI and webhooks | `test_api_security.py`, `test_business_api.py` |
 | Resource exhaustion | Body caps, bounded decompression, item and page caps, bounded queues, timeouts, per-host throttling | `test_ssrf_protection.py`, `test_workers.py` |
-| Tenant isolation | Forced RLS on a non-bypass role, explicit `org_id` filters, `404` for foreign identifiers | `test_database_security.py`, `test_idor_sweep.py` |
+| Tenant isolation | Forced RLS on a non-bypass role, explicit `org_id` filters (checked statically), `404` for foreign identifiers | `test_database_security.py`, `test_idor_sweep.py`, `test_repository_tenant_filters.py` |
 | Race conditions | State machines with row locks, unique constraints, `SKIP LOCKED` claims, fencing of reaped work | `test_core_chain.py` (concurrent deliveries, reaped analysis) |
 | Replay attacks | Webhook timestamp window plus nonce plus unique row; refresh-token reuse detection; TOTP step replay | `test_business_api.py`, identity tests |
 | Idempotency | `Idempotency-Key` on commands; idempotent workers; failure ledger idempotent per execution | `test_business_api.py`, `test_failure_ledger.py` |
 | Error leakage | Uniform error schema; internals only in logs; validation errors never echo input | `test_api_security.py` |
-| Dependency vulnerabilities | Hash-locked `uv.lock`, pip-audit, Trivy, CodeQL, Semgrep, Gitleaks, Dependabot; images and actions pinned by digest and SHA (checked in CI); zizmor audits the workflows (pedantic, with online checks for impostor commits and vulnerable actions); dependency review and OpenSSF Scorecard once the repository is public | CI |
+| Dependency vulnerabilities | Hash-locked `uv.lock`, pip-audit, Trivy, CodeQL, Semgrep, Gitleaks, Dependabot; images and actions pinned by digest and SHA (checked in CI) in forms Dependabot reads; a weekly rebuild and scan of the platform's images and a weekly scan of every third-party image, with documented, expiring exceptions; zizmor audits the workflows (pedantic, with online checks for impostor commits and vulnerable actions); dependency review and OpenSSF Scorecard once the repository is public | CI |
 
 ## 4. What remains
 

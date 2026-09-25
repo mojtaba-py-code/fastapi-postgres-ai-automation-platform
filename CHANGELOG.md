@@ -4,6 +4,102 @@ All notable changes are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+* E-mail-verified sign-up: `POST /auth/register` takes an address and mails it a
+  link - or, if it already has an account, a notice; `POST /auth/register/complete`
+  creates the account and its organization; an invitation creates the account
+  directly (`POST /auth/register/invitation`). Operators print a link instead of
+  mailing it with `nexusflow signup issue`, also while self-service sign-up is off.
+* Privacy tooling ([docs/PRIVACY.md](docs/PRIVACY.md)): a person's copy of their
+  data (`GET /users/me/export`, `nexusflow user export`), erasure on request
+  (`nexusflow user erase`), a daily identity retention (sessions 90 days after they
+  expire, expired tokens after a week) and audit retention run as the migrator
+  (`nexusflow audit purge`).
+* Internal TLS on every hop by default - PostgreSQL (`hostssl` only,
+  `verify-full`), both Redis instances and RabbitMQ accept TLS only - with a
+  private CA (`scripts/internal_pki.py`, `--check` for expiring certificates).
+* Optional HashiCorp Vault transit wrapping of the key-encryption keys
+  (`security.kek_provider=vault-transit`, `docker-compose.vault.yml`,
+  `nexusflow keys vault-wrap | vault-new | vault-rewrap`).
+* Weekly security runs: CI rebuilds and scans the platform's images and runs the
+  whole stack every week; Trivy scans every third-party image, with expiring,
+  reasoned exceptions in `.trivyignore.yaml`.
+* End-to-end tests of the monitoring stack: Grafana's provisioned dashboard and
+  data source, Prometheus's rules, targets and Alertmanager.
+* A periodic alert sweep (both orchestration modes); `keys rewrap` reports what
+  is left under old keys and retries rows in use; jobs that delete the files of
+  deleted rows and seal the values of fields marked sensitive later.
+* Backups: signed manifests (`BACKUP_SIGNING_KEY`, verified with
+  `BACKUP_ALLOWED_SIGNERS`); edge certificates installed with
+  `scripts/install_edge_cert.sh` and renewed through the ACME webroot.
+
+### Changed
+* **API:** `POST /auth/register` takes only `email` and answers `202`; the account
+  is created by `/auth/register/complete`; invited people use
+  `/auth/register/invitation` instead of an `invitation_token` field.
+* Idempotency keys are bound to the request they started - reusing one for a
+  different request answers `409 idempotency_key_reused` - and are released after
+  `retention.idempotency_keys_hours`. Webhook receipts report `truncated`; run
+  statistics carry `collected_at` and `superseded`.
+* Record keys longer than 512 characters are stored as a prefix and a hash: an
+  existing record with such a key is re-created once.
+* Stored files without the sealed header are refused.
+* Reports fail only once their retries are spent, and a dead-letter retry redoes
+  the work.
+* Images: Grafana from `grafana/grafana` 12.4 (the `grafana-oss` repository stopped
+  receiving releases), Prometheus 3.13 (its long-term-support line), nginx 1.30
+  slim, n8n 2.40.7; base images pinned in literal `FROM` lines Dependabot reads.
+* n8n is opt-in (Compose profile `n8n`); ClamAV gets 4 GiB and runs unprivileged;
+  PostgreSQL runs as its own user; ports are published on IPv4; Docker Engine 28
+  or later is required.
+* Request IDs are shaped like UUIDs from the edge on.
+
+### Security
+Review round 12 - six parallel AI-assisted reviews of the whole platform, 53
+unique findings (5 High, 28 Medium, 20 Low) - and round 13, five findings its fixes
+surfaced. All are fixed except one accepted residual risk (D-n2); the record is in
+[docs/SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md). The main items:
+
+* A password confirmation (MFA, account erasure) counts like a sign-in: a stolen
+  token or API key is no longer an unlimited password oracle (A-1).
+* Sign-up no longer reveals who has an account, and no one can open an account in
+  someone else's name (R13-1; accepted until now as R2-6).
+* Network allowlists also stop session renewal (A-3); members can set up the MFA
+  their organization requires (A-2).
+* Key rotation no longer reports success while data is still under an old key
+  (B-1); a field marked sensitive later has its stored values sealed (B-5); files
+  are deleted with their rows (B-6); every data query names its tenant (D-n1).
+* Slack text is escaped (D-2); the AI link filter judges a link by the host a
+  browser would open (D-3).
+* Restores run as the owning roles, never as the superuser, and backups are signed
+  (F-8); the documented egress firewall no longer breaks DNS (F-1).
+* Third-party images moved off lines that no longer received fixes (R13-3).
+
+### Fixed
+* XLSX uploads failed in the sandbox (C-1).
+* Alerts beyond 500 pending changes were never evaluated (D-1).
+* Retention ran into the statement timeout and never ran again (E-1), handled only
+  200 datasets and never purged changes (B-9, D-6); large deletes and purges now
+  run in batches (E-3, E-7).
+* Audit verification stopped at 100,000 entries and said "ok" (E-4); an audit
+  purge could leave a gap reported as tampering (E-5).
+* One malformed item failed a whole run (B-4); snapshots applied out of order
+  (B-8); records kept a source that no longer saw them (B-7); long keys collided
+  (B-3); long cursors were refused (B-10).
+* A hostile robots.txt could keep a worker busy for an hour (C-3); a page that never
+  yielded kept a renderer slot (C-2); an outage answered in HTML failed for good
+  (C-4); sandbox retries after a busy gateway, and refusals by the gateway (C-5);
+  runs the reaper gave up on raised no failure (C-6); non-ASCII digits in numeric
+  headers (C-8).
+* Report scope, trend and AI budget accounting (D-9, D-10, D-11);
+  `GET /sources/{foreign}/uploads` answered 200 (D-13).
+* Deployment: RabbitMQ's memory watermark (F-4), ClamAV's memory (F-5), Dependabot
+  could not read the image pins (F-6), secrets on upgrade (F-7), worker metrics of
+  exited children (F-9), account mail with e-mail off (F-12).
+* A DAST false positive: nginx's request IDs could look like card numbers (R13-5).
+
 ## [0.1.0] - 2026-09-25
 
 ### Added
@@ -173,7 +269,3 @@ residual risk in the threat model. The full record is in
 * Responses generated by the edge itself (hidden paths, 413, 429, 502) lacked the
   security headers and answered in HTML; they now carry the application's headers
   and JSON error schema (R11-3, found by the first DAST run).
-
-## [Unreleased]
-
-Nothing yet.
