@@ -112,6 +112,38 @@ class TestOutputValidation:
         assert "[link removed]" in result.summary  # unknown host: phishing link removed
         assert "https://shop.example.com/a" in result.summary
 
+    @pytest.mark.security
+    @pytest.mark.parametrize(
+        "link",
+        [
+            # Review D-3: each opens evil.example in a browser, yet names the
+            # allowed host after it - the old check split only on "/" and ":".
+            "https://evil.example?.shop.example.com/login",
+            "https://evil.example#.shop.example.com/login",
+            "https://evil.example\\.shop.example.com/login",
+            "https://shop.example.com@evil.example/login",
+            "https://xn--shp-example-com.evil.example/login",
+            "evil.example/reset-password",  # a bare host with a path is a link too
+        ],
+    )
+    def test_links_that_open_another_host_are_removed(self, link: str) -> None:
+        result = self._validate(_output(summary=f"Sign in again at {link} today"))
+        assert result.summary == "Sign in again at [link removed] today"
+
+    @pytest.mark.parametrize(
+        "link",
+        [
+            "https://shop.example.com/p/1?ref=a#top",
+            "https://SHOP.example.com:8443/p",
+            "https://eu.shop.example.com/p",
+            "www.shop.example.com/offers",
+            "shop.example.com/cart",
+        ],
+    )
+    def test_links_to_the_analysed_hosts_stay(self, link: str) -> None:
+        result = self._validate(_output(summary=f"Compare {link} with last week"))
+        assert result.summary == f"Compare {link} with last week"
+
     @pytest.mark.parametrize(
         ("text", "code"),
         [

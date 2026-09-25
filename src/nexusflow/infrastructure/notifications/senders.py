@@ -4,7 +4,9 @@ All HTTP-based senders use the SSRF-guarded client. Slack and Telegram are
 pinned to their official hosts via a domain allowlist, so a tampered channel
 configuration cannot redirect notifications (or credentials) elsewhere.
 Messages are plain text - no HTML, no markup parsing - to avoid injection
-into recipients' clients.
+into recipients' clients. Slack is sent Slack's own escaping with formatting
+off, so collected data never turns into a mention (<!channel>) or a link
+whose text hides its target.
 """
 
 from __future__ import annotations
@@ -106,6 +108,13 @@ def _text(message: OutboundMessage) -> str:
     return f"{message.title}\n\n{message.body}"
 
 
+def _slack_text(message: OutboundMessage) -> str:
+    # The three characters Slack's documentation says to escape: without it a
+    # product name such as "<!channel> <https://evil.example|Sign in>" pings
+    # the whole channel with a disguised phishing link.
+    return _text(message).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 class ChannelSender:
     """Dispatches an alert to the channel's provider."""
 
@@ -157,7 +166,7 @@ class ChannelSender:
             await self._client.request(
                 "POST",
                 credential.secret,
-                json_body={"text": _text(message)},
+                json_body={"text": _slack_text(message), "mrkdwn": False},
                 policy=self._slack_policy,
                 follow_redirects=False,
             )

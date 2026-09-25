@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
 from pydantic import ValidationError
 
@@ -20,6 +21,11 @@ from nexusflow.domain.intelligence.model import AnalysisOutput
 
 MAX_OUTPUT_CHARS = 60_000
 _URL = re.compile(r"(?i)\b(?:https?://|www\.)[^\s<>\"')\]]+")
+# A bare host with a path ("evil.example/login"): clients turn it into a link.
+_BARE = re.compile(
+    r"(?i)(?<![\w@./:-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}/[^\s<>\"')\]]*"
+)
+_HOSTNAME = re.compile(r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9-]{1,63}$")
 _LEAK_MARKERS = ("untrusted-data marker", "security rules - these override")
 
 
@@ -42,16 +48,37 @@ def _extract_json(text: str) -> Any:
         raise OutputRejectedError(code="ai_output_not_json") from exc
 
 
+def _host(url: str) -> str | None:
+    """The host a browser would open for ``url``, or None if it is not plain.
+
+    Browsers read a backslash as a slash and end the host at "?" or "#", so
+    "https://evil.example?.shop.example.com/" opens evil.example; only an
+    ASCII host name counts (no user-info tricks, no look-alike Unicode).
+    """
+    candidate = url.replace("\\", "/")
+    if not re.match(r"(?i)^https?://", candidate):
+        candidate = "http://" + candidate
+    try:
+        parts = urlsplit(candidate)
+        host = parts.hostname
+    except ValueError:
+        return None
+    if host is None or parts.username is not None or not _HOSTNAME.fullmatch(host):
+        return None
+    return host
+
+
 def _scrub_urls(text: str, allowed_hosts: frozenset[str]) -> str:
+    allowed = frozenset(h.lower().removeprefix("www.") for h in allowed_hosts)
+
     def replace(match: re.Match[str]) -> str:
         url = match.group(0)
-        host = (
-            re.sub(r"(?i)^(https?://)?(www\.)?", "", url).split("/", 1)[0].split(":", 1)[0].lower()
-        )
-        allowed = any(host == h or host.endswith("." + h) for h in allowed_hosts)
-        return url if allowed else "[link removed]"
+        host = _host(url)
+        if host is not None and any(host == h or host.endswith("." + h) for h in allowed):
+            return url
+        return "[link removed]"
 
-    return _URL.sub(replace, text)
+    return _BARE.sub(replace, _URL.sub(replace, text))
 
 
 def validate_output(

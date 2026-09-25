@@ -174,10 +174,11 @@ class UploadService:
         self, principal: Principal, page: PageRequest, *, source_id: UUID | None
     ) -> Page[Upload]:
         principal.require(Permission.SOURCES_READ)
+        org_id = principal.require_org()
         async with self._uow_factory(TenantScope.of(principal)) as uow:
-            return await uow.data.uploads.list_page(
-                principal.require_org(), page, {"source_id": source_id}
-            )
+            if source_id is not None and await uow.data.sources.get(org_id, source_id) is None:
+                raise NotFoundError()  # another tenant's source is not "a source without uploads"
+            return await uow.data.uploads.list_page(org_id, page, {"source_id": source_id})
 
     async def _record_rejection(
         self, principal: Principal, source_id: UUID, code: str, meta: RequestMeta

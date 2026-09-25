@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from dataclasses import replace
 from datetime import UTC, datetime
 from email.message import EmailMessage
 from pathlib import Path
@@ -179,8 +180,28 @@ class TestSlack:
         assert request.method == "POST"
         assert str(request.url) == SLACK_WEBHOOK
         assert request.headers["content-type"] == "application/json"
-        assert json.loads(request.content) == {"text": TEXT}
+        assert json.loads(request.content) == {"text": TEXT, "mrkdwn": False}
         assert _notifications("slack", "success") == before + 1
+
+    @pytest.mark.security
+    async def test_collected_data_cannot_mention_the_channel_or_disguise_a_link(
+        self, safe_client_factory: SafeClientFactory
+    ) -> None:
+        # Review D-2: titles and bodies carry collected data (product names).
+        hostile = replace(
+            MESSAGE, title="<!channel> <https://evil.example/sso|Re-authenticate> & more"
+        )
+        slack = _accepting()
+
+        await _sender(safe_client_factory, slack).send(SLACK, hostile, SLACK_CREDENTIAL)
+
+        [request] = slack.requests
+        payload = json.loads(request.content)
+        assert payload["text"].startswith(
+            "&lt;!channel&gt; &lt;https://evil.example/sso|Re-authenticate&gt; &amp; more\n\n"
+        )
+        assert "<" not in payload["text"] and ">" not in payload["text"]
+        assert payload["mrkdwn"] is False
 
     @pytest.mark.security
     @pytest.mark.parametrize(

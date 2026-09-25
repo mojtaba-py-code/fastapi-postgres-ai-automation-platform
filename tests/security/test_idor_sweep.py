@@ -111,6 +111,7 @@ ATTEMPTS: list[tuple[str, str, dict[str, Any] | None]] = [
     ("GET", "/api/v1/sources/{source}", None),
     ("GET", "/api/v1/sources/{source}/runs", None),
     ("POST", "/api/v1/sources/{source}/runs", None),
+    ("GET", "/api/v1/sources/{source}/uploads", None),  # review D-13
     ("DELETE", "/api/v1/sources/{source}", None),
     ("GET", "/api/v1/runs/{run}", None),
     ("GET", "/api/v1/integrations/{integration}", None),
