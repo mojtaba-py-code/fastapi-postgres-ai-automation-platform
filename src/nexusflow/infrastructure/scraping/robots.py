@@ -16,6 +16,13 @@ source and tenant that crawls the origin).
 
 Only the first :data:`_MAX_ROBOTS_BYTES` are parsed (RFC 9309 section 2.5 asks
 for at least 500 KiB); a larger file is truncated, not rejected.
+
+A hostile file cannot make a check slow: patterns are matched segment by
+segment with ``str.find`` (in C, no backtracking), so a check costs at most in
+the order of ``_MAX_RULE_CHARS * _MAX_PATH`` character comparisons - well under
+a second. Only the rules of the groups that apply to us are kept, deduplicated
+and counted against those caps; a path longer than ``_MAX_PATH`` (normalised)
+is not crawled.
 """
 
 from __future__ import annotations
@@ -23,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import string
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
@@ -35,10 +43,14 @@ from nexusflow.domain.shared.url_policy import UrlPolicy
 from nexusflow.infrastructure.http.client import SafeHttpClient, TooManyRedirectsError
 
 _MAX_ROBOTS_BYTES = 512 * 1024
-_MAX_RULES = 10_000  # per file; a hostile robots.txt cannot make every check slow
-_MAX_PATTERN = 2_048
+_MAX_RULES = 10_000  # that apply to us, per file
+_MAX_PATTERN = 2_048  # characters of one rule
+_MAX_RULE_CHARS = 128 * 1024  # of all the rules that apply to us, normalised
+_MAX_PATH = 4_096  # characters of a normalised path checked against them
 _UNRESERVED = frozenset(string.ascii_letters + string.digits + "-._~")
-_HEX = frozenset(string.hexdigits)
+# Printable ASCII except "%": already canonical, nothing to rewrite.
+_CANONICAL = re.compile(r"[!-$&-~]*")
+_REWRITTEN = re.compile(r"%([0-9A-Fa-f]{2})|[^!-~]")
 
 
 class RobotsRedirectBlockedError(PermanentError):
@@ -67,59 +79,66 @@ def _normalise(value: str) -> str:
     non-ASCII or control characters encoded as UTF-8, so ``/caf%C3%A9``,
     ``/café`` and ``/caf%c3%a9`` compare equal while ``%2F`` stays distinct from ``/``.
     """
-    out: list[str] = []
-    index = 0
-    while index < len(value):
-        char = value[index]
-        escape = value[index + 1 : index + 3]
-        if char == "%" and len(escape) == 2 and set(escape) <= _HEX:
-            decoded = chr(int(escape, 16))
-            out.append(decoded if decoded in _UNRESERVED else "%" + escape.upper())
-            index += 3
-            continue
-        if ord(char) > 0x7E or ord(char) <= 0x20:
-            out.extend(f"%{byte:02X}" for byte in char.encode("utf-8"))
-        else:
-            out.append(char)
-        index += 1
-    return "".join(out)
+    if _CANONICAL.fullmatch(value):
+        return value  # the common case, decided in C
+    return _REWRITTEN.sub(_canonical, value)
+
+
+def _canonical(match: re.Match[str]) -> str:
+    escape = match.group(1)
+    if escape is not None:
+        decoded = chr(int(escape, 16))
+        return decoded if decoded in _UNRESERVED else "%" + escape.upper()
+    return "".join(f"%{byte:02X}" for byte in match.group().encode("utf-8"))
 
 
 def _matches(pattern: str, path: str) -> bool:
     """RFC 9309 pattern match from the first octet: ``*`` wildcard, trailing ``$``.
 
-    A greedy two-pointer matcher (backtracking only to the last ``*``): linear
-    in practice and O(len(pattern) * len(path)) at worst - no regex, so a
-    hostile pattern cannot trigger catastrophic backtracking.
+    The literal segments between the wildcards are looked up left to right,
+    each at its first occurrence after the previous one (``str.find``); taking
+    the earliest occurrence never loses a match. No backtracking and no regex:
+    a hostile pattern costs one pass of ``find`` per segment.
     """
-    if pattern.endswith("$"):
-        pattern = pattern[:-1]
-    else:
-        pattern += "*"  # an unanchored pattern is a prefix match
-    p = s = 0
-    star, mark = -1, 0
-    while s < len(path):
-        if p < len(pattern) and pattern[p] == "*":
-            star, mark = p, s
-            p += 1
-        elif p < len(pattern) and pattern[p] == path[s]:
-            p += 1
-            s += 1
-        elif star >= 0:
-            p = star + 1
-            mark += 1
-            s = mark
-        else:
+    anchored = pattern.endswith("$")
+    first, *rest = (pattern[:-1] if anchored else pattern).split("*")
+    if not path.startswith(first):
+        return False
+    position = len(first)
+    if not rest:
+        return not anchored or position == len(path)
+    last = rest.pop() if anchored else None  # an unanchored pattern is a prefix match
+    for segment in rest:
+        found = path.find(segment, position)
+        if found < 0:
             return False
-    while p < len(pattern) and pattern[p] == "*":
-        p += 1
-    return p == len(pattern)
+        position = found + len(segment)
+    return last is None or (len(path) - len(last) >= position and path.endswith(last))
+
+
+@dataclass(eq=False, slots=True)
+class _Kind:
+    """Every group of one kind - naming our product token, or ``*`` - merged,
+    deduplicated and bounded while it is read."""
+
+    seen: bool = False
+    rules: dict[tuple[bool, str], None] = field(default_factory=dict)  # an ordered set
+    chars: int = 0
+
+    @property
+    def has_room(self) -> bool:
+        return len(self.rules) < _MAX_RULES and self.chars < _MAX_RULE_CHARS
+
+    def add(self, allow: bool, pattern: str) -> None:
+        fits = len(self.rules) < _MAX_RULES and self.chars + len(pattern) <= _MAX_RULE_CHARS
+        if fits and (allow, pattern) not in self.rules:
+            self.rules[(allow, pattern)] = None
+            self.chars += len(pattern)
 
 
 @dataclass(slots=True)
 class _Group:
-    agents: list[str] = field(default_factory=list)
-    rules: list[tuple[bool, str]] = field(default_factory=list)  # (allow, pattern)
+    kinds: list[_Kind] = field(default_factory=list)  # the kinds its agents make it
     crawl_delay: float | None = None
 
 
@@ -133,10 +152,10 @@ class RobotsRules:
     @classmethod
     def parse(cls, text: str, product_token: str) -> RobotsRules:
         token = product_token.strip().lower()
+        ours, anyone = _Kind(), _Kind()
         groups: list[_Group] = []
         current: _Group | None = None
         collecting_agents = False
-        rule_count = 0
         for raw_line in text.splitlines():
             line = raw_line.split("#", 1)[0].strip()
             key, separator, value = line.partition(":")
@@ -147,30 +166,35 @@ class RobotsRules:
                 if current is None or not collecting_agents:
                     current = _Group()
                     groups.append(current)
-                current.agents.append(value.lower())
+                agent = value.lower()
+                for kind, named in ((ours, _is_agent(agent, token)), (anyone, agent == "*")):
+                    if named and kind not in current.kinds:
+                        kind.seen = True
+                        current.kinds.append(kind)
                 collecting_agents = True
             elif key in ("allow", "disallow") and current is not None:
                 collecting_agents = False
-                if value and len(value) <= _MAX_PATTERN and rule_count < _MAX_RULES:
-                    current.rules.append((key == "allow", _normalise(value)))
-                    rule_count += 1
+                # Rules for other crawlers are never used, so never kept (nor counted).
+                if value and len(value) <= _MAX_PATTERN and any(k.has_room for k in current.kinds):
+                    pattern = _normalise(value)
+                    for kind in current.kinds:
+                        kind.add(key == "allow", pattern)
             elif key == "crawl-delay" and current is not None:
                 collecting_agents = False
                 current.crawl_delay = _delay(value)
             # Other records (sitemap, host, ...) neither start nor end a group.
-        chosen = [g for g in groups if any(_is_agent(a, token) for a in g.agents)] or [
-            g for g in groups if "*" in g.agents
-        ]
-        delays = [g.crawl_delay for g in chosen if g.crawl_delay]
-        return cls(
-            rules=tuple(rule for group in chosen for rule in group.rules),
-            crawl_delay=max(delays) if delays else None,
-        )
+        chosen = ours if ours.seen else anyone
+        delays = [g.crawl_delay for g in groups if chosen in g.kinds and g.crawl_delay]
+        # Longest first, an allow before a disallow: the first rule that matches decides.
+        rules = sorted(chosen.rules, key=lambda rule: (-len(rule[1]), not rule[0]))
+        return cls(rules=tuple(rules), crawl_delay=max(delays) if delays else None)
 
     def allows(self, path_and_query: str) -> bool:
         path = _normalise(path_and_query or "/")
         if path == "/robots.txt":
             return True  # implicitly allowed (RFC 9309 2.2.2)
+        if len(path) > _MAX_PATH:
+            return False  # longer than any check is bounded for: not crawled
         best_length, allowed = -1, True
         for allow, pattern in self.rules:
             length = len(pattern)

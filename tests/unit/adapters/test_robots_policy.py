@@ -9,22 +9,31 @@ SSRF-guarded client.
 
 from __future__ import annotations
 
+import itertools
+import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import cast
 
 import fakeredis
 import httpx2
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 from redis.asyncio import Redis
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from nexusflow.domain.shared.url_policy import UrlPolicy
 from nexusflow.infrastructure.scraping.robots import (
+    _MAX_PATH,
+    _MAX_ROBOTS_BYTES,
+    _MAX_RULE_CHARS,
     RobotsDecision,
     RobotsPolicy,
     RobotsRedirectBlockedError,
     RobotsRules,
+    _matches,
+    _normalise,
 )
 from tests.unit.adapters.fakes import (
     USER_AGENT,
@@ -75,6 +84,30 @@ def _policy(
     return RobotsPolicy(
         factory(handler), redis, user_agent=user_agent, cache_ttl_seconds=ttl, prefix="nf:"
     )
+
+
+def _scanning_rules(length: int) -> Iterator[str]:
+    # Distinct rules, each looked for along the whole path and found nowhere.
+    for n in itertools.count():
+        yield f"Disallow: *{'a' * length}b{n}"
+
+
+def _near_miss_rules() -> Iterator[str]:
+    # The worst case of a substring search: the needle nearly matches everywhere.
+    for i, j in itertools.combinations(range(1, 98), 2):
+        needle = ["a"] * 99
+        needle[i] = needle[j] = "b"
+        yield "Disallow: *" + "".join(needle)
+
+
+def _full_file(rules: Iterator[str]) -> str:
+    lines, size = ["User-agent: *\n"], 14
+    for rule in rules:
+        if size + len(rule) + 1 > _MAX_ROBOTS_BYTES:
+            break
+        lines.append(rule + "\n")
+        size += len(rule) + 1
+    return "".join(lines)
 
 
 class _BrokenRedis:
@@ -325,6 +358,30 @@ class TestRfc9309Precedence:
         rules = RobotsRules.parse(f"User-agent: *\nDisallow: {pattern}\n", "NexusFlowBot")
         assert rules.allows(path) is False
 
+    @settings(max_examples=400, deadline=None)
+    @given(st.text(alphabet="%2fF7eE~/a b\x00\x7féé€😀", max_size=24))
+    def test_normalisation_agrees_with_a_character_by_character_reference(self, value: str) -> None:
+        out: list[str] = []
+        index = 0
+        while index < len(value):
+            char, escape = value[index], value[index + 1 : index + 3]
+            if (
+                char == "%"
+                and len(escape) == 2
+                and all(c in "0123456789abcdefABCDEF" for c in escape)
+            ):
+                decoded = chr(int(escape, 16))
+                unreserved = decoded.isascii() and (decoded.isalnum() or decoded in "-._~")
+                out.append(decoded if unreserved else "%" + escape.upper())
+                index += 3
+                continue
+            if ord(char) > 0x7E or ord(char) <= 0x20:
+                out.extend(f"%{byte:02X}" for byte in char.encode("utf-8"))
+            else:
+                out.append(char)
+            index += 1
+        assert _normalise(value) == "".join(out)
+
     def test_an_encoded_slash_is_not_a_slash(self) -> None:
         rules = RobotsRules.parse("User-agent: *\nDisallow: /a/b\n", "NexusFlowBot")
         assert rules.allows("/a%2Fb") is True
@@ -364,6 +421,62 @@ class TestGroups:
         started = time.perf_counter()
         assert rules.allows("/" + "a" * 2000) is True
         assert time.perf_counter() - started < 2.0
+
+    @pytest.mark.security
+    @pytest.mark.parametrize(
+        "rules",
+        [
+            pytest.param(lambda: _scanning_rules(200), id="scan-200"),
+            pytest.param(lambda: _scanning_rules(1000), id="scan-1000"),
+            pytest.param(_near_miss_rules, id="near-miss"),
+        ],
+    )
+    def test_a_hostile_robots_txt_is_evaluated_quickly(
+        self, rules: Callable[[], Iterator[str]]
+    ) -> None:
+        # A full-size file of such rules against a long path used to cost tens of
+        # minutes of CPU per check (and the soft time limit then retried it).
+        text = _full_file(rules())
+        started = time.perf_counter()
+        parsed = RobotsRules.parse(text, "NexusFlowBot")
+        for path in ("/" + "a" * 1900, "/" + "a" * 4000, "/" + "é" * 600):
+            assert parsed.allows(path) is True
+        assert time.perf_counter() - started < 10.0  # generous: about a second at worst
+
+    def test_repeated_rules_are_kept_once(self) -> None:
+        text = "User-agent: *\n" + "Disallow: /private\n" * 5000 + "Allow: /private/ok\n"
+        rules = RobotsRules.parse(text, "NexusFlowBot")
+        assert rules.rules == ((True, "/private/ok"), (False, "/private"))
+        assert (rules.allows("/private/x"), rules.allows("/private/ok/1")) == (False, True)
+
+    def test_only_rules_that_apply_to_us_count_against_the_caps(self) -> None:
+        others = "User-agent: OtherBot\n" + "Disallow: /x\n" * 20_000
+        ours = "User-agent: *\nDisallow: /private\n"
+        assert RobotsRules.parse(others + ours, "NexusFlowBot").allows("/private/x") is False
+
+    def test_rules_beyond_the_pattern_budget_are_ignored(self) -> None:
+        wide = [f"Disallow: /{n:05d}{'x' * 1000}\n" for n in range(_MAX_RULE_CHARS // 1000 + 10)]
+        rules = RobotsRules.parse("User-agent: *\n" + "".join(wide), "NexusFlowBot")
+        assert sum(len(pattern) for _, pattern in rules.rules) <= _MAX_RULE_CHARS
+        assert len(rules.rules) < len(wide)
+
+    def test_a_path_longer_than_a_check_is_bounded_for_is_not_crawled(self) -> None:
+        rules = RobotsRules.parse("User-agent: *\nAllow: /\n", "NexusFlowBot")
+        assert rules.allows("/" + "a" * (_MAX_PATH - 1)) is True
+        assert rules.allows("/" + "a" * _MAX_PATH) is False
+
+    @settings(max_examples=400, deadline=None)
+    @given(
+        pattern=st.text(alphabet="ab/*", max_size=12).map(lambda p: "/" + p)
+        | st.text(alphabet="ab/*", max_size=12).map(lambda p: "/" + p + "$"),
+        path=st.text(alphabet="ab/", max_size=16).map(lambda p: "/" + p),
+    )
+    def test_matching_agrees_with_a_reference_regex(self, pattern: str, path: str) -> None:
+        anchored = pattern.endswith("$")
+        body = pattern.removesuffix("$") if anchored else pattern
+        regex = "".join(".*" if char == "*" else re.escape(char) for char in body)
+        expected = re.match(regex + (r"\Z" if anchored else ""), path, re.DOTALL) is not None
+        assert _matches(pattern, path) is expected
 
 
 class TestLargeAndRedirectedFiles:
