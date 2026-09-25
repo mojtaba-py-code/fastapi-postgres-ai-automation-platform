@@ -107,6 +107,8 @@ paged the same way (their dead letters already exist).
 `N8N_BLOCK_ENV_ACCESS_IN_NODE=true`, `NODES_EXCLUDE` for code, command, SSH,
 FTP and file nodes, `N8N_DIAGNOSTICS_ENABLED=false`, `N8N_TEMPLATES_ENABLED=false`,
 `N8N_VERSION_NOTIFICATIONS_ENABLED=false`, `N8N_SECURE_COOKIE=true`,
+`N8N_COMMUNITY_PACKAGES_ENABLED=false` (no npm packages from the editor), no
+internet egress,
 execution-data pruning, a dedicated PostgreSQL database and role, an
 `N8N_ENCRYPTION_KEY` from a secret file, and no route from the public reverse
 proxy (the editor is reached through an SSH tunnel or VPN only). The image tag

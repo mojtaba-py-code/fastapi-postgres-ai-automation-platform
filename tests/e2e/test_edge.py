@@ -59,6 +59,37 @@ def test_responses_carry_the_security_headers(client: httpx2.Client, live: LiveS
         assert "max-age=" in headers["strict-transport-security"]
 
 
+def test_responses_the_edge_generates_carry_the_security_headers(
+    client: httpx2.Client,
+) -> None:
+    response = client.get("/metrics")  # answered by nginx itself, never proxied
+    assert response.status_code == 404
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["x-frame-options"] == "DENY"
+    assert "default-src 'none'" in response.headers["content-security-policy"]
+    assert response.headers["cache-control"] == "no-store"
+    assert "max-age=" in response.headers["strict-transport-security"]
+    assert "camera=()" in response.headers["permissions-policy"]
+    # The same JSON error schema as the application's own errors.
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json()["error"] == "not_found"
+    assert response.json()["request_id"]
+
+
+def test_security_headers_are_never_sent_twice(client: httpx2.Client) -> None:
+    response = client.get(f"{API}/projects")  # proxied: the application sets them
+    for name in (
+        "x-content-type-options",
+        "x-frame-options",
+        "referrer-policy",
+        "cache-control",
+        "content-security-policy",
+        "strict-transport-security",
+        "permissions-policy",
+    ):
+        assert len(response.headers.get_list(name)) <= 1, name
+
+
 def test_the_api_requires_authentication(client: httpx2.Client) -> None:
     response = client.get(f"{API}/projects")
     assert response.status_code == 401
@@ -99,3 +130,4 @@ def test_oversized_bodies_are_refused_at_the_edge(client: httpx2.Client) -> None
         headers={"Content-Type": "application/json"},
     )
     assert response.status_code == 413
+    assert response.json()["error"] == "payload_too_large"

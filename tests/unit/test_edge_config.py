@@ -71,6 +71,11 @@ def _blocks(block: Block) -> list[Block]:
     return [block, *(b for child in block.children for b in _blocks(child))]
 
 
+def _api_server(config: Block) -> Block:
+    [api] = [b for b in _blocks(config) if any(d[:2] == ["listen", "8443"] for d in b.directives)]
+    return api
+
+
 @pytest.fixture(scope="module")
 def config() -> Block:
     return _parse(NGINX / "nginx.conf")
@@ -86,7 +91,7 @@ def test_no_single_value_directive_is_repeated_in_a_block(config: Block) -> None
 
 
 def test_every_api_location_proxies_through_the_shared_snippet(config: Block) -> None:
-    [api] = [b for b in _blocks(config) if any(d[:2] == ["listen", "8443"] for d in b.directives)]
+    api = _api_server(config)
     for location in api.children:
         directives = {d[0]: d[1:] for d in location.directives}
         if "return" in directives:
@@ -99,8 +104,44 @@ def test_every_api_location_proxies_through_the_shared_snippet(config: Block) ->
         )
 
 
+def test_responses_the_edge_generates_get_the_security_headers_once(config: Block) -> None:
+    api = _api_server(config)
+    maps = {  # variable -> what it is computed from
+        b.name.split()[2]: b.name.split()[1] for b in _blocks(config) if b.name.startswith("map ")
+    }
+    added = {d[1].lower(): d[2:] for d in api.directives if d[0] == "add_header"}
+    for header in (
+        "strict-transport-security",
+        "x-content-type-options",
+        "x-frame-options",
+        "referrer-policy",
+        "permissions-policy",
+        "cache-control",
+        "content-security-policy",
+    ):
+        variable, *flags = added[header]
+        assert flags == ["always"], header  # error responses included
+        # Added only when the application's response carries none of its own.
+        assert maps[variable] == "$upstream_http_" + header.replace("-", "_"), header
+    for location in api.children:  # an add_header there would drop these silently
+        assert all(d[0] != "add_header" for d in location.directives), location.name
+
+
+def test_errors_the_edge_answers_use_the_json_error_schema(config: Block) -> None:
+    api = _api_server(config)
+    pages = {d[1]: d[-1] for d in api.directives if d[0] == "error_page"}
+    assert {"404", "413", "429", "502"} <= set(pages)
+    named = {b.name.removeprefix("location "): b for b in api.children if "@" in b.name}
+    for target in set(pages.values()):
+        location = named[target.removeprefix("=")]
+        assert ["default_type", "application/json"] in location.directives, target
+        [body] = [d[2] for d in location.directives if d[0] == "return"]
+        for key in ('"error":', '"message":', '"request_id":"$request_id"'):
+            assert key in body, (target, key)
+
+
 def test_internal_and_diagnostic_paths_are_never_exposed(config: Block) -> None:
-    [api] = [b for b in _blocks(config) if any(d[:2] == ["listen", "8443"] for d in b.directives)]
+    api = _api_server(config)
     hidden = {
         location.name for location in api.children if ["return", "404"] in location.directives
     }

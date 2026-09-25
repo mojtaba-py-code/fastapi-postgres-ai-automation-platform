@@ -31,7 +31,7 @@ for an independent assessment:
 | R8 | Test-driven review: hostile uploads and rate limits | Hand-built hostile CSV/XLSX files (zip bombs, traversal names, encrypted parts, macros, XXE, entity expansion, sparse sheets, invalid UTF-8) through intake, the parser and the API; every rate-limit scope, its budget and its failure policy - 143 tests | 6 defects (strict failing tests first), 3 gaps closed |
 | R9 | Second completion pass | Reports at scale, backup and restore, request correlation, sign-in risk | 6 findings |
 | R10 | Adversarial review of the day's new code | Change analytics, sign-in risk, password change, request correlation, rate limiting, uploads, operations and CI workflows | 1 finding |
-| R11 | First run of the full stack (CI) | The Compose stack built and started behind the TLS edge on a CI runner | 1 High (startup) |
+| R11 | First run of the full stack (CI) | The Compose stack built and started behind the TLS edge on a CI runner; the end-to-end suite, backup and restore, and a passive DAST scan of every API operation | 1 High, 2 Medium |
 
 In R4 and R5, every defect was first committed as a *strict expected failure*
 (the test fails because of the bug), then fixed, which turned the test into a
@@ -196,11 +196,14 @@ the internal API does not trust request IDs from the sandbox.
 ### R11 - first run of the full stack
 
 The end-to-end CI job built both images and started the whole stack for the
-first time. R7 had reviewed the startup statically - and missed this:
+first time, ran the end-to-end suite, a backup-and-restore round trip and a
+passive DAST scan. R7 had reviewed the startup statically - and missed R11-1:
 
 | # | Severity | Finding | Resolution | Evidence |
 |---|---|---|---|---|
 | R11-1 | High | nginx refused to start (`"proxy_read_timeout" directive is duplicate`): the export and report-download location raised the read timeout and then included the shared proxy snippet, which set it again. The edge never served a request - the platform was unreachable | The upstream timeouts are set once per server block; the download location overrides only the read timeout. CI now runs `nginx -t` before starting the stack, and a unit test parses the configuration (snippets included) for repeated single-value directives - it fails on the old file | `tests/unit/test_edge_config.py`, `.github/workflows/ci.yml` |
+| R11-2 | Medium | Backups could not be taken or restored as documented (`scripts/backup.sh`: "Permission denied"): the repository had been re-created from a Windows checkout, which does not keep the executable bit, so every script was stored as `100644` | Executable again; a test fails when a script with a shebang is not executable in git | `tests/unit/test_repository_hygiene.py` |
+| R11-3 | Medium | Found by the first DAST run (OWASP ZAP): responses the edge generates itself - 404 for the hidden paths, 413, and the 429s of its rate limiting - carried none of the security headers the application sets (ZAP: no CSP, Medium; no HSTS or Permissions-Policy, Low) and an HTML body where API clients expect the JSON error schema | nginx adds HSTS, CSP, `nosniff`, `DENY`, `no-referrer`, Permissions-Policy and `no-store` to every response the application did not answer - never a second copy - and answers its own errors in the application's JSON error schema with the request ID | `tests/unit/test_edge_config.py`, `tests/e2e/test_edge.py`, the DAST step |
 
 The lesson is R7's own caveat made concrete: a static review of a deployment is
 no substitute for starting it.
