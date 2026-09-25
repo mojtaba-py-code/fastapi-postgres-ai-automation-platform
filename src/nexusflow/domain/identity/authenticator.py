@@ -59,11 +59,18 @@ class Authenticator:
         self._codec = token_codec
         self._hasher = token_hasher
 
-    async def authenticate(self, credential: str, *, client_ip: str | None = None) -> Principal:
+    async def authenticate(
+        self, credential: str, *, client_ip: str | None = None, mfa_setup: bool = False
+    ) -> Principal:
         """The principal behind ``credential``, used from ``client_ip``.
 
         An organization with a network allowlist is reached only from those
         networks - through its members' sessions and its API keys alike.
+
+        ``mfa_setup`` is for the MFA enrolment endpoints only: where the
+        session's organization requires MFA the session has not passed, it
+        yields the *account* (no organization, no permissions) instead of
+        refusing - otherwise a member without MFA could never set it up.
         """
         parsed = parse_credential(credential)
         if parsed is not None:
@@ -72,9 +79,11 @@ class Authenticator:
             return await self._authenticate_service(parsed.prefix, parsed.full_token)
         if credential.startswith(("nxf_", "nxs_")):
             raise _unauthenticated()  # malformed/garbled key: fail before any DB access
-        return await self._authenticate_access_token(credential, client_ip)
+        return await self._authenticate_access_token(credential, client_ip, mfa_setup)
 
-    async def _authenticate_access_token(self, token: str, client_ip: str | None) -> Principal:
+    async def _authenticate_access_token(
+        self, token: str, client_ip: str | None, mfa_setup: bool
+    ) -> Principal:
         now = self._clock.now()
         claims = self._codec.decode_access_token(token, now=now)
         scope = TenantScope(org_id=claims.org_id, user_id=claims.user_id)
@@ -100,8 +109,18 @@ class Authenticator:
             if not organization.is_active:
                 raise PermissionDeniedError("The organization is not active.", code="org_inactive")
             if organization.policy.require_mfa and not session.mfa_verified:
+                if mfa_setup:
+                    return Principal.for_user(
+                        user_id=user.id,
+                        org_id=None,
+                        role=None,
+                        session_id=session.id,
+                        label=user.email,
+                    )
                 raise PermissionDeniedError(
-                    "This organization requires multi-factor authentication.", code="mfa_required"
+                    "This organization requires multi-factor authentication: set it up "
+                    "(POST /api/v1/auth/mfa/enroll, then /mfa/confirm) or sign in with it.",
+                    code="mfa_required",
                 )
             _require_allowed_network(
                 organization.policy, client_ip, org_id=organization.id, credential=f"user:{user.id}"

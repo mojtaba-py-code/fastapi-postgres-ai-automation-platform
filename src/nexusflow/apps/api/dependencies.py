@@ -60,15 +60,19 @@ def client_ip(request: Request) -> str:
     return str(getattr(request.state, "client_ip", None) or "unknown")
 
 
-async def get_principal(
+async def _authenticate(
     request: Request,
-    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
-    state: Annotated[ApiState, Depends(get_state)],
+    credentials: HTTPAuthorizationCredentials | None,
+    state: ApiState,
+    *,
+    mfa_setup: bool = False,
 ) -> Principal:
     if credentials is None or credentials.scheme.lower() != "bearer" or not credentials.credentials:
         raise AuthenticationError("Authentication is required.", code="authentication_required")
     principal = await state.container.authenticator.authenticate(
-        credentials.credentials.strip(), client_ip=getattr(request.state, "client_ip", None)
+        credentials.credentials.strip(),
+        client_ip=getattr(request.state, "client_ip", None),
+        mfa_setup=mfa_setup,
     )
     request.state.principal = principal
     structlog.contextvars.bind_contextvars(
@@ -76,6 +80,30 @@ async def get_principal(
         principal_id=str(principal.id),
         org_id=str(principal.org_id) if principal.org_id else None,
     )
+    return principal
+
+
+async def get_principal(
+    request: Request,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+    state: Annotated[ApiState, Depends(get_state)],
+) -> Principal:
+    return await _authenticate(request, credentials, state)
+
+
+async def get_mfa_setup_principal(
+    request: Request,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+    state: Annotated[ApiState, Depends(get_state)],
+) -> Principal:
+    """For the MFA enrolment endpoints only: a member whose organization
+    requires MFA they have not set up gets their account (no organization),
+    so they can set it up instead of being shut out for good."""
+    principal = await _authenticate(request, credentials, state, mfa_setup=True)
+    if principal.type is PrincipalType.SERVICE:
+        raise AuthenticationError(
+            "Service tokens are not valid for this API.", code="invalid_token"
+        )
     return principal
 
 
@@ -101,6 +129,7 @@ async def apply_api_rate_limit(
 
 
 CurrentPrincipal = Annotated[Principal, Depends(get_tenant_principal)]
+MfaSetupPrincipal = Annotated[Principal, Depends(get_mfa_setup_principal)]
 Meta = Annotated[RequestMeta, Depends(get_meta)]
 ContainerDep = Annotated[Container, Depends(get_container)]
 StateDep = Annotated[ApiState, Depends(get_state)]

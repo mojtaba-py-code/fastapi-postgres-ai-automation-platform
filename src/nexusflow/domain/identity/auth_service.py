@@ -643,8 +643,22 @@ class AuthService:
                 raise invalid
             if session.org_id is not None:
                 await uow.switch_tenant(session.org_id)
-                if await uow.memberships.get(session.org_id, user.id) is None:
+                membership = await uow.memberships.get(session.org_id, user.id)
+                if membership is None:
                     session.org_id = None
+                else:
+                    org = await uow.organizations.get(session.org_id)
+                    if org is not None and not org.policy.allows_ip(meta.ip):
+                        # Outside the organization's networks a session is not
+                        # renewed either: a stolen refresh token cannot keep it
+                        # alive (the token stays unused for its rightful owner).
+                        await self._record_network_denied(
+                            uow, user.id, membership, meta, via="refresh"
+                        )
+                        await uow.commit()
+                        raise network_not_allowed(
+                            f"org={org.id} credential=user:{user.id} ip={meta.ip}"
+                        )
             token.used_at = now
             session.last_used_at = now
             tokens = await self._issue_tokens(uow, user, session, now)
@@ -969,6 +983,11 @@ class AuthService:
             user.mfa_enabled = True
             user.mfa_last_used_step = step
             user.updated_at = now
+            session = await uow.sessions.get_for_update(_session_of(principal))
+            if session is not None and session.user_id == user.id:
+                # The code just proved the second factor: this session counts as
+                # MFA-verified, so an organization that requires MFA opens at once.
+                session.mfa_verified = True
             codes = [_generate_recovery_code() for _ in range(_RECOVERY_CODE_COUNT)]
             await uow.recovery_codes.replace_for_user(
                 user.id,
@@ -1139,6 +1158,14 @@ def _wrong_password() -> PermissionDeniedError:
 
 def _account_locked() -> PermissionDeniedError:
     return PermissionDeniedError("The account is temporarily locked.", code="account_locked")
+
+
+def _session_of(principal: Principal) -> UUID:
+    if principal.session_id is None:  # guarded by _require_session
+        raise PermissionDeniedError(
+            "This action requires a signed-in user session.", code="session_required"
+        )
+    return principal.session_id
 
 
 def _require_user(principal: Principal) -> UUID:

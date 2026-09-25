@@ -11,6 +11,7 @@ from nexusflow.apps.api.dependencies import (
     ContainerDep,
     CurrentPrincipal,
     Meta,
+    MfaSetupPrincipal,
     StateDep,
     budget_identity,
     client_ip,
@@ -239,7 +240,7 @@ async def reset_password(
     dependencies=[Depends(rate_limited("auth.mfa", by=client_ip))],
 )
 async def begin_mfa_enrollment(
-    body: PasswordConfirmation, principal: CurrentPrincipal, container: ContainerDep, meta: Meta
+    body: PasswordConfirmation, principal: MfaSetupPrincipal, container: ContainerDep, meta: Meta
 ) -> MfaEnrollResponse:
     enrollment = await container.auth.begin_mfa_enrollment(
         principal, password=body.password, meta=meta
@@ -249,7 +250,7 @@ async def begin_mfa_enrollment(
 
 @router.post("/mfa/confirm", response_model=MfaRecoveryCodesResponse)
 async def confirm_mfa_enrollment(
-    body: MfaCodeRequest, principal: CurrentPrincipal, container: ContainerDep, meta: Meta
+    body: MfaCodeRequest, principal: MfaSetupPrincipal, container: ContainerDep, meta: Meta
 ) -> MfaRecoveryCodesResponse:
     codes = await container.auth.confirm_mfa_enrollment(principal, code=body.code, meta=meta)
     return MfaRecoveryCodesResponse(recovery_codes=codes)

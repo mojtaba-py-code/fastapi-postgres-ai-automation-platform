@@ -152,6 +152,24 @@ async def test_signing_in_from_elsewhere_reaches_the_account_but_not_the_organiz
     assert back.json()["organization_id"] == str(org_id)
 
 
+async def test_a_session_is_not_renewed_from_outside_the_networks(
+    office: httpx2.AsyncClient, home: httpx2.AsyncClient
+) -> None:
+    # Review A-3: a stolen refresh token could keep an organization session alive
+    # from anywhere (its access tokens were refused, the renewal was not).
+    owner = await signup(office)
+    assert (await _restrict(owner, OFFICE_NETWORK)).status_code == 200
+
+    renewed = await home.post("/api/v1/auth/refresh", json={"refresh_token": owner.refresh_token})
+    expect_error(renewed, 403, "ip_not_allowed")
+
+    # The refresh token was not spent: its owner renews it from the office.
+    again = await office.post("/api/v1/auth/refresh", json={"refresh_token": owner.refresh_token})
+    assert again.status_code == 200, again.text
+    [denied] = await _audit(owner, "auth.network_denied")
+    assert (denied["metadata"]["via"], denied["ip"]) == ("refresh", HOME)
+
+
 async def _operator(container: Container, *argv: str) -> dict[str, Any]:
     args = build_parser().parse_args(argv)
     result: dict[str, Any] = await args.handler(container, args)
