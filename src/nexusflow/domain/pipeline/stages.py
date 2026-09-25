@@ -22,6 +22,7 @@ change detection (Analyze) and deletion inference by
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -35,6 +36,7 @@ from nexusflow.core.text import clean_text
 from nexusflow.domain.catalog.model import DatasetSchema, FieldSpec, FieldType
 
 MAX_ISSUES = 100
+MAX_KEY_LENGTH = 512  # records.record_key
 _MAX_SAFE_INTEGER = 2**53 - 1
 _MAX_DECIMAL = Decimal("1e18")
 _FRACTION_DIGITS = Decimal("1e-18")
@@ -119,6 +121,10 @@ def _normalize_string(spec: FieldSpec, value: Any, *, multiline: bool) -> str:
     text = clean_text(str(value), max_length=spec.effective_max_length + 1, multiline=multiline)
     if len(text) > spec.effective_max_length:
         raise ItemRejectedError(spec.name, "too_long")
+    try:
+        text.encode("utf-8")  # a lone surrogate ("\ud800" in JSON) cannot be stored
+    except UnicodeEncodeError as exc:
+        raise ItemRejectedError(spec.name, "invalid_text") from exc
     return text
 
 
@@ -196,11 +202,15 @@ def _normalize_url(spec: FieldSpec, value: Any) -> str:
     text = _normalize_string(spec, value, multiline=False)
     try:
         parts = urlsplit(text)
+        port = parts.port  # raises for a port out of range or not a number
     except ValueError as exc:
         raise ItemRejectedError(spec.name, "invalid_url") from exc
-    if parts.scheme.lower() not in ("http", "https") or not parts.hostname or parts.username:
+    host = parts.hostname
+    if parts.scheme.lower() not in ("http", "https") or not host or parts.username:
         raise ItemRejectedError(spec.name, "invalid_url")
-    netloc = parts.hostname.lower() + (f":{parts.port}" if parts.port else "")
+    if ":" in host:  # an IPv6 literal keeps its brackets
+        host = f"[{host}]"
+    netloc = host.lower() + (f":{port}" if port else "")
     return urlunsplit((parts.scheme.lower(), netloc, parts.path or "/", parts.query, ""))
 
 
@@ -310,9 +320,24 @@ def deduplicate(
     return unique, dropped
 
 
+def record_key(value: str) -> str:
+    """The stored key of a record: at most ``MAX_KEY_LENGTH`` characters.
+
+    A longer key keeps its beginning and ends with a digest of the whole key,
+    so two long keys that share their first 512 characters (long URLs) stay
+    two records, and the same key always maps to the same record. Keys are
+    bounded *before* deduplication: two items are one record exactly when
+    their stored keys are equal.
+    """
+    if len(value) <= MAX_KEY_LENGTH:
+        return value
+    digest = hashlib.sha256(value.encode("utf-8", "surrogatepass")).hexdigest()
+    return f"{value[: MAX_KEY_LENGTH - len(digest) - 1]}#{digest}"
+
+
 def enrich(key: str, data: dict[str, JSONValue]) -> CleanRecord:
     """Enrich: canonical key and content fingerprint for change detection."""
-    return CleanRecord(key=key[:512], data=data, content_hash=content_hash(data))
+    return CleanRecord(key=record_key(key), data=data, content_hash=content_hash(data))
 
 
 def prepare_item(schema: DatasetSchema, raw: Mapping[str, Any]) -> dict[str, JSONValue]:
@@ -337,7 +362,12 @@ def run_pipeline(
             if len(result.issues) < MAX_ISSUES:
                 result.issues.append(ItemIssue(index, rejection.field, rejection.code))
             continue
-        prepared.append((str(record[schema.key_field]), record))
+        except Exception:  # noqa: BLE001 - one malformed item never fails the whole run
+            result.invalid += 1
+            if len(result.issues) < MAX_ISSUES:
+                result.issues.append(ItemIssue(index, None, "invalid_item"))
+            continue
+        prepared.append((record_key(str(record[schema.key_field])), record))
     unique, result.duplicates = deduplicate(prepared)
     result.valid = len(unique)
     result.records = [enrich(key, data) for key, data in unique.items()]
