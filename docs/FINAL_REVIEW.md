@@ -2,7 +2,7 @@
 
 The specification asks for a final architecture, security, dependency, test and
 deployment review, and an honest list of remaining limitations. This is that
-review, as of 2026-09-25.
+review, as of 2026-09-26.
 
 **Verdict.** NexusFlow AI is a complete, well-tested reference implementation of
 a secure automation and intelligence platform, ready for a pilot. The whole stack
@@ -30,14 +30,17 @@ audit); see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## 2. Security review
 
-Ten AI-assisted review passes (adversarial code review, due diligence,
+Eleven AI-assisted review passes (adversarial code review, due diligence,
 traceability, test-driven reviews of the adapters, the core chain and of hostile
-uploads and rate limits, a deployment startup review, two completion reviews and
-an adversarial review of the day's new code) and the first run of the full stack
-in CI produced 80 numbered findings plus smaller observations. All are fixed
-with regression tests (or, for configuration, in the file named as evidence),
-except one accepted risk (sign-up reveals registered e-mails; it is
-rate-limited). The full record, including the specification's security
+uploads and rate limits, a deployment startup review, two completion reviews, an
+adversarial review of the day's new code, and six parallel reviews of the whole
+platform - identity, pipeline and data lifecycle, workers and sandbox, alerting
+and AI, the database, the deployment), the first run of the full stack in CI, and
+what fixing the last round surfaced produced 138 numbered findings plus smaller
+observations. All are fixed with regression tests (or, for configuration, in the
+file named as evidence), except one accepted risk: a member who may read records
+can page through a whole dataset, where exports are audited and budgeted (D-n2).
+The full record, including the specification's security
 checklist, is in [SECURITY_REVIEW.md](SECURITY_REVIEW.md); residual risks are in
 the [threat model](THREAT_MODEL.md). A self-assessed mapping to the seventeen
 chapters of OWASP ASVS 5.0 (target Level 2, with selected Level 3 controls),
@@ -51,10 +54,17 @@ with evidence and the remaining gaps, is in [ASVS.md](ASVS.md).
   **no known vulnerabilities**.
 * CI also runs Bandit, Semgrep (pinned), CodeQL and Gitleaks, and scans both
   images with Trivy (fail on fixable High/Critical) and produces an SBOM for each.
-* CI actions are pinned to commit SHAs; base images (Dockerfiles) and
-  third-party images (Compose, CI) are pinned to digests, and CI fails if one
-  loses its digest (`make pin-images` refreshes them); Dependabot proposes updates
-  weekly.
+* CI actions are pinned to commit SHAs; base images (literal `FROM` lines) and
+  third-party images (Compose, CI) are pinned to digests in forms Dependabot reads,
+  and CI fails if one loses its digest (`make pin-images` refreshes them);
+  Dependabot proposes updates weekly.
+* Every week CI rebuilds and scans the platform's images and runs the whole stack,
+  and Trivy scans every third-party image. The first such scan failed seven
+  images: three ran on lines upstream no longer maintained (Grafana's old
+  repository, Prometheus 3.5, nginx 1.29) and moved; RabbitMQ 4.1, out of
+  community support, moved to 4.3. What the newest upstream releases still carry
+  is accepted only when it cannot be reached here, with its reason and an expiry
+  date (`.trivyignore.yaml`); n8n's own dependencies are reported, not failed on.
 * The workflows themselves are audited by zizmor (pedantic persona, with online
   checks for impostor commits and known-vulnerable actions): no findings. Once
   the repository is public, dependency review blocks a pull request that adds a
@@ -98,7 +108,7 @@ with evidence and the remaining gaps, is in [ASVS.md](ASVS.md).
 | Startup | Started in CI on every change (R11: the first run found a startup failure the static review had missed). Before that, reviewed statically (R7): the Compose files resolved with the example environment; settings and application objects of all 8 application roles built with exactly the variables and secrets Compose gives them; every image tag resolved in its registry; nginx, Prometheus, RabbitMQ, Docker DNS, Grafana and Mailpit behaviour checked against their sources. The one certain startup failure (Prometheus) and 14 further findings are fixed |
 | Compose configuration | Every `NEXUSFLOW_*` variable in the Compose files is a real setting; every mounted secret is generated; settings refuse insecure production values |
 | Images | Non-root and read-only for the platform's own containers; no capabilities, `no-new-privileges` and memory limits everywhere (the exceptions of upstream images are named in the Compose header); built and scanned in CI; pinned by digest |
-| Networks | Only nginx publishes ports (admin UIs on 127.0.0.1); internal networks everywhere else; egress only for the pools that need it, without inter-container traffic |
+| Networks | Only nginx publishes ports (IPv4; admin UIs on 127.0.0.1); internal networks everywhere else, with TLS on every internal hop verified against the stack's private CA; egress only for the pools that need it, without inter-container traffic |
 | Secrets | Files under `/run/secrets`, each mounted only into the containers that use it |
 | Health | HTTP probes for the APIs; event-loop heartbeats for workers and beat |
 | Operations | Backups (encrypted; the restore procedure tested against PostgreSQL with the production roles, and end to end in CI), key rotation procedures, runbooks, audit anchoring |
@@ -141,27 +151,28 @@ below.
    point-in-time recovery, a RabbitMQ cluster, managed Redis, object storage for
    uploads and reports, Kubernetes manifests, and stated RPO/RTO. Today: one
    host, encrypted and tested backups.
-7. Privacy tooling: subject-access export and per-person erasure inside tenant
-   datasets, a retention policy for audit logs (the purge function exists),
-   data-residency controls for the AI provider, and DPA/ROPA templates.
+7. Privacy: the account side is covered - a person's copy of their data,
+   erasure on request, a daily identity retention, audit retention run by the
+   migrator, [PRIVACY.md](PRIVACY.md) with a record-of-processing template and
+   [DPA_TEMPLATE.md](DPA_TEMPLATE.md). Still missing: finding and erasing one
+   person across tenant datasets (the organization answers from its data), a
+   self-service change of e-mail address, and data-residency controls for the AI
+   provider.
 
 **Hardening and operations**
-8. TLS on internal hops (database, Redis, broker) for multi-host deployments: the
-   clients verify servers against a private CA (tested) and the server-side steps
-   are documented, but the Compose file does not ship that configuration; on one
-   host the traffic stays on internal networks and startup logs a warning.
-9. The application encrypts sensitive field values, staged payloads, uploads and
+8. The application encrypts sensitive field values, staged payloads, uploads and
    reports at rest; the other fields of tenant data are plaintext in PostgreSQL so
    they can be queried - use disk or volume encryption, and mark personal data
-   `sensitive`. Keys live in files mounted as Docker secrets; a hardware or cloud
-   KMS is on the roadmap.
-10. Sign-in risk uses devices, networks and failures, not geolocation
-    (impossible-travel checks need a GeoIP database).
-11. The sandbox's delayed retries (at most three, 20-100 s apart) still occupy a
+   `sensitive`. The key-encryption keys are files mounted as Docker secrets, or
+   Vault ciphertexts unwrapped at start-up (HashiCorp Vault's transit engine); a
+   running process holds them in memory either way, and there is no HSM.
+9. Sign-in risk uses devices, networks and failures, not geolocation
+   (impossible-travel checks need a GeoIP database).
+10. The sandbox's delayed retries (at most three, 20-100 s apart) still occupy a
     worker slot while they wait: its exchange must stay direct, so that its
     broker account cannot reach the shared delay exchanges.
-12. n8n orchestration is exercised statically (generator, lint) and through the
-    internal API; an n8n container in CI with provisioned workflows would test it
-    end to end. The platform runs fully without n8n (the default).
-13. The offline analyser is a transparent heuristic; the external AI provider
+11. n8n orchestration is exercised statically (generator, lint), through the
+    internal API, and by starting n8n in CI's stack; provisioned workflows in CI
+    would test it end to end. The platform runs fully without n8n (the default).
+12. The offline analyser is a transparent heuristic; the external AI provider
     needs an API key and each tenant's opt-in.
