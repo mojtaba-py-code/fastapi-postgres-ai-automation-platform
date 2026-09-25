@@ -18,8 +18,10 @@ import importlib.util
 import os
 import ssl
 import sys
+import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from types import ModuleType
 
@@ -65,6 +67,21 @@ def live() -> LiveStack:
 def client(live: LiveStack) -> Iterator[httpx2.Client]:
     with httpx2.Client(base_url=live.base_url, verify=live.verify, timeout=30.0) as session:
         yield session
+
+
+def sign_up(client: httpx2.Client, live: LiveStack, demo: ModuleType, org: str) -> dict[str, str]:
+    """A new owner, signed up the way a person does - the link read from Mailpit -
+    as request headers."""
+    if not live.mailpit_url:
+        pytest.skip("signing up needs the link from Mailpit (NEXUSFLOW_E2E_MAILPIT_URL)")
+    token = demo.sign_up(
+        client,
+        email=f"e2e+{uuid.uuid4().hex[:10]}@nexusflow.example.com",
+        full_name="E2E Owner",
+        organization=f"{org} {uuid.uuid4().hex[:6]}",
+        token_for=partial(demo.mailpit_signup_token, live.mailpit_url),
+    )
+    return {"Authorization": f"Bearer {token}"}
 
 
 @pytest.fixture(scope="session")

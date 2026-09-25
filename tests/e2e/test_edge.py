@@ -4,29 +4,15 @@ exposes, the headers that reach a browser, and isolation between real tenants.""
 from __future__ import annotations
 
 import json
-import secrets
 import uuid
+from types import ModuleType
 
 import httpx2
 import pytest
 
-from tests.e2e.conftest import LiveStack
+from tests.e2e.conftest import LiveStack, sign_up
 
 API = "/api/v1"
-
-
-def _owner(client: httpx2.Client) -> dict[str, str]:
-    registered = client.post(
-        f"{API}/auth/register",
-        json={
-            "email": f"e2e+{uuid.uuid4().hex[:10]}@nexusflow.example.com",
-            "password": secrets.token_urlsafe(18),
-            "full_name": "E2E Owner",
-            "organization_name": f"E2E {uuid.uuid4().hex[:6]}",
-        },
-    )
-    assert registered.status_code == 201, registered.text
-    return {"Authorization": f"Bearer {registered.json()['access_token']}"}
 
 
 def test_the_platform_reports_ready(client: httpx2.Client) -> None:
@@ -97,8 +83,13 @@ def test_the_api_requires_authentication(client: httpx2.Client) -> None:
     assert set(response.json()) >= {"error", "message", "request_id"}
 
 
-def test_tenants_cannot_see_each_other(client: httpx2.Client) -> None:
-    alice, mallory = _owner(client), _owner(client)
+def test_tenants_cannot_see_each_other(
+    client: httpx2.Client, live: LiveStack, demo: ModuleType
+) -> None:
+    alice, mallory = (
+        sign_up(client, live, demo, "E2E Alice"),
+        sign_up(client, live, demo, "E2E Mallory"),
+    )
     project = client.post(f"{API}/projects", json={"name": "Secret"}, headers=alice)
     assert project.status_code == 201, project.text
     project_id = project.json()["id"]

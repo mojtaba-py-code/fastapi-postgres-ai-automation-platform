@@ -15,8 +15,20 @@ all timestamps are ISO-8601 with a time zone. The OpenAPI document and Swagger U
 
 The public signing keys are published at `/.well-known/jwks.json`.
 
+**Sign-up** proves the e-mail address first. `POST /auth/register {email}` answers
+`202 {"status": "check_email"}` for every address and mails it a link
+(`/complete-signup#token=…`, valid 24 hours); an address that already has an
+account is sent a notice instead, so the answer reveals nothing. Whoever opens the
+link finishes with `POST /auth/register/complete {token, password, full_name,
+organization_name}`, which returns `201` and a token pair for the new owner. An
+invitation creates the account directly - its link already went to the address:
+`POST /auth/register/invitation {token, password, full_name}` (an existing account
+accepts with `/auth/invitations/accept` instead; this endpoint answers `409
+account_exists` for it). Starting is limited to 10 an hour per client and 3 an
+hour per address; finishing to 60 an hour per client.
+
 Other authentication endpoints:
-* sign-up: `/auth/register`;
+* sign-up: `/auth/register`, `/auth/register/complete`, `/auth/register/invitation`;
 * sign-out: `/auth/logout`, `/auth/logout-all`;
 * passwords: `/auth/password/change`, `/auth/password/reset-request`,
   `/auth/password/reset`;

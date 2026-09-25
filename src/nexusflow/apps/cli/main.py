@@ -1,12 +1,13 @@
 """Operator command line: ``nexusflow <command>``.
 
 Platform operations that must never be reachable from the tenant API live
-here: service accounts for n8n, the global automation kill switch, key
-re-wrapping, audit verification, migrations and configuration checks. Every
-state-changing command is written to the platform audit chain.
+here: service accounts for n8n, the global automation kill switch, sign-up
+links, key re-wrapping, audit verification, migrations and configuration
+checks. Every state-changing command is written to the platform audit chain.
 
 Output is JSON (one document per command) so it can be scripted. Secrets are
-printed exactly once - when a service token is issued - and never logged.
+printed exactly once - when a service token or a sign-up link is issued - and
+never logged.
 """
 
 from __future__ import annotations
@@ -176,6 +177,22 @@ async def org_clear_network_allowlist(c: Container, args: argparse.Namespace) ->
     return {"organization_id": org.id, "allowed_ip_ranges": None}
 
 
+# ----------------------------------------------------------------- sign-up
+
+
+async def signup_issue(c: Container, args: argparse.Namespace) -> dict[str, Any]:
+    """A sign-up link for one address, printed instead of mailed: the first
+    organization without e-mail, or a customer while self-service is disabled."""
+    token, expires_at = await c.auth.issue_signup_link(email=args.email, meta=CLI_META)
+    base = c.settings.app.public_base_url.rstrip("/")
+    return {
+        "email": args.email,
+        "link": f"{base}/complete-signup#token={token}",
+        "token": token,  # for API clients: POST /api/v1/auth/register/complete
+        "expires_at": expires_at,
+    }
+
+
 # -------------------------------------------------------- keys and audit
 
 
@@ -329,6 +346,16 @@ def build_parser() -> argparse.ArgumentParser:
     clear.add_argument("--org", required=True, help="organization ID")
     clear.add_argument("--reason", required=True)
     clear.set_defaults(handler=org_clear_network_allowlist)
+
+    signup = sub.add_parser("signup", help="sign-up links").add_subparsers(
+        dest="action", required=True
+    )
+    issue = signup.add_parser(
+        "issue",
+        help="print a sign-up link for an address (it works while self-service is disabled)",
+    )
+    issue.add_argument("--email", required=True)
+    issue.set_defaults(handler=signup_issue)
 
     keys = sub.add_parser("keys", help="encryption key maintenance").add_subparsers(
         dest="action", required=True

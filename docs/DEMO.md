@@ -62,6 +62,8 @@ integration would, and narrates each step. Sample output:
      ready: {'database': 'ok', 'redis': 'ok'}
 
 [ 2] Sign up an organization owner
+     owner+4d14e41e@nexusflow.example.com: the answer is the same for every address; a link was mailed
+     the owner opened the link and chose a password (never printed or stored)
      owner+4d14e41e@nexusflow.example.com owns organization 'Acme Retail Intelligence'
 
 [ 3] Model the competitor catalogue

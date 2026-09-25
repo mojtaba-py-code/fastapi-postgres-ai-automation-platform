@@ -133,13 +133,22 @@ class TestAuthentication:
         assert known.status_code == unknown.status_code == 202
         assert known.json() == unknown.json()
 
+    async def test_sign_up_does_not_reveal_accounts(self, api: httpx2.AsyncClient) -> None:
+        # It used to answer 409 email_taken: anyone could test who has an account.
+        session = await signup(api)
+        known = await api.post("/api/v1/auth/register", json={"email": session.email})
+        unknown = await api.post("/api/v1/auth/register", json={"email": unique_email()})
+        assert known.status_code == unknown.status_code == 202
+        assert known.json() == unknown.json()
+        assert set(known.headers) == set(unknown.headers)
+
 
 class TestInputHandling:
     async def test_mass_assignment_is_rejected(self, api: httpx2.AsyncClient) -> None:
         response = await api.post(
-            "/api/v1/auth/register",
+            "/api/v1/auth/register/complete",
             json={
-                "email": unique_email(),
+                "token": "a-sign-up-token",
                 "password": PASSWORD,
                 "full_name": "X",
                 "organization_name": "Org",
@@ -148,6 +157,10 @@ class TestInputHandling:
             },
         )
         _assert_error_shape(response, 422, "validation_failed")
+        started = await api.post(
+            "/api/v1/auth/register", json={"email": unique_email(), "password": PASSWORD}
+        )
+        _assert_error_shape(started, 422, "validation_failed")  # the password comes later
 
     async def test_validation_errors_never_echo_input(self, api: httpx2.AsyncClient) -> None:
         secret = "super-secret-password-value"

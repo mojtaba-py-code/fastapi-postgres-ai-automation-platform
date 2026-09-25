@@ -46,6 +46,10 @@ Details are in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) and
   locked an organization out (audited in the organization's trail, with the reason).
 * Accounts lock out exponentially after repeated failures. Authentication endpoints
   also have fail-closed rate limits per IP and per account.
+* Sign-up proves the e-mail address before an account exists: it answers alike
+  for every address and mails a link (or, to an address with an account, a
+  notice), so it reveals no one's account and no one can open an account in
+  someone else's name.
 * API keys (`nxf_…`) are scoped to a subset of a role's permissions and expire; they
   are shown once and stored only as a keyed hash. n8n service tokens (`nxs_…`) are
   per workflow, scope-limited and rejected by the tenant API.

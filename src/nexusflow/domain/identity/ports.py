@@ -13,6 +13,7 @@ from nexusflow.domain.identity.model import (
     PasswordResetToken,
     RefreshToken,
     ServiceAccount,
+    SignupRequest,
     User,
     UserSession,
 )
@@ -62,6 +63,18 @@ class PasswordResetRepository(Protocol):
     async def get_by_hash_for_update(self, token_hash: str) -> PasswordResetToken | None: ...
 
     async def invalidate_for_user(self, user_id: UUID, *, now: datetime) -> None: ...
+
+
+class SignupRequestRepository(Protocol):
+    async def add(self, request: SignupRequest) -> None: ...
+
+    async def get(self, request_id: UUID) -> SignupRequest | None: ...
+
+    async def get_by_hash(self, token_hash: str) -> SignupRequest | None: ...
+
+    async def lock_for_email(self, email: str) -> list[SignupRequest]:
+        """Every request for the address, locked in one order (no deadlocks)."""
+        ...
 
 
 class RecoveryCodeRepository(Protocol):

@@ -72,6 +72,10 @@ class PasswordResetMessage(Message):
     reset_id: UUID
 
 
+class SignupLinkMessage(Message):
+    signup_id: UUID
+
+
 class OperatorAlertMessage(Message):
     severity: Literal["info", "warning", "critical"]
     summary: str = Field(max_length=500)

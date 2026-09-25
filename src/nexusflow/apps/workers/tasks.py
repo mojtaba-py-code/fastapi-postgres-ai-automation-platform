@@ -118,6 +118,7 @@ PLATFORM_TASKS: tuple[TaskSpec[Any], ...] = (
         h.send_password_reset,
         retries=3,
     ),
+    TaskSpec("nexusflow.security.signup_link", m.SignupLinkMessage, h.send_signup_link, retries=3),
     # The next three never emit job.failed when they give up: each one is (or
     # feeds) the path that *handles* job.failed events - operator paging, event
     # routing and forwarding to n8n - so a persistent failure (SMTP rejecting

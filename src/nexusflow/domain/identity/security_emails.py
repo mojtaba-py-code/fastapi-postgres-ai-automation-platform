@@ -1,10 +1,14 @@
-"""Security e-mails: notifications, password reset and invitation links.
+"""Security e-mails: notifications, password reset, sign-up and invitation links.
 
-Reset and invitation tokens are generated *here*, inside the mail worker, and
-only their keyed hash is written to the database - the raw token never passes
-through the API process, the message broker or the logs. Links carry the
-token in the URL *fragment* (``#token=...``), which browsers do not send to
-servers, proxies or ``Referer`` headers.
+Reset, sign-up and invitation tokens are generated *here*, inside the mail
+worker, and only their keyed hash is written to the database - the raw token
+never passes through the API process, the message broker or the logs. Links
+carry the token in the URL *fragment* (``#token=...``), which browsers do not
+send to servers, proxies or ``Referer`` headers.
+
+A sign-up e-mail goes to an address nobody has proven yet, so it carries
+nothing the requester chose: no name, no organization - it cannot be used to
+put someone else's words in a message from the platform.
 """
 
 from __future__ import annotations
@@ -70,6 +74,15 @@ _TEMPLATES: dict[str, tuple[str, str]] = {
         (
             "Two-factor authentication was turned off and all sessions were signed out. If "
             "this was not you, reset your password now."
+        ),
+    ),
+    "signup_existing_account": (
+        "You already have a NexusFlow account",
+        (
+            "Someone - maybe you - tried to create a NexusFlow account with this e-mail "
+            "address, which already has one. To get back in, sign in, or reset your "
+            "password if you have forgotten it. If this was not you, no action is needed: "
+            "nothing was changed."
         ),
     ),
     "mfa_recovery_code_used": (
@@ -140,12 +153,44 @@ class SecurityEmailService:
             reset.token_hash = self._hasher.hash(raw)
             await uow.commit()
         link = f"{self._base}/reset-password#token={raw}"
+        minutes = max(1, round((reset.expires_at - reset.created_at).total_seconds() / 60))
         await self._email.send_email(
             [user.email],
             "Reset your NexusFlow password",
             (
-                f"Hello {user.full_name},\n\nUse this link within 30 minutes to choose a new "
-                f"password:\n\n{link}\n\nIf you did not request this, ignore this e-mail.\n"
+                f"Hello {user.full_name},\n\nUse this link within {minutes} minutes to choose "
+                f"a new password:\n\n{link}\n\nIf you did not request this, ignore this "
+                "e-mail.\n"
+            ),
+        )
+        return True
+
+    async def send_signup_link(self, *, signup_id: UUID) -> bool:
+        now = self._clock.now()
+        raw = self._tokens.generate(32)
+        async with self._uow_factory(TenantScope.auth()) as uow:
+            request = await uow.signup_requests.get(signup_id)
+            if (
+                request is None
+                or request.used_at is not None
+                or request.expires_at <= now
+                or request.token_hash
+            ):
+                return False  # idempotent: never issue a second token for one request
+            if await uow.users.get_by_email(request.email) is not None:
+                return False  # the address has found its way in meanwhile
+            request.token_hash = self._hasher.hash(raw)
+            await uow.commit()
+        link = f"{self._base}/complete-signup#token={raw}"
+        hours = max(1, round((request.expires_at - request.created_at).total_seconds() / 3600))
+        await self._email.send_email(
+            [request.email],
+            "Finish creating your NexusFlow account",
+            (
+                "Someone - hopefully you - asked to create a NexusFlow account for this e-mail "
+                f"address.\n\nUse this link within {hours} hours to choose your password and "
+                f"name your organization:\n\n{link}\n\nIf this was not you, ignore this "
+                "e-mail: no account is created without it.\n"
             ),
         )
         return True

@@ -24,6 +24,7 @@ if TYPE_CHECKING:
         RefreshTokenRepository,
         ServiceAccountRepository,
         SessionRepository,
+        SignupRequestRepository,
         UserRepository,
     )
     from nexusflow.domain.organizations.ports import (
@@ -70,6 +71,9 @@ class UnitOfWork(Protocol):
 
     @property
     def password_resets(self) -> PasswordResetRepository: ...
+
+    @property
+    def signup_requests(self) -> SignupRequestRepository: ...
 
     @property
     def recovery_codes(self) -> RecoveryCodeRepository: ...

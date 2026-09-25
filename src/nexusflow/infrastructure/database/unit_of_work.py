@@ -61,6 +61,7 @@ from nexusflow.infrastructure.database.repositories.identity import (
     SqlRefreshTokenRepository,
     SqlServiceAccountRepository,
     SqlSessionRepository,
+    SqlSignupRequestRepository,
     SqlUserRepository,
 )
 from nexusflow.infrastructure.database.repositories.outbox import SqlOutboxRepository
@@ -132,6 +133,7 @@ class SqlUnitOfWork:
     sessions: SqlSessionRepository
     refresh_tokens: SqlRefreshTokenRepository
     password_resets: SqlPasswordResetRepository
+    signup_requests: SqlSignupRequestRepository
     recovery_codes: SqlRecoveryCodeRepository
     api_keys: SqlApiKeyRepository
     service_accounts: SqlServiceAccountRepository
@@ -175,6 +177,7 @@ class SqlUnitOfWork:
         self.sessions = SqlSessionRepository(session)
         self.refresh_tokens = SqlRefreshTokenRepository(session)
         self.password_resets = SqlPasswordResetRepository(session)
+        self.signup_requests = SqlSignupRequestRepository(session)
         self.recovery_codes = SqlRecoveryCodeRepository(session)
         self.api_keys = SqlApiKeyRepository(session)
         self.service_accounts = SqlServiceAccountRepository(session)

@@ -6,7 +6,8 @@
 It plays one realistic competitive-intelligence scenario end to end, through
 the public API only (exactly what a customer integration would do):
 
- 1. sign up an organization owner;
+ 1. sign up an organization owner - the address first, then the link from
+    the e-mail (read from Mailpit), then the password;
  2. model a competitor catalogue: project, typed dataset, change thresholds;
  3. connect a partner feed: a webhook source and its signed endpoint;
  4. route alerts: an e-mail channel and two alert rules;
@@ -30,6 +31,7 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 import secrets
 import ssl
 import sys
@@ -46,6 +48,8 @@ from urllib.parse import urlsplit
 import httpx2
 
 API = "/api/v1"
+ALERT_RECIPIENT = "pricing-team@nexusflow.example.com"
+_SIGNUP_LINK = re.compile(r"/complete-signup#token=([A-Za-z0-9_-]+)")
 
 SCHEMA: dict[str, Any] = {
     "fields": [
@@ -134,6 +138,7 @@ class Walkthrough:
         timeout: float = 120.0,
         echo: Callable[[str], None] = print,
         client: httpx2.Client | None = None,
+        signup_token: Callable[[str], str] | None = None,
     ) -> None:
         self._client = client or httpx2.Client(
             base_url=base_url.rstrip("/"), verify=verify, timeout=30.0
@@ -144,6 +149,11 @@ class Walkthrough:
         self._echo = echo
         self._bearer: str | None = None  # the owner's access token, in memory only
         self._step = 0
+        # How the owner receives the sign-up link: from Mailpit, as a person reads
+        # it in their inbox; a test without Mailpit hands in its own source.
+        self._signup_token = signup_token or partial(
+            mailpit_signup_token, mailpit_url, timeout=min(timeout, 60)
+        )
 
     # ----------------------------------------------------------------- flow
 
@@ -174,17 +184,15 @@ class Walkthrough:
     def _sign_up(self, result: DemoResult) -> None:
         self._title("Sign up an organization owner")
         email = f"owner+{uuid.uuid4().hex[:8]}@nexusflow.example.com"
-        created = self._client.post(
-            f"{API}/auth/register",
-            json={
-                "email": email,
-                "password": secrets.token_urlsafe(18),  # never printed or stored
-                "full_name": "Demo Owner",
-                "organization_name": "Acme Retail Intelligence",
-            },
+        self._bearer = sign_up(
+            self._client,
+            email=email,
+            full_name="Demo Owner",
+            organization="Acme Retail Intelligence",
+            token_for=self._signup_token,
         )
-        body = self._expect(created, 201, "sign-up failed")
-        self._bearer = body["access_token"]
+        self._say(f"{email}: the answer is the same for every address; a link was mailed")
+        self._say("the owner opened the link and chose a password (never printed or stored)")
         organization = self._get(f"{API}/organizations/current")
         result.organization_id = organization["id"]
         self._say(f"{email} owns organization {organization['name']!r}")
@@ -234,7 +242,7 @@ class Walkthrough:
             f"{API}/channels",
             {
                 "name": "Pricing team",
-                "config": {"kind": "email", "recipients": ["pricing-team@nexusflow.example.com"]},
+                "config": {"kind": "email", "recipients": [ALERT_RECIPIENT]},
             },
         )
         price_up = {
@@ -406,19 +414,24 @@ class Walkthrough:
     # ---------------------------------------------------------------- helpers
 
     def _mailpit_messages(self) -> int | None:
+        """Alert e-mails to the pricing team in Mailpit (other mail is not counted)."""
         if not self._mailpit:
             return None
         deadline = time.monotonic() + min(self._timeout, 60)
         count = 0
         while time.monotonic() < deadline:
             try:
-                response = httpx2.get(f"{self._mailpit}/api/v1/messages", timeout=5.0)
+                response = httpx2.get(
+                    f"{self._mailpit}/api/v1/search",
+                    params={"query": f'to:"{ALERT_RECIPIENT}"'},
+                    timeout=5.0,
+                )
             except httpx2.HTTPError:
                 return None
             if response.status_code != 200:
                 return None
-            count = int(response.json().get("total", 0))
-            if count >= 3:
+            count = int(response.json().get("messages_count", 0))
+            if count >= EXPECTED_ALERTS:
                 break
             time.sleep(2)
         return count
@@ -476,6 +489,52 @@ class Walkthrough:
         self._echo(f"     {text}")
 
 
+def sign_up(
+    client: httpx2.Client,
+    *,
+    email: str,
+    full_name: str,
+    organization: str,
+    token_for: Callable[[str], str],
+) -> str:
+    """Sign up the way a person does - the address, then the link mailed to it,
+    then a password - and return the new owner's access token."""
+    started = client.post(f"{API}/auth/register", json={"email": email})
+    Walkthrough._check(started, 202, "the sign-up was not accepted")
+    finished = client.post(
+        f"{API}/auth/register/complete",
+        json={
+            "token": token_for(email),
+            "password": secrets.token_urlsafe(18),  # never printed or stored
+            "full_name": full_name,
+            "organization_name": organization,
+        },
+    )
+    Walkthrough._check(finished, 201, "the sign-up could not be finished")
+    token: str = finished.json()["access_token"]
+    return token
+
+
+def mailpit_signup_token(mailpit_url: str | None, email: str, *, timeout: float = 60) -> str:
+    """The token of the sign-up link mailed to ``email``, read from Mailpit."""
+    if not mailpit_url:
+        raise DemoError("the sign-up link arrives by e-mail: run the demo stack (Mailpit)")
+    deadline = time.monotonic() + timeout
+    while True:
+        found = httpx2.get(
+            f"{mailpit_url}/api/v1/search", params={"query": f'to:"{email}"'}, timeout=5.0
+        )
+        if found.status_code == 200:
+            for message in found.json().get("messages", []):
+                full = httpx2.get(f"{mailpit_url}/api/v1/message/{message['ID']}", timeout=5.0)
+                match = _SIGNUP_LINK.search(full.json().get("Text", ""))
+                if full.status_code == 200 and match:
+                    return match[1]
+        if time.monotonic() > deadline:
+            raise DemoError(f"no sign-up e-mail for {email} in Mailpit after {timeout:.0f}s")
+        time.sleep(1)
+
+
 def second_run(changes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """The first snapshot only creates records; the second updates and adds NX-106."""
     return [c for c in changes if c["change_type"] != "created" or c["record_key"] == "NX-106"]
@@ -512,7 +571,28 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--mailpit-url", default="http://127.0.0.1:8025")
     parser.add_argument("--output-dir", type=Path, default=Path("demo-output"))
     parser.add_argument("--timeout", type=float, default=120.0, help="seconds per waiting step")
+    parser.add_argument(
+        "--sign-up-only",
+        metavar="EMAIL",
+        help="only sign up an owner with this address and print their access token (scripts)",
+    )
     args = parser.parse_args(argv)
+    if args.sign_up_only:
+        verify = _verify(args.base_url, args.ca_file)
+        with httpx2.Client(base_url=args.base_url.rstrip("/"), verify=verify) as client:
+            try:
+                token = sign_up(
+                    client,
+                    email=args.sign_up_only,
+                    full_name="Scripted Owner",
+                    organization=f"Scripted {uuid.uuid4().hex[:6]}",
+                    token_for=partial(mailpit_signup_token, args.mailpit_url or None),
+                )
+            except (DemoError, httpx2.HTTPError) as exc:
+                print(f"Sign-up failed: {exc}", file=sys.stderr)
+                return 1
+        print(token)
+        return 0
     walkthrough = Walkthrough(
         args.base_url,
         verify=_verify(args.base_url, args.ca_file),

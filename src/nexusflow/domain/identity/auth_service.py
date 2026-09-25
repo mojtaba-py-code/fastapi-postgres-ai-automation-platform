@@ -1,10 +1,14 @@
-"""Authentication use cases: registration, login (+MFA), refresh rotation,
+"""Authentication use cases: sign-up, login (+MFA), refresh rotation,
 logout, password change/reset and MFA enrollment.
 
 Security design notes
 ---------------------
-* **No user enumeration** on login and password reset: identical responses and
-  comparable timing (dummy Argon2 verification for unknown accounts).
+* **No user enumeration** on sign-up, login and password reset: identical
+  responses and comparable timing (dummy Argon2 verification for unknown
+  accounts; a sign-up for a taken address mails a notice instead of a link).
+* **Proof of address first**: a self-service sign-up stores the address only;
+  the account is created by whoever opens the link mailed there, with the
+  password chosen then - no one can open an account in someone else's name.
 * **Brute force**: per-account counters with exponential lockout (in addition
   to Redis rate limits at the edge). The user row is locked ``FOR UPDATE``
   while counters change, so concurrent attempts cannot race the counter.
@@ -18,6 +22,7 @@ Security design notes
 
 from __future__ import annotations
 
+import re
 import secrets
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
@@ -50,6 +55,7 @@ from nexusflow.domain.identity.model import (
     MfaRecoveryCode,
     PasswordResetToken,
     RefreshToken,
+    SignupRequest,
     User,
     UserSession,
 )
@@ -68,6 +74,7 @@ from nexusflow.domain.shared.security import (
 from nexusflow.domain.shared.unit_of_work import TenantScope, UnitOfWork, UnitOfWorkFactory
 
 _INVALID_CREDENTIALS = "Invalid email or password."
+_ADDRESS = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 _RECOVERY_CODE_COUNT = 10
 _FAMILIARITY_WINDOW = timedelta(days=90)  # sign-ins a new one is compared with
 _MAX_LISTED_SESSIONS = 100
@@ -82,6 +89,7 @@ class AuthPolicy:
     lockout_base_seconds: int
     lockout_max_seconds: int
     password_reset_ttl_seconds: int
+    signup_link_ttl_seconds: int
     signup_enabled: bool
     mfa_issuer: str
     password: PasswordPolicy
@@ -115,6 +123,21 @@ def normalize_email(email: str) -> str:
     return clean_text(email, max_length=254).lower()
 
 
+def _signup_address(email: str) -> str:
+    address = normalize_email(email)
+    if not _ADDRESS.fullmatch(address):
+        raise InvalidInputError("A valid e-mail address is required.", code="invalid_email")
+    return address
+
+
+def _invalid_signup_link() -> InvalidInputError:
+    return InvalidInputError("The sign-up link is invalid or has expired.", code="invalid_token")
+
+
+def _invalid_invitation() -> InvalidInputError:
+    return InvalidInputError("The invitation is invalid or has expired.", code="invalid_invitation")
+
+
 class AuthService:
     def __init__(
         self,
@@ -143,47 +166,138 @@ class AuthService:
 
     # ------------------------------------------------------------ registration
 
-    async def register(
+    async def start_signup(self, *, email: str, meta: RequestMeta) -> None:
+        """Begin a self-service sign-up by mailing the address a link to finish it.
+
+        Nothing about the answer depends on the address: a new one is sent the
+        link, one that already has an account a notice (sign in, or reset the
+        password) - so no one learns from this who has an account.
+        """
+        if not self._policy.signup_enabled:
+            raise PermissionDeniedError("Self-service sign-up is disabled.", code="signup_disabled")
+        address = _signup_address(email)
+        now = self._clock.now()
+        async with self._uow_factory(TenantScope.auth()) as uow:
+            user = await uow.users.get_by_email(address)
+            request_id: UUID | None = None
+            if user is None:
+                request = SignupRequest(
+                    id=uuid7(),
+                    email=address,
+                    created_at=now,
+                    expires_at=now + timedelta(seconds=self._policy.signup_link_ttl_seconds),
+                    requested_ip=meta.ip,
+                )
+                await uow.signup_requests.add(request)
+                await uow.outbox.add(
+                    new_message(
+                        TaskName.SEND_SIGNUP_LINK,
+                        {"signup_id": str(request.id)},
+                        org_id=None,
+                        now=now,
+                    )
+                )
+                request_id = request.id
+            elif user.is_active:
+                await self._notify(uow, user, "signup_existing_account", now)
+            await self._audit.record(
+                uow.audit,
+                action=AuditAction.SIGNUP_STARTED,
+                principal=None,
+                meta=meta,
+                resource_type="signup_request",
+                resource_id=request_id,
+                # As for failed sign-ins: a keyed hash, never the typed address.
+                metadata={
+                    "identifier_hash": self._token_hasher.hash(f"signup:{address}")[:16],
+                    "existing_account": user is not None,
+                },
+            )
+            await uow.commit()
+
+    async def issue_signup_link(self, *, email: str, meta: RequestMeta) -> tuple[str, datetime]:
+        """Operator path (``nexusflow signup issue``): a sign-up token for this
+        address, returned instead of mailed - to bootstrap without e-mail, or to
+        onboard an organization while self-service sign-up is disabled. The
+        account is still created by whoever opens the link, with their password.
+        """
+        address = _signup_address(email)
+        now = self._clock.now()
+        raw = self._tokens.generate(32)
+        async with self._uow_factory(TenantScope.auth()) as uow:
+            if await uow.users.get_by_email(address) is not None:
+                raise ConflictError(
+                    "An account with this e-mail address already exists.", code="account_exists"
+                )
+            request = SignupRequest(
+                id=uuid7(),
+                email=address,
+                token_hash=self._token_hasher.hash(raw),
+                created_at=now,
+                expires_at=now + timedelta(seconds=self._policy.signup_link_ttl_seconds),
+                requested_ip=meta.ip,
+                operator_issued=True,
+            )
+            await uow.signup_requests.add(request)
+            await self._audit.record(
+                uow.audit,
+                action=AuditAction.SIGNUP_LINK_ISSUED,
+                principal=Principal.system(),
+                meta=meta,
+                resource_type="signup_request",
+                resource_id=request.id,
+                metadata={"identifier_hash": self._token_hasher.hash(f"signup:{address}")[:16]},
+            )
+            await uow.commit()
+        return raw, request.expires_at
+
+    async def complete_signup(
         self,
         *,
-        email: str,
+        token: str,
         password: str,
         full_name: str,
-        organization_name: str | None,
-        invitation_token: str | None,
+        organization_name: str,
         meta: RequestMeta,
     ) -> TokenPair:
-        if not self._policy.signup_enabled and invitation_token is None:
-            raise PermissionDeniedError("Self-service sign-up is disabled.", code="signup_disabled")
-        email_n = normalize_email(email)
+        """Create the account and its organization from a sign-up link."""
+        if not token or len(token) > 256:
+            raise _invalid_signup_link()
         name = clean_text(full_name, max_length=120)
         if not name:
             raise InvalidInputError("Full name is required.", code="name_required")
-        self._policy.password.validate(password, email=email_n, name=name)
-        password_hash = await self._hasher.hash(password)
+        org_name = clean_text(organization_name, max_length=120)
+        if not org_name:
+            raise InvalidInputError("Organization name is required.", code="organization_required")
+        token_hash = self._token_hasher.hash(token)
         now = self._clock.now()
+        # 1. Find the request without a lock: the slow hash below never runs while
+        #    this request holds a row lock and a pooled connection (see login).
         async with self._uow_factory(TenantScope.auth()) as uow:
-            if await uow.users.get_by_email(email_n) is not None:
-                raise ConflictError(
-                    "An account with this email already exists.", code="email_taken"
-                )
-            user = User(
-                id=uuid7(),
-                email=email_n,
-                password_hash=password_hash,
-                full_name=name,
-                password_changed_at=now,
-                created_at=now,
-                updated_at=now,
-            )
+            pending = await uow.signup_requests.get_by_hash(token_hash)
+        if pending is None or not pending.is_usable(now):
+            raise _invalid_signup_link()
+        if not pending.operator_issued and not self._policy.signup_enabled:
+            raise PermissionDeniedError("Self-service sign-up is disabled.", code="signup_disabled")
+        self._policy.password.validate(password, email=pending.email, name=name)
+        password_hash = await self._hasher.hash(password)
+        # 2. Create the account while holding every open request for the address
+        #    (locked in one order, so two links opened at once cannot deadlock).
+        async with self._uow_factory(TenantScope.auth()) as uow:
+            requests = await uow.signup_requests.lock_for_email(pending.email)
+            request = next((r for r in requests if r.id == pending.id), None)
+            if request is None or not request.is_usable(now):
+                raise _invalid_signup_link()
+            for other in requests:
+                other.used_at = other.used_at or now
+            if await uow.users.get_by_email(request.email) is not None:
+                await uow.commit()  # the address found its way in meanwhile
+                raise _invalid_signup_link()
+            user = self._new_user(request.email, name, password_hash, now)
             await uow.users.add(user)
-            if invitation_token is not None:
-                org_id, role = await self._join_via_invitation(uow, user, invitation_token, now)
-            else:
-                org_id, role = await self._create_organization(uow, user, organization_name, now)
-            await uow.switch_tenant(org_id)
+            org_id = await self._create_organization(uow, user, org_name, now)
             principal = Principal.for_user(
-                user_id=user.id, org_id=org_id, role=role, session_id=None
+                user_id=user.id, org_id=org_id, role=Role.OWNER, session_id=None
             )
             await self._audit.record(
                 uow.audit,
@@ -192,26 +306,113 @@ class AuthService:
                 meta=meta,
                 resource_type="user",
                 resource_id=user.id,
+                metadata={"via": "operator_link" if request.operator_issued else "signup_link"},
             )
-            if invitation_token is None:
-                await self._audit.record(
-                    uow.audit,
-                    action=AuditAction.ORG_CREATED,
-                    principal=principal,
-                    meta=meta,
-                    resource_type="organization",
-                    resource_id=org_id,
-                )
+            await self._audit.record(
+                uow.audit,
+                action=AuditAction.ORG_CREATED,
+                principal=principal,
+                meta=meta,
+                resource_type="organization",
+                resource_id=org_id,
+            )
             tokens = await self._start_session(uow, user, org_id, meta, now, mfa_verified=False)
             await uow.commit()
         return tokens
 
-    async def _create_organization(
-        self, uow: UnitOfWork, user: User, organization_name: str | None, now: datetime
-    ) -> tuple[UUID, Role]:
-        name = clean_text(organization_name or "", max_length=120)
+    async def register_invited(
+        self, *, token: str, password: str, full_name: str, meta: RequestMeta
+    ) -> TokenPair:
+        """Create an account from an invitation. The invitation link was sent to
+        the address, so it proves it; the address comes from the invitation."""
+        if not token or len(token) > 256:
+            raise _invalid_invitation()
+        name = clean_text(full_name, max_length=120)
         if not name:
-            raise InvalidInputError("Organization name is required.", code="organization_required")
+            raise InvalidInputError("Full name is required.", code="name_required")
+        token_hash = self._token_hasher.hash(token)
+        now = self._clock.now()
+        async with self._uow_factory(TenantScope.auth()) as uow:
+            pending = await uow.invitations.find_by_token_hash(token_hash)
+            taken = pending is not None and await uow.users.get_by_email(pending.email) is not None
+        if pending is None or not pending.is_pending(now):
+            raise _invalid_invitation()
+        if taken:
+            # Only the address's owner holds this link: they have an account.
+            raise ConflictError(
+                "This address already has an account: sign in and accept the invitation.",
+                code="account_exists",
+            )
+        self._policy.password.validate(password, email=pending.email, name=name)
+        password_hash = await self._hasher.hash(password)
+        async with self._uow_factory(TenantScope.auth()) as uow:
+            invitation = await uow.invitations.find_by_token_hash(token_hash)
+            if invitation is None or not invitation.is_pending(now):
+                raise _invalid_invitation()
+            for request in await uow.signup_requests.lock_for_email(invitation.email):
+                request.used_at = request.used_at or now
+            if await uow.users.get_by_email(invitation.email) is not None:
+                raise ConflictError(
+                    "This address already has an account: sign in and accept the invitation.",
+                    code="account_exists",
+                )
+            user = self._new_user(invitation.email, name, password_hash, now)
+            await uow.users.add(user)
+            await uow.switch_tenant(invitation.org_id)
+            invitation.accepted_at = now
+            membership = Membership(
+                id=uuid7(),
+                org_id=invitation.org_id,
+                user_id=user.id,
+                role=invitation.role,
+                invited_by=invitation.invited_by,
+                created_at=now,
+                updated_at=now,
+            )
+            await uow.memberships.add(membership)
+            principal = Principal.for_user(
+                user_id=user.id, org_id=invitation.org_id, role=invitation.role, session_id=None
+            )
+            await self._audit.record(
+                uow.audit,
+                action=AuditAction.REGISTERED,
+                principal=principal,
+                meta=meta,
+                resource_type="user",
+                resource_id=user.id,
+                metadata={"via": "invitation"},
+            )
+            await self._audit.record(
+                uow.audit,
+                action=AuditAction.MEMBER_JOINED,
+                principal=principal,
+                meta=meta,
+                resource_type="membership",
+                resource_id=membership.id,
+                metadata={"role": invitation.role},
+            )
+            tokens = await self._start_session(
+                uow, user, invitation.org_id, meta, now, mfa_verified=False
+            )
+            await uow.commit()
+        return tokens
+
+    @staticmethod
+    def _new_user(email: str, name: str, password_hash: str, now: datetime) -> User:
+        return User(
+            id=uuid7(),
+            email=email,
+            password_hash=password_hash,
+            full_name=name,
+            email_verified_at=now,  # every way in proves the address first
+            password_changed_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+
+    async def _create_organization(
+        self, uow: UnitOfWork, user: User, name: str, now: datetime
+    ) -> UUID:
         slug = await self._unique_slug(uow, name)
         org = Organization(id=uuid7(), name=name, slug=slug, created_at=now, updated_at=now)
         await uow.switch_tenant(org.id)
@@ -226,30 +427,7 @@ class AuthService:
                 updated_at=now,
             )
         )
-        return org.id, Role.OWNER
-
-    async def _join_via_invitation(
-        self, uow: UnitOfWork, user: User, token: str, now: datetime
-    ) -> tuple[UUID, Role]:
-        invitation = await uow.invitations.find_by_token_hash(self._token_hasher.hash(token))
-        if invitation is None or not invitation.is_pending(now) or invitation.email != user.email:
-            raise InvalidInputError(
-                "The invitation is invalid or has expired.", code="invalid_invitation"
-            )
-        await uow.switch_tenant(invitation.org_id)
-        invitation.accepted_at = now
-        await uow.memberships.add(
-            Membership(
-                id=uuid7(),
-                org_id=invitation.org_id,
-                user_id=user.id,
-                role=invitation.role,
-                invited_by=invitation.invited_by,
-                created_at=now,
-                updated_at=now,
-            )
-        )
-        return invitation.org_id, invitation.role
+        return org.id
 
     async def _unique_slug(self, uow: UnitOfWork, name: str) -> str:
         base = slugify(name, max_length=50) or "org"

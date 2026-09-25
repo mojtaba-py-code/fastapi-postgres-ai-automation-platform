@@ -154,6 +154,30 @@ class PasswordResetToken:
 
 
 @dataclass(eq=False, kw_only=True)
+class SignupRequest:
+    """A self-service sign-up waiting for proof of its e-mail address.
+
+    It holds the address only. The account is created by whoever opens the
+    link sent there, with the name and password chosen at that moment, so a
+    sign-up started with someone else's address creates nothing and settles
+    nothing in advance. The token's keyed hash is written by the mail worker
+    (or by an operator issuing the link by hand, ``operator_issued``).
+    """
+
+    id: UUID
+    email: str
+    created_at: datetime
+    expires_at: datetime
+    token_hash: str | None = None
+    used_at: datetime | None = None
+    requested_ip: str | None = None
+    operator_issued: bool = False
+
+    def is_usable(self, now: datetime) -> bool:
+        return self.used_at is None and self.token_hash is not None and self.expires_at > now
+
+
+@dataclass(eq=False, kw_only=True)
 class MfaRecoveryCode:
     id: UUID
     user_id: UUID

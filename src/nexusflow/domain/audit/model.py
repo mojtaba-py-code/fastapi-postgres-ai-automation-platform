@@ -46,6 +46,10 @@ class AuditResult(StrEnum):
 class AuditAction(StrEnum):
     # authentication / sessions
     REGISTERED = "auth.registered"
+    # A self-service sign-up asked for its link (the address is stored hashed).
+    SIGNUP_STARTED = "auth.signup.started"
+    # An operator issued a sign-up link by hand (``nexusflow signup issue``).
+    SIGNUP_LINK_ISSUED = "auth.signup.link_issued"
     LOGIN_SUCCEEDED = "auth.login.succeeded"
     LOGIN_FAILED = "auth.login.failed"
     LOGIN_LOCKED = "auth.login.locked"

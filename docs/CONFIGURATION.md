@@ -118,6 +118,7 @@ Key material, token lifetimes, password hashing and brute-force protection.
 | `NEXUSFLOW_SECURITY__ENCRYPTION_ACTIVE_KEY_ID` | str | `kek-1` | pattern `^[A-Za-z0-9._-]{1,32}$` |
 | `NEXUSFLOW_SECURITY__HMAC_PEPPER` | secret (optional) | *(none)* | secret: prefer `…_FILE` |
 | `NEXUSFLOW_SECURITY__PASSWORD_RESET_TTL_SECONDS` | int | `1800` | >= 300; <= 86400 |
+| `NEXUSFLOW_SECURITY__SIGNUP_LINK_TTL_SECONDS` | int | `86400` | >= 900; <= 604800 |
 | `NEXUSFLOW_SECURITY__INVITATION_TTL_SECONDS` | int | `259200` | >= 3600; <= 1209600 |
 | `NEXUSFLOW_SECURITY__WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS` | int | `300` | >= 30; <= 900 |
 | `NEXUSFLOW_SECURITY__MFA_ISSUER` | str | `NexusFlow AI` |  |
@@ -257,6 +258,8 @@ Default rules. `NEXUSFLOW_RATE_LIMITS__RULES` is a JSON object merged over these
 | `auth.password_reset` | 5 | 3600 | reject (fail closed) |
 | `auth.refresh` | 30 | 60 | reject (fail closed) |
 | `auth.register` | 10 | 3600 | reject (fail closed) |
+| `auth.register.account` | 3 | 3600 | reject (fail closed) |
+| `auth.register.complete` | 60 | 3600 | reject (fail closed) |
 | `automation.service` | 1200 | 60 | allow (fail open) |
 | `external_api.integration` | 60 | 60 | allow (fail open) |
 | `notifications.channel` | 30 | 60 | allow (fail open) |

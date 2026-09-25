@@ -236,6 +236,7 @@ def build_container(
             lockout_base_seconds=sec.lockout_base_seconds,
             lockout_max_seconds=sec.lockout_max_seconds,
             password_reset_ttl_seconds=sec.password_reset_ttl_seconds,
+            signup_link_ttl_seconds=sec.signup_link_ttl_seconds,
             signup_enabled=settings.app.signup_enabled,
             mfa_issuer=sec.mfa_issuer,
             password=PasswordPolicy(

@@ -24,6 +24,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import uuid4
 
+import asyncpg
 import fakeredis
 import httpx2
 import pytest
@@ -38,7 +39,7 @@ from nexusflow.domain.authorization.principal import ServiceScope
 from nexusflow.infrastructure.redis.rate_limit import RateLimiter
 from tests.support.api import ApiSession, signup
 from tests.support.business import create_dataset, create_project
-from tests.support.fixtures import META, PASSWORD, unique_email
+from tests.support.fixtures import META, PASSWORD, SESSION, unique_email
 
 pytestmark = [pytest.mark.security, pytest.mark.integration]
 
@@ -180,12 +181,7 @@ def _as(client: httpx2.AsyncClient, session: ApiSession) -> ApiSession:
 
 
 def _registration(email: str) -> dict[str, str]:
-    return {
-        "email": email,
-        "password": PASSWORD,
-        "full_name": "Rate Tester",
-        "organization_name": f"Org {email[:12]}",
-    }
+    return {"email": email}
 
 
 async def _service_token(container: Container, *scopes: ServiceScope) -> dict[str, str]:
@@ -305,7 +301,8 @@ class TestAuthenticationScopes:
         self, public: httpx2.AsyncClient, public_b: httpx2.AsyncClient, limits: Limits
     ) -> None:
         limits.set("auth.register", 1, 3600)
-        await signup(public)
+        first = await public.post("/api/v1/auth/register", json=_registration(unique_email()))
+        assert first.status_code == 202, first.text
         again = await public.post("/api/v1/auth/register", json=_registration(unique_email()))
         assert_rate_limited(again, retry_after=3600)
         # X-Forwarded-For from an untrusted peer does not buy a fresh budget ...
@@ -316,7 +313,36 @@ class TestAuthenticationScopes:
         )
         assert_rate_limited(spoofed, retry_after=3600)
         # ... a different client address does.
-        await signup(public_b)
+        other = await public_b.post("/api/v1/auth/register", json=_registration(unique_email()))
+        assert other.status_code == 202, other.text
+
+    async def test_finishing_sign_ups_has_a_budget_of_its_own(
+        self, public: httpx2.AsyncClient, public_b: httpx2.AsyncClient, limits: Limits
+    ) -> None:
+        # Starting is cheap to abuse (it sends mail); finishing needs a mailed
+        # token, so a whole office behind one address can join in an hour.
+        limits.set("auth.register", 1, 3600)
+        limits.set("auth.register.complete", 1, 3600)
+        await signup(public)  # finishing does not spend the starting budget ...
+        first = await public.post("/api/v1/auth/register", json=_registration(unique_email()))
+        assert first.status_code == 202, first.text
+        assert_rate_limited(await _finish(public), retry_after=3600)
+        other = await _finish(public_b)  # ... and every client address has its own
+        assert other.status_code == 201, other.text
+
+    async def test_sign_up_mail_is_limited_per_address(
+        self, public: httpx2.AsyncClient, public_b: httpx2.AsyncClient, limits: Limits
+    ) -> None:
+        # Sign-up e-mails must not become a way to flood someone's mailbox: the
+        # budget follows the address, whichever client asks.
+        limits.set("auth.register.account", 1, 3600)
+        target = unique_email()
+        first = await public.post("/api/v1/auth/register", json=_registration(target))
+        assert first.status_code == 202, first.text
+        again = await public_b.post("/api/v1/auth/register", json=_registration(target.upper()))
+        assert_rate_limited(again, retry_after=3600)
+        other = await public_b.post("/api/v1/auth/register", json=_registration(unique_email()))
+        assert other.status_code == 202, other.text
 
     async def test_token_refresh_is_limited_per_client_ip(
         self, public: httpx2.AsyncClient, public_b: httpx2.AsyncClient, limits: Limits
@@ -434,6 +460,24 @@ async def _register(
     return await client.post("/api/v1/auth/register", json=_registration(unique_email()))
 
 
+async def _complete(
+    client: httpx2.AsyncClient, session: ApiSession, dataset: str
+) -> httpx2.Response:
+    return await _finish(client)
+
+
+async def _finish(client: httpx2.AsyncClient) -> httpx2.Response:
+    """Finish a sign-up from a fresh link (the operator path stands in for the mail)."""
+    token, _ = await SESSION["container"].auth.issue_signup_link(email=unique_email(), meta=META)
+    body = {
+        "token": token,
+        "password": PASSWORD,
+        "full_name": "Rate Tester",
+        "organization_name": f"Rate {uuid4().hex[:6]}",
+    }
+    return await client.post("/api/v1/auth/register/complete", json=body)
+
+
 async def _login(client: httpx2.AsyncClient, session: ApiSession, dataset: str) -> httpx2.Response:
     body = {"email": session.email, "password": PASSWORD}
     return await client.post("/api/v1/auth/login", json=body)
@@ -479,7 +523,8 @@ class TestRedisOutage:
     @pytest.mark.parametrize(
         ("scope", "probe", "recovered"),
         [
-            pytest.param("auth.register", _register, 201, id="auth.register"),
+            pytest.param("auth.register", _register, 202, id="auth.register"),
+            pytest.param("auth.register.complete", _complete, 201, id="auth.register.complete"),
             pytest.param("auth.login.ip", _login, 200, id="auth.login"),
             pytest.param("auth.refresh", _refresh, 200, id="auth.refresh"),
             pytest.param("auth.password_reset", _reset, 202, id="auth.password_reset"),
@@ -507,14 +552,17 @@ class TestRedisOutage:
         assert (await probe(public, session, dataset)).status_code == recovered
 
     async def test_nothing_is_created_behind_a_refused_registration(
-        self, public: httpx2.AsyncClient, limits: Limits
+        self, public: httpx2.AsyncClient, limits: Limits, admin_conn: asyncpg.Connection
     ) -> None:
         body = _registration(unique_email())
+        requests = "SELECT count(*) FROM signup_requests WHERE email = $1"
         limits.redis_down()
         assert_unavailable(await public.post("/api/v1/auth/register", json=body))
+        assert await admin_conn.fetchval(requests, body["email"]) == 0  # nothing mailed
         limits.redis_up()
-        created = await public.post("/api/v1/auth/register", json=body)
-        assert created.status_code == 201, created.text  # the address was never taken
+        started = await public.post("/api/v1/auth/register", json=body)
+        assert started.status_code == 202, started.text
+        assert await admin_conn.fetchval(requests, body["email"]) == 1
 
     @pytest.mark.parametrize(
         ("scope", "probe", "status"),

@@ -13,7 +13,7 @@ from fastapi import FastAPI
 
 from nexusflow.apps.api.main import create_app
 from nexusflow.bootstrap.container import Container
-from tests.support.fixtures import PASSWORD, unique_email
+from tests.support.fixtures import META, PASSWORD, SESSION, unique_email
 
 
 @dataclass
@@ -81,11 +81,13 @@ async def internal_api(
 
 
 async def signup(client: httpx2.AsyncClient, *, org: str | None = None) -> ApiSession:
+    """A new owner, finishing a sign-up link through the API."""
     email = unique_email()
+    token, _ = await SESSION["container"].auth.issue_signup_link(email=email, meta=META)
     response = await client.post(
-        "/api/v1/auth/register",
+        "/api/v1/auth/register/complete",
         json={
-            "email": email,
+            "token": token,
             "password": PASSWORD,
             "full_name": "Api Tester",
             "organization_name": org or f"Api Org {email[:12]}",

@@ -3,8 +3,10 @@
 The public API is served by uvicorn on a local port inside the test's event loop,
 backed by the embedded PostgreSQL. The worker pools are replaced by the
 in-process bus, which runs every committed outbox message the way the workers
-would. Only Mailpit, n8n and the network edge (nginx, TLS) are absent; the
-end-to-end suite (tests/e2e) covers those against a running stack.
+would - the sign-up link too: its e-mail is recorded instead of sent, and the
+owner "opens" it from there. Only Mailpit, n8n and the network edge (nginx,
+TLS) are absent; the end-to-end suite (tests/e2e) covers those against a
+running stack.
 """
 
 from __future__ import annotations
@@ -12,8 +14,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib.util
+import re
 import socket
 import sys
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from types import ModuleType
@@ -23,6 +27,7 @@ import pytest
 import uvicorn
 from fastapi import FastAPI
 
+from nexusflow.apps.workers import handlers
 from nexusflow.bootstrap.container import Container
 from tests.support.bus import InProcessBus
 
@@ -74,10 +79,38 @@ async def _serving(app: FastAPI, bus: InProcessBus) -> AsyncIterator[str]:
         await serving
 
 
+class Inbox:
+    """The mail the security e-mail service sends, kept for the test to read."""
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[list[str], str, str]] = []
+
+    async def send_email(self, recipients: list[str], subject: str, body: str) -> None:
+        self.sent.append((recipients, subject, body))
+
+    def signup_token(self, email: str) -> str:
+        """Called from the walkthrough's thread while the bus works in the loop."""
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            for recipients, _, body in list(self.sent):
+                match = re.search(r"/complete-signup#token=([A-Za-z0-9_-]+)", body)
+                if recipients == [email] and match:
+                    return match[1]
+            time.sleep(0.05)
+        raise AssertionError(f"no sign-up e-mail for {email}")
+
+
 async def test_the_demo_walkthrough_runs_end_to_end(
-    api_app: FastAPI, container: Container, bus: InProcessBus, tmp_path: Path
+    api_app: FastAPI,
+    container: Container,
+    bus: InProcessBus,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     await container.redis.flushall()
+    inbox = Inbox()
+    monkeypatch.setattr(container.security_emails, "_email", inbox)
+    monkeypatch.setattr(handlers, "_mail_disabled", lambda deps, kind: False)
     demo = _demo_module()
     narration: list[str] = []
     async with _serving(api_app, bus) as base_url:
@@ -89,6 +122,7 @@ async def test_the_demo_walkthrough_runs_end_to_end(
             timeout=60,
             echo=narration.append,
             client=client,  # the test app only accepts its own host name
+            signup_token=inbox.signup_token,
         )
         result = await asyncio.to_thread(walkthrough.run)
 

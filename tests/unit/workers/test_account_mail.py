@@ -20,6 +20,7 @@ from nexusflow.apps.workers.messages import (
     InvitationMessage,
     PasswordResetMessage,
     SecurityEmailMessage,
+    SignupLinkMessage,
 )
 
 
@@ -36,6 +37,9 @@ class RecordingEmails:
     async def send_password_reset(self, **_: Any) -> None:
         self.sent.append("password_reset")
 
+    async def send_signup_link(self, **_: Any) -> None:
+        self.sent.append("signup_link")
+
 
 def _deps(smtp_host: str | None) -> tuple[Any, RecordingEmails]:
     emails = RecordingEmails()
@@ -50,6 +54,7 @@ async def _send_all(deps: Any) -> None:
     )
     await handlers.send_invitation(deps, InvitationMessage(org_id=uuid4(), invitation_id=uuid4()))
     await handlers.send_password_reset(deps, PasswordResetMessage(reset_id=uuid4()))
+    await handlers.send_signup_link(deps, SignupLinkMessage(signup_id=uuid4()))
 
 
 @pytest.mark.parametrize("host", [None, ""])
@@ -62,4 +67,4 @@ async def test_without_smtp_account_mail_is_skipped_not_failed(host: str | None)
 async def test_with_smtp_account_mail_is_sent() -> None:
     deps, emails = _deps("smtp.example.com")
     await _send_all(deps)
-    assert emails.sent == ["notification", "invitation", "password_reset"]
+    assert emails.sent == ["notification", "invitation", "password_reset", "signup_link"]

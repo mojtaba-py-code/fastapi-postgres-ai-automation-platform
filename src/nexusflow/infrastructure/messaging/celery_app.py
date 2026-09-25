@@ -45,6 +45,7 @@ TASK_ROUTES: dict[TaskName, tuple[str, str]] = {
     TaskName.SEND_SECURITY_EMAIL: ("nexusflow.security.notify", INTEGRATIONS),
     TaskName.SEND_INVITATION: ("nexusflow.security.invitation", INTEGRATIONS),
     TaskName.SEND_PASSWORD_RESET: ("nexusflow.security.password_reset", INTEGRATIONS),
+    TaskName.SEND_SIGNUP_LINK: ("nexusflow.security.signup_link", INTEGRATIONS),
     TaskName.OPERATOR_ALERT: ("nexusflow.operators.alert", INTEGRATIONS),
     TaskName.PURGE_ORGANIZATION: ("nexusflow.maintenance.purge_organizations", PIPELINE),
     TaskName.PURGE_DATASET: ("nexusflow.maintenance.purge_dataset", PIPELINE),

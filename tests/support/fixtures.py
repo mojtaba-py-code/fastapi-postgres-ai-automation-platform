@@ -26,6 +26,10 @@ from tests.support.database import (
 META = RequestMeta(request_id="req-test", ip="203.0.113.10", user_agent="pytest")
 PASSWORD = "Str0ng-and-unique-passphrase!"
 
+# The session's container, for helpers that stand in for a worker - a sign-up
+# link instead of its e-mail (tests/support/api.py, ``signup``).
+SESSION: dict[str, Container] = {}
+
 
 @pytest.fixture(scope="session")
 async def database() -> AsyncIterator[ProvisionedDatabase]:
@@ -60,6 +64,7 @@ async def container(
         engine=engine,
         redis=fakeredis.FakeAsyncRedis(),
     )
+    SESSION["container"] = built
     try:
         yield built
     finally:
@@ -93,13 +98,16 @@ def unique_email(prefix: str = "user") -> str:
 async def register(
     container: Container, *, email: str | None = None, org: str | None = None
 ) -> tuple[str, TokenPair]:
+    """A new owner and organization. The link comes from the operator path - the
+    mail worker does not run here; tests/integration/test_signup.py covers the
+    self-service start and the e-mail."""
     address = email or unique_email()
-    tokens = await container.auth.register(
-        email=address,
+    token, _ = await container.auth.issue_signup_link(email=address, meta=META)
+    tokens = await container.auth.complete_signup(
+        token=token,
         password=PASSWORD,
         full_name="Test User",
         organization_name=org or f"Org {uuid4().hex[:8]}",
-        invitation_token=None,
         meta=META,
     )
     return address, tokens

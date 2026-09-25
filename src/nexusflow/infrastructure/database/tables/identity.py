@@ -125,6 +125,25 @@ password_reset_tokens = Table(
     UniqueConstraint("token_hash"),
 )
 
+# Pending self-service sign-ups: the address only, until its owner opens the
+# link (auth context only; purged by the identity retention).
+signup_requests = Table(
+    "signup_requests",
+    metadata,
+    Column("id", Uuid, primary_key=True),
+    Column("email", String(254), nullable=False),
+    Column("token_hash", String(64)),
+    Column("created_at", TS, nullable=False),
+    Column("expires_at", TS, nullable=False),
+    Column("used_at", TS),
+    Column("requested_ip", String(45)),
+    Column("operator_issued", Boolean, nullable=False),
+    UniqueConstraint("token_hash"),
+    CheckConstraint("email = lower(email)", name="email_lowercase"),
+    Index("ix_signup_requests_email", "email"),
+    Index("ix_signup_requests_expires_at", "expires_at"),
+)
+
 mfa_recovery_codes = Table(
     "mfa_recovery_codes",
     metadata,

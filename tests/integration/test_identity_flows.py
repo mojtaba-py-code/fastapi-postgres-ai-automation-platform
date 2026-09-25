@@ -48,13 +48,13 @@ class TestLoginAndSessions:
             await register(container, email=email)
 
     async def test_weak_password_rejected(self, container: Container) -> None:
+        token, _ = await container.auth.issue_signup_link(email=unique_email(), meta=META)
         with pytest.raises(InvalidInputError) as exc:
-            await container.auth.register(
-                email=unique_email(),
+            await container.auth.complete_signup(
+                token=token,
                 password="password1234",
                 full_name="Weak",
                 organization_name="Weak Org",
-                invitation_token=None,
                 meta=META,
             )
         assert exc.value.code == "weak_password"
@@ -241,13 +241,8 @@ class TestTenancyAndRoles:
             container.token_hasher.hash(raw),
             invitation.id,
         )
-        analyst_tokens = await container.auth.register(
-            email=analyst_email,
-            password=PASSWORD,
-            full_name="Ana Lyst",
-            organization_name=None,
-            invitation_token=raw,
-            meta=META,
+        analyst_tokens = await container.auth.register_invited(
+            token=raw, password=PASSWORD, full_name="Ana Lyst", meta=META
         )
         analyst = await _principal(container, analyst_tokens)
         assert analyst.org_id == owner.org_id

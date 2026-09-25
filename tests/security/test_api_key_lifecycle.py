@@ -35,13 +35,8 @@ async def _join_as(
         container.token_hasher.hash(raw),
         invitation.id,
     )
-    tokens = await container.auth.register(
-        email=email,
-        password=PASSWORD,
-        full_name="Key Maker",
-        organization_name=None,
-        invitation_token=raw,
-        meta=META,
+    tokens = await container.auth.register_invited(
+        token=raw, password=PASSWORD, full_name="Key Maker", meta=META
     )
     return await _principal(container, tokens)
 

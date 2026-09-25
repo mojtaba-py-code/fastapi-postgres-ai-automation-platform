@@ -28,6 +28,7 @@ from nexusflow.apps.workers.messages import (
     ReportMessage,
     RunMessage,
     SecurityEmailMessage,
+    SignupLinkMessage,
 )
 from nexusflow.bootstrap.container import Container
 from nexusflow.bootstrap.messaging import build_relay
@@ -309,6 +310,12 @@ async def send_password_reset(deps: WorkerDeps, msg: PasswordResetMessage) -> No
     if _mail_disabled(deps, "password_reset"):
         return
     await deps.container.security_emails.send_password_reset(reset_id=msg.reset_id)
+
+
+async def send_signup_link(deps: WorkerDeps, msg: SignupLinkMessage) -> None:
+    if _mail_disabled(deps, "signup_link"):
+        return
+    await deps.container.security_emails.send_signup_link(signup_id=msg.signup_id)
 
 
 async def operator_alert(deps: WorkerDeps, msg: OperatorAlertMessage) -> None:

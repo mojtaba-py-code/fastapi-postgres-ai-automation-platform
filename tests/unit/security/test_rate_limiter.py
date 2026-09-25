@@ -38,6 +38,8 @@ FAIL_CLOSED_SCOPES = {
     "auth.refresh",
     "auth.password_reset",
     "auth.register",
+    "auth.register.account",
+    "auth.register.complete",
     "auth.mfa",
     "auth.password_change",
     "api.export",

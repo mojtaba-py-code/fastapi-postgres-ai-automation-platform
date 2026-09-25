@@ -139,6 +139,7 @@ class SecuritySettings(_Section):
     hmac_pepper: SecretStr | None = None
     # --- Token lifetimes
     password_reset_ttl_seconds: int = Field(default=1800, ge=300, le=86_400)
+    signup_link_ttl_seconds: int = Field(default=86_400, ge=900, le=7 * 86_400)
     invitation_ttl_seconds: int = Field(default=72 * 3600, ge=3600, le=14 * 86_400)
     webhook_timestamp_tolerance_seconds: int = Field(default=300, ge=30, le=900)
     mfa_issuer: str = "NexusFlow AI"
@@ -256,6 +257,11 @@ def _default_rate_limits() -> dict[str, RateLimitRule]:
         "auth.refresh": RateLimitRule(limit=30, period_seconds=60, fail_closed=True),
         "auth.password_reset": RateLimitRule(limit=5, period_seconds=3600, fail_closed=True),
         "auth.register": RateLimitRule(limit=10, period_seconds=3600, fail_closed=True),
+        # Per address: sign-up e-mails must not become a way to flood a mailbox.
+        "auth.register.account": RateLimitRule(limit=3, period_seconds=3600, fail_closed=True),
+        # Finishing a sign-up or accepting an invitation as a new account: the
+        # link's token gates it, so a whole office behind one address can join.
+        "auth.register.complete": RateLimitRule(limit=60, period_seconds=3600, fail_closed=True),
         "auth.mfa": RateLimitRule(limit=10, period_seconds=300, fail_closed=True),
         # Per user: a stolen access token must not become a password oracle.
         "auth.password_change": RateLimitRule(limit=5, period_seconds=900, fail_closed=True),

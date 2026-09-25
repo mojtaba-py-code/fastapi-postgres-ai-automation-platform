@@ -11,8 +11,10 @@ from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import delete, func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexusflow.core.errors import ConflictError
 from nexusflow.core.pagination import Page, PageRequest
 from nexusflow.domain.authorization.roles import Role
 from nexusflow.domain.identity.model import (
@@ -21,6 +23,7 @@ from nexusflow.domain.identity.model import (
     PasswordResetToken,
     RefreshToken,
     ServiceAccount,
+    SignupRequest,
     User,
     UserSession,
 )
@@ -54,7 +57,14 @@ class SqlUserRepository:
 
     async def add(self, user: User) -> None:
         self._s.add(user)
-        await self._s.flush()  # deterministic insert order (no ORM relationships)
+        try:
+            await self._s.flush()  # deterministic insert order (no ORM relationships)
+        except IntegrityError as exc:  # the same address, signed up at the same moment
+            raise ConflictError(
+                "An account with this e-mail address already exists.",
+                code="account_exists",
+                internal_detail=str(exc.orig)[:300],
+            ) from exc
 
 
 class SqlSessionRepository:
@@ -156,6 +166,32 @@ class SqlPasswordResetRepository:
             .values(used_at=now)
             .execution_options(synchronize_session=False)
         )
+
+
+class SqlSignupRequestRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._s = session
+
+    async def add(self, request: SignupRequest) -> None:
+        self._s.add(request)
+        await self._s.flush()  # deterministic insert order (no ORM relationships)
+
+    async def get(self, request_id: UUID) -> SignupRequest | None:
+        return await self._s.get(SignupRequest, request_id)
+
+    async def get_by_hash(self, token_hash: str) -> SignupRequest | None:
+        statement = select(SignupRequest).where(t.signup_requests.c.token_hash == token_hash)
+        return (await self._s.execute(statement)).scalar_one_or_none()
+
+    async def lock_for_email(self, email: str) -> list[SignupRequest]:
+        statement = (
+            select(SignupRequest)
+            .where(t.signup_requests.c.email == email)
+            .order_by(t.signup_requests.c.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        return list((await self._s.execute(statement)).scalars().all())
 
 
 class SqlRecoveryCodeRepository:

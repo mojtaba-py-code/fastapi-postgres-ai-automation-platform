@@ -20,6 +20,7 @@ from nexusflow.domain.identity.model import (
     PasswordResetToken,
     RefreshToken,
     ServiceAccount,
+    SignupRequest,
     User,
     UserSession,
 )
@@ -46,6 +47,7 @@ _MAPPINGS: list[tuple[type, Table]] = [
     (UserSession, t.user_sessions),
     (RefreshToken, t.refresh_tokens),
     (PasswordResetToken, t.password_reset_tokens),
+    (SignupRequest, t.signup_requests),
     (MfaRecoveryCode, t.mfa_recovery_codes),
     (Membership, t.memberships),
     (Invitation, t.invitations),

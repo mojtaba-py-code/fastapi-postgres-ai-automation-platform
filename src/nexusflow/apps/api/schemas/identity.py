@@ -23,10 +23,27 @@ OpaqueToken = Field(min_length=1, max_length=4096, repr=False)
 
 class RegisterRequest(RequestModel):
     email: EmailStr = Field(max_length=254)
+
+
+class RegistrationStartedResponse(ResponseModel):
+    status: Literal["check_email"] = "check_email"
+    detail: str = Field(
+        default=("If this address can be used, a link to finish the sign-up is on its way to it."),
+        description="The same answer for every address: it reveals no account.",
+    )
+
+
+class CompleteRegistrationRequest(RequestModel):
+    token: str = Field(min_length=1, max_length=256, repr=False)
     password: str = Password
     full_name: str = Field(min_length=1, max_length=120)
-    organization_name: str | None = Field(default=None, max_length=120)
-    invitation_token: str | None = Field(default=None, max_length=256, repr=False)
+    organization_name: str = Field(min_length=1, max_length=120)
+
+
+class InvitedRegistrationRequest(RequestModel):
+    token: str = Field(min_length=1, max_length=256, repr=False)
+    password: str = Password
+    full_name: str = Field(min_length=1, max_length=120)
 
 
 class LoginRequest(RequestModel):

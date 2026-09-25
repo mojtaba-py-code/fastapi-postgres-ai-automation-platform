@@ -34,6 +34,7 @@ class TaskName(StrEnum):
     SEND_SECURITY_EMAIL = "security.send_email"
     SEND_INVITATION = "security.send_invitation"
     SEND_PASSWORD_RESET = "security.send_password_reset"  # noqa: S105 - task name  # nosec B105
+    SEND_SIGNUP_LINK = "security.send_signup_link"
     OPERATOR_ALERT = "operators.alert"
     PURGE_ORGANIZATION = "maintenance.purge_organization"
     PURGE_DATASET = "maintenance.purge_dataset"

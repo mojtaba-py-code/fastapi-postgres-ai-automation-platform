@@ -20,6 +20,8 @@ from nexusflow.apps.api.dependencies import (
 from nexusflow.apps.api.schemas.common import ERROR_RESPONSES
 from nexusflow.apps.api.schemas.identity import (
     AcceptInvitationRequest,
+    CompleteRegistrationRequest,
+    InvitedRegistrationRequest,
     LoginRequest,
     MfaChallengeResponse,
     MfaCodeRequest,
@@ -33,6 +35,7 @@ from nexusflow.apps.api.schemas.identity import (
     PasswordResetRequest,
     RefreshRequest,
     RegisterRequest,
+    RegistrationStartedResponse,
     SwitchOrganizationRequest,
     TokenResponse,
 )
@@ -81,18 +84,54 @@ async def _limit_account(state: StateDep, email: str) -> None:
 
 @router.post(
     "/register",
+    response_model=RegistrationStartedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(rate_limited("auth.register"))],
+    summary="Start a sign-up: a link to finish it is mailed to the address",
+)
+async def register(
+    body: RegisterRequest, container: ContainerDep, state: StateDep, meta: Meta
+) -> RegistrationStartedResponse:
+    rule = state.container.settings.rate_limits.rules["auth.register.account"]
+    await state.limiter.enforce("auth.register.account", _account_key(str(body.email)), rule)
+    await container.auth.start_signup(email=str(body.email), meta=meta)
+    metrics.AUTH_EVENTS.labels(event="signup_started", result="success").inc()
+    return RegistrationStartedResponse()
+
+
+@router.post(
+    "/register/complete",
     response_model=TokenResponse,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(rate_limited("auth.register"))],
+    dependencies=[Depends(rate_limited("auth.register.complete"))],
+    summary="Finish a sign-up with the mailed link: the account and its organization",
 )
-async def register(body: RegisterRequest, container: ContainerDep, meta: Meta) -> TokenResponse:
-    pair = await container.auth.register(
-        email=str(body.email),
+async def complete_registration(
+    body: CompleteRegistrationRequest, container: ContainerDep, meta: Meta
+) -> TokenResponse:
+    pair = await container.auth.complete_signup(
+        token=body.token,
         password=body.password,
         full_name=body.full_name,
         organization_name=body.organization_name,
-        invitation_token=body.invitation_token,
         meta=meta,
+    )
+    metrics.AUTH_EVENTS.labels(event="register", result="success").inc()
+    return _tokens(pair)
+
+
+@router.post(
+    "/register/invitation",
+    response_model=TokenResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limited("auth.register.complete"))],
+    summary="Create an account from an invitation (existing accounts use /invitations/accept)",
+)
+async def register_invited(
+    body: InvitedRegistrationRequest, container: ContainerDep, meta: Meta
+) -> TokenResponse:
+    pair = await container.auth.register_invited(
+        token=body.token, password=body.password, full_name=body.full_name, meta=meta
     )
     metrics.AUTH_EVENTS.labels(event="register", result="success").inc()
     return _tokens(pair)

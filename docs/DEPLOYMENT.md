@@ -225,9 +225,19 @@ is connected to the broker - and are reported unhealthy when it goes stale
 restarts containers that exit, not unhealthy ones: alert on
 `docker ps --filter health=unhealthy` (or run an orchestrator that restarts them).
 
-Create the first organization by registering through the API. Then disable public
-sign-up with `NEXUSFLOW_SIGNUP_ENABLED=false` in `.env` and `docker compose up -d`,
-and invite further users from inside the organization.
+Create the first organization by signing up through the API: the link to finish
+arrives by e-mail (section 2, "E-mail"). Without an SMTP relay yet, an operator
+prints one instead - it is valid 24 hours, and whoever opens it chooses the owner's
+password:
+
+```bash
+docker compose run --rm api-internal nexusflow signup issue --email owner@example.com
+```
+
+Then disable public sign-up with `NEXUSFLOW_SIGNUP_ENABLED=false` in `.env` and
+`docker compose up -d`, and invite further users from inside the organization.
+`nexusflow signup issue` keeps working while sign-up is disabled: it is how an
+operator onboards the next customer organization.
 
 ## 4. n8n
 

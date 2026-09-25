@@ -4,30 +4,17 @@ extracted. Needs internet access from the stack (CI runners have it)."""
 
 from __future__ import annotations
 
-import secrets
 import time
-import uuid
+from types import ModuleType
 from typing import Any
 
 import httpx2
 import pytest
 
+from tests.e2e.conftest import LiveStack, sign_up
+
 API = "/api/v1"
 PAGE = "https://example.com/"  # IANA's reserved example page: stable, public, no robots.txt
-
-
-def _owner(client: httpx2.Client) -> dict[str, str]:
-    registered = client.post(
-        f"{API}/auth/register",
-        json={
-            "email": f"e2e+{uuid.uuid4().hex[:10]}@nexusflow.example.com",
-            "password": secrets.token_urlsafe(18),
-            "full_name": "E2E Renderer",
-            "organization_name": f"E2E Rendering {uuid.uuid4().hex[:6]}",
-        },
-    )
-    assert registered.status_code == 201, registered.text
-    return {"Authorization": f"Bearer {registered.json()['access_token']}"}
 
 
 def _created(response: httpx2.Response) -> dict[str, Any]:
@@ -36,8 +23,10 @@ def _created(response: httpx2.Response) -> dict[str, Any]:
     return body
 
 
-def test_a_javascript_source_is_rendered_by_the_real_browser(client: httpx2.Client) -> None:
-    owner = _owner(client)
+def test_a_javascript_source_is_rendered_by_the_real_browser(
+    client: httpx2.Client, live: LiveStack, demo: ModuleType
+) -> None:
+    owner = sign_up(client, live, demo, "E2E Rendering")
     project = _created(client.post(f"{API}/projects", json={"name": "Rendered"}, headers=owner))
     dataset = _created(
         client.post(
