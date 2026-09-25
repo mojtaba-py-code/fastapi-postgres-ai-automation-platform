@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Session, SessionTransaction
 
 from nexusflow.domain.shared.outbox import OutboxMessage
+from nexusflow.domain.shared.security import SecretCipher
 from nexusflow.domain.shared.unit_of_work import TenantScope
 from nexusflow.infrastructure.database.repositories.audit import SqlAuditLogRepository
 from nexusflow.infrastructure.database.repositories.data import (
@@ -63,6 +64,7 @@ from nexusflow.infrastructure.database.repositories.identity import (
     SqlUserRepository,
 )
 from nexusflow.infrastructure.database.repositories.outbox import SqlOutboxRepository
+from nexusflow.infrastructure.database.sealing import CIPHER_KEY
 
 _SCOPE_KEY = "tenant_scope"
 _SET_SCOPE = text(
@@ -145,10 +147,12 @@ class SqlUnitOfWork:
         session_factory: async_sessionmaker[AsyncSession],
         scope: TenantScope,
         publisher: OutboxPublisher | None = None,
+        cipher: SecretCipher | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._scope = scope
         self._publisher = publisher
+        self._cipher = cipher
         self._session: AsyncSession | None = None
 
     @property
@@ -164,6 +168,8 @@ class SqlUnitOfWork:
     async def __aenter__(self) -> Self:
         session = self._session_factory()
         session.info[_SCOPE_KEY] = self._scope
+        if self._cipher is not None:
+            session.info[CIPHER_KEY] = self._cipher  # opens sealed values as rows load
         self._session = session
         self.users = SqlUserRepository(session)
         self.sessions = SqlSessionRepository(session)
@@ -229,12 +235,15 @@ class SqlUnitOfWorkFactory:
         self,
         session_factory: async_sessionmaker[AsyncSession],
         publisher: OutboxPublisher | None = None,
+        *,
+        cipher: SecretCipher | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._publisher = publisher
+        self._cipher = cipher
 
     def set_publisher(self, publisher: OutboxPublisher | None) -> None:
         self._publisher = publisher
 
     def __call__(self, scope: TenantScope) -> SqlUnitOfWork:
-        return SqlUnitOfWork(self._session_factory, scope, self._publisher)
+        return SqlUnitOfWork(self._session_factory, scope, self._publisher, self._cipher)

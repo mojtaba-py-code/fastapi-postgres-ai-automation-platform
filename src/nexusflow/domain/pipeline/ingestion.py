@@ -30,6 +30,8 @@ from nexusflow.domain.catalog.model import Dataset
 from nexusflow.domain.catalog.service import get_dataset
 from nexusflow.domain.pipeline.stages import CleanRecord, PipelineResult, run_pipeline
 from nexusflow.domain.records.model import Record, RecordVersion
+from nexusflow.domain.records.sealing import seal_data
+from nexusflow.domain.shared.security import SecretCipher, TokenHasher
 from nexusflow.domain.shared.unit_of_work import TenantScope, UnitOfWork, UnitOfWorkFactory
 from nexusflow.domain.sources.model import (
     DEFAULT_MAX_DELETION_RATIO,
@@ -85,13 +87,33 @@ class IngestionService:
         *,
         uow_factory: UnitOfWorkFactory,
         clock: Clock,
+        cipher: SecretCipher,
+        hasher: TokenHasher,
         max_items_per_run: int,
         max_invalid_ratio: float = 0.5,
     ) -> None:
         self._uow_factory = uow_factory
         self._clock = clock
+        self._cipher = cipher
+        self._hasher = hasher
         self._max_items = max_items_per_run
         self._max_invalid_ratio = max_invalid_ratio
+
+    def _seal(self, dataset: Dataset, record_id: UUID, data: dict[str, Any]) -> dict[str, Any]:
+        """Sensitive values are encrypted before they are stored (records.sealing)."""
+        return seal_data(
+            self._cipher,
+            data,
+            dataset.spec.sensitive_fields,
+            org_id=dataset.org_id,
+            dataset_id=dataset.id,
+            record_id=record_id,
+        )
+
+    def _fingerprint(self, content_hash: str) -> str:
+        """The stored content hash is keyed: a plain hash over all fields would let
+        anyone holding a database copy confirm guesses of a sensitive value."""
+        return self._hasher.hash(f"record-content:v1:{content_hash}")
 
     async def ingest(
         self,
@@ -210,14 +232,16 @@ class IngestionService:
             unchanged: list[UUID] = []
             for clean in chunk:
                 current = existing.get(clean.key)
+                fingerprint = self._fingerprint(clean.content_hash)
                 if current is None:
+                    record_id = uuid7()
                     record = Record(
-                        id=uuid7(),
+                        id=record_id,
                         org_id=dataset.org_id,
                         dataset_id=dataset.id,
                         record_key=clean.key,
-                        data=clean.data,
-                        content_hash=clean.content_hash,
+                        data=self._seal(dataset, record_id, clean.data),
+                        content_hash=fingerprint,
                         version=1,
                         source_id=source.id,
                         first_seen_at=now,
@@ -225,17 +249,17 @@ class IngestionService:
                         last_run_id=run.id,
                     )
                     new_records.append(record)
-                    versions.append(_version(record, run.id, now))
+                    versions.append(_version(record, run.id, now, data=record.data))
                     counts.created += 1
-                elif current.content_hash != clean.content_hash or current.deleted_at is not None:
+                elif current.content_hash != fingerprint or current.deleted_at is not None:
                     current.version += 1
-                    current.data = clean.data
-                    current.content_hash = clean.content_hash
+                    current.data = self._seal(dataset, current.id, clean.data)
+                    current.content_hash = fingerprint
                     current.deleted_at = None
                     current.last_seen_at = now
                     current.last_run_id = run.id
                     current.source_id = source.id
-                    versions.append(_version(current, run.id, now))
+                    versions.append(_version(current, run.id, now, data=current.data))
                     counts.updated += 1
                 else:
                     unchanged.append(current.id)
@@ -286,7 +310,9 @@ class IngestionService:
             record.version += 1
             record.deleted_at = now
             record.last_run_id = run.id
-            versions.append(_version(record, run.id, now, is_deletion=True))
+            # Loaded rows hold opened values: the deletion version is sealed again.
+            sealed = self._seal(dataset, record.id, record.data)
+            versions.append(_version(record, run.id, now, data=sealed, is_deletion=True))
         await uow.data.records.add_versions(versions)
         return len(missing), 0
 
@@ -310,15 +336,21 @@ class IngestionService:
 
 
 def _version(
-    record: Record, run_id: UUID, now: datetime, *, is_deletion: bool = False
+    record: Record,
+    run_id: UUID,
+    now: datetime,
+    *,
+    data: dict[str, Any],
+    is_deletion: bool = False,
 ) -> RecordVersion:
+    """A version of ``record`` holding ``data`` - already sealed by the caller."""
     return RecordVersion(
         id=uuid7(),
         org_id=record.org_id,
         dataset_id=record.dataset_id,
         record_id=record.id,
         version=record.version,
-        data=dict(record.data),
+        data=dict(data),
         content_hash=record.content_hash,
         run_id=run_id,
         captured_at=now,

@@ -85,10 +85,11 @@ class UploadService:
         keep = False
         try:  # the stored file is removed on every path that does not register it
             try:
-                await asyncio.to_thread(
-                    inspect_file, self._storage.local_path(key), expected=config.format
-                )
-                verdict = await self._scanner.scan(self._storage.local_path(key))
+                # Stored files are encrypted at rest: inspection and scanning work
+                # on a private plaintext copy, removed straight after.
+                async with self._storage.plaintext(key) as plain:
+                    await asyncio.to_thread(inspect_file, plain, expected=config.format)
+                    verdict = await self._scanner.scan(plain)
                 if not verdict.clean:
                     raise InvalidInputError(
                         "The file was rejected by the malware scanner.", code="upload_malware"

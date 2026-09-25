@@ -131,9 +131,11 @@ below.
    clients verify servers against a private CA (tested) and the server-side steps
    are documented, but the Compose file does not ship that configuration; on one
    host the traffic stays on internal networks and startup logs a warning.
-9. Tenant business data is stored in plaintext in PostgreSQL; use disk or volume
-   encryption (secrets, credentials and MFA secrets are encrypted by the
-   application). Field-level encryption of sensitive fields is on the roadmap.
+9. The application encrypts sensitive field values, staged payloads, uploads and
+   reports at rest; the other fields of tenant data are plaintext in PostgreSQL so
+   they can be queried - use disk or volume encryption, and mark personal data
+   `sensitive`. Keys live in files mounted as Docker secrets; a hardware or cloud
+   KMS is on the roadmap.
 10. Sign-in risk uses devices, networks and failures, not geolocation
     (impossible-travel checks need a GeoIP database).
 11. The sandbox's delayed retries (at most three, 20-100 s apart) still occupy a

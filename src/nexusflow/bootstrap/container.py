@@ -65,6 +65,7 @@ from nexusflow.infrastructure.reporting.renderers import ReportRendererRegistry
 from nexusflow.infrastructure.scraping.collectors import RestApiCollector
 from nexusflow.infrastructure.scraping.extraction import validate_selector
 from nexusflow.infrastructure.security.crypto import EnvelopeCipher
+from nexusflow.infrastructure.security.files import FileSealer
 from nexusflow.infrastructure.security.hashing import HmacTokenHasher, SecureTokenGenerator
 from nexusflow.infrastructure.security.jwt_tokens import JwtKeyRing, JwtTokenCodec
 from nexusflow.infrastructure.security.passwords import Argon2idPasswordHasher
@@ -174,14 +175,14 @@ def build_container(
     sec = settings.security
     engine = engine or create_engine(settings.database, application_name=application_name)
     session_factory = create_session_factory(engine)
-    uow_factory = SqlUnitOfWorkFactory(session_factory)
+    cipher, token_hasher, keyring = build_security(settings)
+    uow_factory = SqlUnitOfWorkFactory(session_factory, cipher=cipher)
     redis_client = redis if redis is not None else create_redis(settings.redis)
     prefix = settings.redis.key_prefix
     limiter = RateLimiter(
         redis_client, prefix=prefix, clock=clock, enabled=settings.rate_limits.enabled
     )
     replay_guard = ReplayGuard(redis_client, prefix=prefix)
-    cipher, token_hasher, keyring = build_security(settings)
     tokens = SecureTokenGenerator()
     token_codec = JwtTokenCodec(
         keyring,
@@ -198,7 +199,7 @@ def build_container(
     audit = AuditRecorder(clock)
     url_policy = build_url_policy(settings.scraping)
     http_client = http or build_http_client(settings.scraping, url_policy)
-    storage = LocalFileStorage(settings.storage.root)
+    storage = LocalFileStorage(settings.storage.root, FileSealer(cipher))
     scanner = (
         ClamdScanner.from_address(settings.storage.clamav_address)
         if settings.storage.clamav_address
@@ -245,7 +246,7 @@ def build_container(
     integrations = IntegrationService(
         uow_factory=uow_factory, clock=clock, audit=audit, cipher=cipher, token_generator=tokens
     )
-    detection = ChangeDetectionService(uow_factory=uow_factory, clock=clock)
+    detection = ChangeDetectionService(uow_factory=uow_factory, clock=clock, cipher=cipher)
     intelligence = IntelligenceService(
         uow_factory=uow_factory,
         clock=clock,
@@ -270,6 +271,8 @@ def build_container(
     ingestion = IngestionService(
         uow_factory=uow_factory,
         clock=clock,
+        cipher=cipher,
+        hasher=token_hasher,
         max_items_per_run=max(
             settings.scraping.max_items_per_run, settings.storage.max_upload_rows
         ),

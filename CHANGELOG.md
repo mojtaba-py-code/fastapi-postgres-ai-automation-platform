@@ -38,6 +38,11 @@ All notable changes are documented here. The format follows
   (`SuspiciousSignIns`).
 * Request correlation: the request ID travels with the outbox messages into every
   job it causes and their log lines (also for scheduled jobs and CLI commands).
+* Encryption at rest by the application: the values of `sensitive` fields in
+  records, their versions and change diffs, staged raw payloads, and stored files
+  (uploads, reports; streaming AES-256-GCM) - each bound to its tenant and row or
+  file, re-wrapped on key rotation, failing closed when moved or altered. Record
+  content hashes are keyed.
 * Automation:
   * workflows, a transactional outbox and Celery workers (pipeline, integrations,
     sandbox);
@@ -108,6 +113,8 @@ residual risk in the threat model. The full record is in
 * Uploads: macro-enabled workbooks are recognised by their content types and
   relationships too; duplicate parts and empty CSV files are refused at intake;
   every CSV row obeys the column cap.
+* The browser image no longer ships the base image's unused global pip and
+  virtualenv (with the vulnerable setuptools and msgpack they carried).
 
 ### Fixed
 * Retention never deleted anything: the dead-letter purge lacked a privilege and

@@ -12,8 +12,9 @@ limits).
   updates.
 * A host firewall that allows inbound 22 (SSH, preferably from a VPN or bastion) and
   443/80 only.
-* Full-disk encryption or an encrypted volume for Docker data (tenant data is stored
-  in plaintext in PostgreSQL).
+* Full-disk encryption or an encrypted volume for Docker data. The application
+  encrypts sensitive field values, staged payloads, uploads and reports itself;
+  other tenant data is plaintext in PostgreSQL so it can be queried.
 * NTP time sync: token expiry, webhook timestamps and TOTP all depend on the clock.
 * At least 2 vCPUs and 8 GB of memory (16 GB with ClamAV). The API and the browser
   are limited to 2 CPUs each, and Docker refuses to create a container whose CPU
@@ -223,7 +224,7 @@ chain) are your external audit anchors: compare them with `nexusflow audit verif
 | What | Procedure | Impact |
 |---|---|---|
 | **JWT signing key** | 1. Generate a new Ed25519 key and set a new `jwt_key_id`. 2. Add the old public key to `jwt_previous_public_keys` so existing tokens validate until they expire. 3. Redeploy. 4. Remove the old public key after the access-token TTL. | None |
-| **KEK** | 1. Add a new key to `encryption_keys` and set `encryption_active_key_id`. 2. Redeploy. 3. Run `nexusflow keys rewrap` until it reports 0; the daily beat job also re-wraps. 4. Remove the old key. MFA secrets are re-encrypted on each user's next MFA sign-in, so keep old KEKs until all users have signed in or MFA was re-enrolled. | None |
+| **KEK** | 1. Add a new key to `encryption_keys` and set `encryption_active_key_id`. 2. Redeploy. 3. Run `nexusflow keys rewrap` until it reports 0 - it re-wraps integration and webhook secrets, sealed field values in records, versions and changes, and the keys of stored files; the daily beat job does the same in batches. 4. Remove the old key. MFA secrets are re-encrypted on each user's next MFA sign-in, and staged payloads live only minutes, so keep old KEKs until all users have signed in or MFA was re-enrolled. | None |
 | **HMAC pepper** | Only after a compromise, see INCIDENT_RESPONSE.md | All API keys, sessions and pending links become invalid |
 | **Service tokens** | `nexusflow service-account rotate --workflow-key <key>`, then update the n8n credential | That workflow fails until updated |
 | **Webhook secrets** | `POST /api/v1/webhook-endpoints/{id}/rotate-secret` (24 h grace) | None |

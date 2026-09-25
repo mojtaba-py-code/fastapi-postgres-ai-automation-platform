@@ -92,6 +92,11 @@ Details are in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) and
 * Secrets are sealed with AES-256-GCM envelope encryption, bound to their context
   (AAD) and protected by rotatable KEKs, then re-encrypted in the background after
   rotation.
+* Tenant data at rest: the values of fields marked `sensitive` (in records, their
+  history and change diffs), staged raw payloads, uploaded files and reports are
+  encrypted by the application under the same KEKs, each bound to its tenant and
+  row or file; a moved or altered ciphertext fails closed. Record content hashes
+  are keyed.
 * The audit log is append-only and hash-chained per tenant, plus a platform chain for
   events without a tenant (failed sign-ins for unknown accounts, operator commands).
   It is writable only through a `SECURITY DEFINER` function, verifiable through the API

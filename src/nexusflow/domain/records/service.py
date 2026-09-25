@@ -11,6 +11,8 @@ from nexusflow.domain.automation.events import EventType, event_message
 from nexusflow.domain.catalog.service import get_dataset
 from nexusflow.domain.records.detection import diff_versions
 from nexusflow.domain.records.model import Change, Significance
+from nexusflow.domain.records.sealing import seal_diff
+from nexusflow.domain.shared.security import SecretCipher
 from nexusflow.domain.shared.unit_of_work import TenantScope, UnitOfWork, UnitOfWorkFactory
 
 
@@ -25,10 +27,16 @@ class DetectionOutcome:
 
 class ChangeDetectionService:
     def __init__(
-        self, *, uow_factory: UnitOfWorkFactory, clock: Clock, batch_size: int = 1000
+        self,
+        *,
+        uow_factory: UnitOfWorkFactory,
+        clock: Clock,
+        cipher: SecretCipher,
+        batch_size: int = 1000,
     ) -> None:
         self._uow_factory = uow_factory
         self._clock = clock
+        self._cipher = cipher
         self._batch = batch_size
 
     async def detect(self, *, org_id: UUID, dataset_id: UUID) -> DetectionOutcome:
@@ -64,7 +72,15 @@ class ChangeDetectionService:
                         change_type=detected.change_type,
                         from_version=version.version - 1 if version.version > 1 else None,
                         to_version=version.version,
-                        diff=detected.diff,
+                        # Versions load opened; the diff of sensitive fields is sealed.
+                        diff=seal_diff(
+                            self._cipher,
+                            detected.diff,
+                            spec.sensitive_fields,
+                            org_id=org_id,
+                            dataset_id=dataset_id,
+                            record_id=version.record_id,
+                        ),
                         significance=detected.significance,
                         score=detected.score,
                         detected_at=now,

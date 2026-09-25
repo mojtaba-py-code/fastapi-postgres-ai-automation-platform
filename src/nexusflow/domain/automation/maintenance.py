@@ -78,6 +78,15 @@ class MaintenanceService:
         async with self._uow_factory(TenantScope.system(None)) as uow:
             return await uow.data.system.tenant_ids(["active", "suspended", "pending_deletion"])
 
+    async def rewrap_sealed(self, org_id: UUID, *, active_key_id: str, batch: int = 200) -> int:
+        """Key rotation: move one batch of a tenant's sealed data to the active
+        key-encryption key (records, versions, change diffs and stored files)."""
+        async with self._uow_factory(TenantScope.system(org_id)) as uow:
+            count = await uow.data.records.rewrap_sealed(org_id, active_key_id, limit=batch)
+            count += await uow.data.changes.rewrap_sealed(org_id, active_key_id, limit=batch)
+            await uow.commit()
+        return count + await self._storage.rewrap(org_id, limit=batch)
+
     async def apply_retention(self, org_id: UUID) -> MaintenanceReport:
         now = self._clock.now()
         report = MaintenanceReport()

@@ -34,6 +34,7 @@ from nexusflow.domain.sources.model import CollectionRun, Source
 from nexusflow.domain.uploads.model import Upload
 from nexusflow.domain.webhooks.model import InboundWebhookEvent, WebhookEndpoint
 from nexusflow.infrastructure.database.metadata import metadata
+from nexusflow.infrastructure.database.sealing import register_sealing_listeners
 from nexusflow.infrastructure.database.tables import data as d
 from nexusflow.infrastructure.database.tables import identity as t
 
@@ -79,3 +80,4 @@ def register_mappings(extra: list[tuple[type, Table]] | None = None) -> None:
     for cls, table in [*_MAPPINGS, *(extra or [])]:
         if inspect(cls, raiseerr=False) is None:
             mapper_registry.map_imperatively(cls, table)
+    register_sealing_listeners()  # sensitive values are sealed at rest, opened as rows load

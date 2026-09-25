@@ -21,9 +21,16 @@ ENV UV_COMPILE_BYTECODE=1 \
 WORKDIR /build
 COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY src ./src
+# The base image's own tooling - the global pip and the virtualenv it used to
+# install Playwright, with what they vendor or seed (setuptools, msgpack) - is
+# never used at run time (the renderer runs from /opt/venv) and would only carry
+# vulnerabilities into the image: it is removed, and the build checks it is gone.
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-editable --extra browser \
  && rm -rf /build /usr/local/bin/uv \
+ && { python3 -m pip uninstall --yes --break-system-packages \
+        virtualenv setuptools msgpack wheel pip > /dev/null 2>&1 || true; } \
+ && ! python3 -m pip --version > /dev/null 2>&1 \
  && groupadd --system --gid 10002 renderer \
  && useradd --system --uid 10002 --gid renderer --create-home --shell /usr/sbin/nologin renderer
 

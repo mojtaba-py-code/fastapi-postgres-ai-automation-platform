@@ -20,6 +20,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from nexusflow.core.jsonutil import JSONValue
 from nexusflow.core.pagination import Page, PageRequest
@@ -37,12 +38,22 @@ from nexusflow.domain.records.model import (
     RecordVersion,
     Significance,
 )
+from nexusflow.domain.records.sealing import (
+    SealedValueError,
+    field_context,
+    is_sealed,
+    open_value,
+    rewrap_value,
+    seal_value,
+)
 from nexusflow.domain.reports.model import Report
+from nexusflow.domain.shared.security import SecretCipher
 from nexusflow.domain.sources.model import CollectionRun, RunStatus, Source
 from nexusflow.domain.uploads.model import Upload, UploadStatus
 from nexusflow.domain.webhooks.model import InboundWebhookEvent, WebhookEndpoint
 from nexusflow.infrastructure.database.pagination import paginate
 from nexusflow.infrastructure.database.repositories.base import TenantRepository
+from nexusflow.infrastructure.database.sealing import CIPHER_KEY
 from nexusflow.infrastructure.database.tables import data as d
 from nexusflow.infrastructure.database.tables import identity as t
 
@@ -164,13 +175,20 @@ class SqlCollectionRunRepository(TenantRepository[CollectionRun]):
 
 
 class SqlRunPayloadRepository:
+    """Collected items staged between receipt and ingestion - sealed as a whole:
+    they are raw source data, sensitive fields included, before any schema."""
+
     def __init__(self, session: AsyncSession) -> None:
         self._s = session
 
+    def _cipher(self) -> SecretCipher:
+        return _session_cipher(self._s)
+
     async def put(self, org_id: UUID, run_id: UUID, items: list[JSONValue], now: datetime) -> None:
+        sealed = seal_value(self._cipher(), items, _payload_context(org_id, run_id))
         await self._s.execute(
             d.run_payloads.insert().values(
-                run_id=run_id, org_id=org_id, items=items, created_at=now
+                run_id=run_id, org_id=org_id, items=sealed, created_at=now
             )
         )
 
@@ -181,7 +199,11 @@ class SqlRunPayloadRepository:
             .returning(d.run_payloads.c["items"])
         )
         items = (await self._s.execute(statement)).scalar_one_or_none()
-        return list(items) if items is not None else None
+        if items is None:
+            return None
+        if is_sealed(items):
+            items = open_value(self._cipher(), items, _payload_context(org_id, run_id))
+        return list(items)
 
     async def exists(self, org_id: UUID, run_id: UUID) -> bool:
         statement = select(d.run_payloads.c.run_id).where(
@@ -190,9 +212,73 @@ class SqlRunPayloadRepository:
         return (await self._s.execute(statement)).first() is not None
 
 
+def _payload_context(org_id: UUID, run_id: UUID) -> str:
+    return f"payload:v1:{org_id}:{run_id}"
+
+
+def _session_cipher(session: AsyncSession) -> SecretCipher:
+    cipher = session.info.get(CIPHER_KEY)
+    if cipher is None:
+        raise SealedValueError(internal_detail="sealed data needs a field cipher")
+    return cipher  # type: ignore[no-any-return]
+
+
+# JSONPath over a data mapping (field -> value) or a diff (field -> {old, new, pct}):
+# a sealed marker whose key id is not the active one. Constant text, never input.
+_STALE_IN_DATA: ColumnElement[Any] = literal_column("'$.* ? (@.kid != $kid)'::jsonpath")
+_STALE_IN_DIFF: ColumnElement[Any] = literal_column("'$.*.* ? (@.kid != $kid)'::jsonpath")
+
+
+async def _rewrap_rows(
+    session: AsyncSession,
+    table: Any,
+    column: str,
+    record_column: str,
+    org_id: UUID,
+    active_key_id: str,
+    limit: int,
+) -> int:
+    """Re-encrypt the stale sealed values of up to ``limit`` rows of ``table``."""
+    cipher = _session_cipher(session)
+    stale = _STALE_IN_DIFF if column == "diff" else _STALE_IN_DATA
+    statement = (
+        select(
+            table.c.id,
+            table.c.dataset_id,
+            table.c[record_column].label("record_id"),  # records: the id itself
+            table.c[column],
+        )
+        .where(
+            table.c.org_id == org_id,
+            func.jsonb_path_exists(
+                table.c[column], stale, func.jsonb_build_object("kid", active_key_id)
+            ),
+        )
+        .limit(limit)
+        .with_for_update(skip_locked=True)
+    )
+    rows = (await session.execute(statement)).all()
+    for row_id, dataset_id, record_id, value in rows:
+        rewrapped: dict[str, Any] = {}
+        for name, entry in value.items():
+            context = field_context(org_id, dataset_id, record_id, name)
+            if column == "diff" and isinstance(entry, dict) and not is_sealed(entry):
+                rewrapped[name] = {k: rewrap_value(cipher, v, context) for k, v in entry.items()}
+            else:
+                rewrapped[name] = rewrap_value(cipher, entry, context)
+        await session.execute(update(table).where(table.c.id == row_id).values({column: rewrapped}))
+    return len(rows)
+
+
 class SqlRecordRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._s = session
+
+    async def rewrap_sealed(self, org_id: UUID, active_key_id: str, *, limit: int) -> int:
+        count = await _rewrap_rows(self._s, d.records, "data", "id", org_id, active_key_id, limit)
+        return count + await _rewrap_rows(
+            self._s, d.record_versions, "data", "record_id", org_id, active_key_id, limit
+        )
 
     async def fetch_for_update(self, dataset_id: UUID, keys: Sequence[str]) -> dict[str, Record]:
         if not keys:
@@ -463,6 +549,11 @@ class SqlChangeRepository:
             .with_for_update(skip_locked=True)
         )
         return list((await self._s.execute(statement)).scalars().all())
+
+    async def rewrap_sealed(self, org_id: UUID, active_key_id: str, *, limit: int) -> int:
+        return await _rewrap_rows(
+            self._s, d.changes, "diff", "record_id", org_id, active_key_id, limit
+        )
 
     async def mark_alerts_evaluated(self, change_ids: Sequence[UUID]) -> None:
         if change_ids:

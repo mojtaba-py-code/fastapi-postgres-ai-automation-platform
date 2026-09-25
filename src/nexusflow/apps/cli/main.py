@@ -170,6 +170,7 @@ async def keys_rewrap(c: Container, args: argparse.Namespace) -> dict[str, Any]:
         while True:  # batches until nothing is left under older keys
             count = await c.integrations.rewrap(org_id, active_key_id=active)
             count += await c.webhooks.rewrap(org_id)
+            count += await c.maintenance.rewrap_sealed(org_id, active_key_id=active)
             total += count
             if count == 0:
                 break

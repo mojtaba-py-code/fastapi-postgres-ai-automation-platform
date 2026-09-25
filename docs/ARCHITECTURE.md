@@ -257,6 +257,27 @@ enforced, not decorative: restricted data never leaves the platform - no externa
 AI, and alert messages (which go out by e-mail, Slack, Telegram or webhook) carry
 no record keys or values.
 
+## 8a. Encryption at rest
+
+The application encrypts what a database dump, a backup or a copy of the file
+volume must not reveal, on top of any disk encryption:
+
+| What | How | Bound to |
+|---|---|---|
+| Values of the fields a schema marks `sensitive` - in records, their versions and the diffs of changes (percentages included) | Sealed per value: AES-256-GCM under a fresh data key wrapped by the active KEK, stored as `{"$sealed": ..., "kid": ...}` | Tenant, dataset, record and field |
+| Collected items staged between receipt and ingestion (raw source data, before any schema) | Sealed as a whole | Tenant and run |
+| Stored files: uploads and generated reports | Streaming AES-256-GCM in 64 KiB chunks (STREAM construction: chunks cannot be reordered, dropped, appended or cut off) under a per-file data key wrapped by the KEK | The file's storage key |
+| Integration secrets, webhook secrets, MFA secrets | Sealed (the same envelope cipher) | Their row |
+
+Writes seal in the services that know the schema; the database layer opens sealed
+values as rows load, so masking, alert rules and analysis work on plaintext exactly
+as before, and a value that fails to open (a ciphertext moved to another row, a
+missing key) fails closed. The stored content hash of a record is keyed (HMAC with
+the pepper), so a dump cannot confirm guesses of a sensitive value either. Key
+rotation re-wraps all of it (`nexusflow keys rewrap`, and the daily job); for files
+only the header changes. Non-sensitive fields stay plaintext so they can be
+queried: mark every personal or confidential field `sensitive`.
+
 ## 9. Observability
 
 * **Logs**: structlog JSON with a request ID, principal and tenant context. Secret
