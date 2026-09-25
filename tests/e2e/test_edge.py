@@ -4,6 +4,7 @@ exposes, the headers that reach a browser, and isolation between real tenants.""
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from types import ModuleType
 
@@ -59,7 +60,10 @@ def test_responses_the_edge_generates_carry_the_security_headers(
     # The same JSON error schema as the application's own errors.
     assert response.headers["content-type"].startswith("application/json")
     assert response.json()["error"] == "not_found"
-    assert response.json()["request_id"]
+    uuid_shaped = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    assert re.fullmatch(uuid_shaped, response.json()["request_id"])
+    proxied = client.get(f"{API}/projects")  # the application echoes the edge's id
+    assert re.fullmatch(uuid_shaped, proxied.headers["x-request-id"])
 
 
 def test_security_headers_are_never_sent_twice(client: httpx2.Client) -> None:
