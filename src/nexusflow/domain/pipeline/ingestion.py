@@ -11,7 +11,9 @@ Idempotency and integrity:
   was valid and the snapshot was not truncated - otherwise a partial scrape
   would wrongly "delete" records;
 * a snapshot that would delete more than the source's ``max_deletion_ratio``
-  of the live records deletes nothing and reports ``deletions_withheld``.
+  of the live records deletes nothing and reports ``deletions_withheld``;
+* runs of one source may finish in any order: a full snapshot collected
+  before the newest one already applied is not stored (``superseded``).
 """
 
 from __future__ import annotations
@@ -71,6 +73,19 @@ def _duration(run: CollectionRun) -> float | None:
     if run.started_at is None or run.finished_at is None:
         return None
     return max(0.0, (run.finished_at - run.started_at).total_seconds())
+
+
+def _collected_at(run: CollectionRun) -> datetime:
+    """When the run's data was collected, as far as the platform can tell.
+
+    Pushed data (webhook deliveries, uploaded files) is what it was on
+    receipt. Pulled data is fetched once the run has started (the latest
+    attempt); for a run no collector ever started, its request time is the
+    best estimate.
+    """
+    if run.trigger in (RunTrigger.WEBHOOK, RunTrigger.UPLOAD) or run.started_at is None:
+        return run.created_at
+    return run.started_at
 
 
 @dataclass(slots=True)
@@ -135,6 +150,7 @@ class IngestionService:
             if source is None:
                 raise NotFoundError(internal_detail=f"source {run.source_id}")
             dataset = await get_dataset(uow, org_id, source.dataset_id)
+            collected_at = _collected_at(run)  # before start() re-stamps the run
             if run.status is RunStatus.QUEUED:
                 run.start(now)
             await uow.data.sources.lock(source.id)
@@ -145,6 +161,19 @@ class IngestionService:
                 carried = dict(run.stats)
                 staged = await uow.data.payloads.take(org_id, run.id) or []
                 items = [item for item in staged if isinstance(item, dict)]
+            if await self._superseded(uow, source, collected_at):
+                # Runs finish in any order; a newer snapshot of this source is
+                # applied already, and this one would revert its values and
+                # delete what it added. Nothing of it is stored.
+                carried.pop("source_truncated", None)
+                return await self._skip_superseded(
+                    uow,
+                    run,
+                    source,
+                    {**carried, **(source_detail or {}), "received": len(items)},
+                    collected_at,
+                    now,
+                )
             max_items = int(source.config.get("max_items", self._max_items))
             result = run_pipeline(dataset.spec, items, max_items=min(max_items, self._max_items))
             result.truncated = (
@@ -175,6 +204,7 @@ class IngestionService:
                 updated=counts.updated,
                 unchanged=counts.unchanged,
                 deleted=counts.deleted,
+                collected_at=collected_at.isoformat(),
             )
             run.succeed(now, stats)
             source.record_success(now)
@@ -266,8 +296,47 @@ class IngestionService:
                     counts.unchanged += 1
             await uow.data.records.add_many(new_records)
             await uow.data.records.add_versions(versions)
-            await uow.data.records.touch(unchanged, run_id=run.id, now=now)
+            # The source that last saw a record owns it, changed or not: a record
+            # that moved to another source (or whose source was replaced) is
+            # deleted by the snapshots of the source that has it now.
+            await uow.data.records.touch(unchanged, run_id=run.id, source_id=source.id, now=now)
         return counts
+
+    @staticmethod
+    async def _superseded(uow: UnitOfWork, source: Source, collected_at: datetime) -> bool:
+        """Whether a full snapshot is older than the newest one applied from its
+        source (checked under the source lock, so concurrent runs see each other).
+
+        Only full snapshots: one stands for the whole source, while an
+        incremental one holds some records only - skipping it would lose them.
+        """
+        if source.config.get("snapshot_mode") != "full":
+            return False
+        latest = await uow.data.runs.latest_collected_at(source.org_id, source.id)
+        return latest is not None and collected_at < latest
+
+    async def _skip_superseded(
+        self,
+        uow: UnitOfWork,
+        run: CollectionRun,
+        source: Source,
+        stats: dict[str, Any],
+        collected_at: datetime,
+        now: datetime,
+    ) -> IngestionOutcome:
+        """The run succeeds - its collection worked - and stores nothing."""
+        stats.update(
+            superseded=True,
+            collected_at=collected_at.isoformat(),
+            created=0,
+            updated=0,
+            unchanged=0,
+            deleted=0,
+        )
+        run.succeed(now, stats)
+        await self._emit(uow, run, source, now)
+        await uow.commit()
+        return IngestionOutcome(run.id, run.status, stats, _duration(run))
 
     @staticmethod
     def _can_infer_deletions(source: Source, result: PipelineResult) -> bool:

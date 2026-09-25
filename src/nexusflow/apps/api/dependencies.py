@@ -15,6 +15,7 @@ from nexusflow.bootstrap.container import Container
 from nexusflow.core.errors import AuthenticationError
 from nexusflow.core.pagination import (
     DEFAULT_PAGE_SIZE,
+    MAX_CURSOR_LENGTH,
     MAX_PAGE_SIZE,
     PageRequest,
     SortSpec,
@@ -140,7 +141,10 @@ IdempotencyKey = Annotated[
         min_length=8,
         max_length=128,
         pattern=r"^[A-Za-z0-9._:-]+$",
-        description="Retries with the same key return the original result instead of repeating it.",
+        description=(
+            "Retries with the same key return the original result instead of repeating it; "
+            "the key of another request is refused (409 idempotency_key_reused)."
+        ),
     ),
 ]
 
@@ -192,7 +196,7 @@ def page_params(
 ) -> Callable[..., PageRequest]:
     def dependency(
         limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
-        cursor: Annotated[str | None, Query(max_length=512)] = None,
+        cursor: Annotated[str | None, Query(max_length=MAX_CURSOR_LENGTH)] = None,
         sort: Annotated[str | None, Query(max_length=64, pattern=r"^-?[a-z_]{1,48}$")] = None,
     ) -> PageRequest:
         return PageRequest(

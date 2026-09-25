@@ -14,6 +14,7 @@ from nexusflow.core.errors import InvalidInputError, PayloadTooLargeError
 from nexusflow.core.ids import parse_uuid, uuid7
 from nexusflow.core.jsonutil import canonical_json, content_hash, loads_limited, max_nesting_depth
 from nexusflow.core.pagination import (
+    MAX_CURSOR_LENGTH,
     PageRequest,
     SortSpec,
     decode_cursor,
@@ -117,10 +118,28 @@ class TestPagination:
         assert cursor.last_id == last
         assert cursor.sort_value == "2026-01-01T00:00:00+00:00"
 
-    @pytest.mark.parametrize("token", ["", "!!!", "e30", "a" * 600, "eyJ2IjpbMV0sImkiOiJ4In0"])
+    @pytest.mark.parametrize(
+        "token",
+        ["", "!!!", "e30", "a" * 600, "eyJ2IjpbMV0sImkiOiJ4In0", "e" * (MAX_CURSOR_LENGTH + 1)],
+    )
     def test_invalid_cursors_rejected(self, token: str) -> None:
         with pytest.raises(InvalidInputError):
             decode_cursor(token)
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "\U0001f600" * 120,  # the longest name (120 characters), 4 bytes each in UTF-8
+            "数据" * 60,
+            '"' * 120,  # escaped by JSON
+            "\\" * 120,
+            "Zürich " * 17,
+        ],
+    )
+    def test_the_cursor_after_any_name_is_accepted_back(self, name: str) -> None:
+        token = encode_cursor(name, uuid4())
+        assert len(token) <= MAX_CURSOR_LENGTH
+        assert decode_cursor(token).sort_value == name
 
     @pytest.mark.parametrize(
         "value",

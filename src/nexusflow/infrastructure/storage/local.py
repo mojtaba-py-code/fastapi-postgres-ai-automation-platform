@@ -9,7 +9,14 @@
 * Size limits are enforced while streaming, not from ``Content-Length``.
 * With a ``FileSealer`` every file is encrypted at rest (streaming AES-256-GCM,
   ``infrastructure.security.files``); size and SHA-256 describe the plaintext.
-  Files written before sealing was enabled are still read as they are.
+  A file without the sealed header is refused (fail closed): no release ever
+  stored files unencrypted, so such a file was put there by someone else.
+* Plaintext copies for inspection live in ``.scratch`` only while they are
+  used; copies a killed process left behind are purged at start-up and by the
+  retention job (:meth:`LocalFileStorage.purge_scratch`).
+* Deleting files and re-wrapping one (key rotation) exclude each other through
+  a lock shared by every process on the volume: a re-wrap never re-creates a
+  file deleted while it was being rewritten.
 
 Swap for an S3-compatible implementation of the same port in cloud deployments.
 """
@@ -22,8 +29,12 @@ import os
 import re
 import secrets
 import shutil
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+import sys
+import threading
+import time
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
+from datetime import timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -36,12 +47,14 @@ _KEY = re.compile(
     r"^(uploads|reports)/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/"
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(csv|xlsx|json|pdf)$"
 )
+SCRATCH_MAX_AGE = timedelta(hours=1)
 
 
 class LocalFileStorage:
     def __init__(self, root: Path, sealer: FileSealer | None = None) -> None:
         self._root = root.resolve()
         self._sealer = sealer
+        self._scratch = self._root / ".scratch"
 
     def local_path(self, key: str) -> Path:
         if not _KEY.fullmatch(key):
@@ -98,7 +111,10 @@ class LocalFileStorage:
                     if plain:
                         yield plain
                 return
-            if head:  # written before sealing was enabled
+            if self._sealer is not None:
+                # Fail closed: a planted or swapped plaintext file is never served.
+                raise DecryptionError(internal_detail="stored file is not sealed")
+            if head:
                 yield head
             while chunk := await asyncio.to_thread(handle.read, chunk_size):
                 yield chunk
@@ -109,7 +125,7 @@ class LocalFileStorage:
     async def plaintext(self, key: str) -> AsyncIterator[Path]:
         """A private (0600) plaintext copy under ``.scratch``, removed on exit."""
         self.local_path(key)  # validates the key
-        scratch = self._root / ".scratch"
+        scratch = self._scratch
         await asyncio.to_thread(self._prepare_dir, scratch)
         temp = scratch / f"{secrets.token_hex(16)}{Path(key).suffix}"
         fd = await asyncio.to_thread(os.open, temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -120,6 +136,12 @@ class LocalFileStorage:
             yield temp
         finally:
             await asyncio.to_thread(temp.unlink, missing_ok=True)
+
+    async def purge_scratch(self, *, older_than: timedelta = SCRATCH_MAX_AGE) -> int:
+        """Remove plaintext copies older than ``older_than`` - left behind by a
+        process killed while it inspected a file. Copies in use are younger:
+        inspection and scanning take seconds, never an hour."""
+        return await asyncio.to_thread(_remove_older_than, self._scratch, older_than)
 
     async def rewrap(self, org_id: UUID, *, limit: int) -> int:
         """Re-wrap the file keys of up to ``limit`` of a tenant's files under the
@@ -140,30 +162,82 @@ class LocalFileStorage:
                         return rewrapped
         return rewrapped
 
-    @staticmethod
-    def _rewrap_file(sealer: FileSealer, key: str, path: Path) -> bool:
-        with path.open("rb") as handle:
-            if handle.read(len(MAGIC)) != MAGIC:
-                return False
-            wrapped = handle.read(int.from_bytes(handle.read(2), "big"))
-            header = sealer.rewrap_header(key, wrapped)
-            if header is None:
-                return False
-            temp = path.with_name(f".{path.name}.{secrets.token_hex(6)}.part")
-            fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    async def count_stale(self, org_id: UUID) -> int:
+        """How many of a tenant's files still have their key under an older KEK."""
+        sealer = self._sealer
+        if sealer is None:
+            return 0
+        return await asyncio.to_thread(self._count_stale, sealer, org_id)
+
+    def _count_stale(self, sealer: FileSealer, org_id: UUID) -> int:
+        stale = 0
+        for area in ("uploads", "reports"):
+            for path in _files_in(self._root / area / str(org_id)):
+                if not _KEY.fullmatch(f"{area}/{org_id}/{path.name}"):
+                    continue
+                try:
+                    with path.open("rb") as handle:
+                        if handle.read(len(MAGIC)) != MAGIC:
+                            continue
+                        wrapped = handle.read(int.from_bytes(handle.read(2), "big"))
+                except FileNotFoundError:
+                    continue  # deleted since the directory was listed
+                stale += sealer.is_stale(wrapped)
+        return stale
+
+    def _rewrap_file(self, sealer: FileSealer, key: str, path: Path) -> bool:
+        # Exclusive with deletions from reading the file to replacing it: a file
+        # deleted in between would otherwise be re-created by the replace.
+        with _exclusive(self._root):
             try:
-                with os.fdopen(fd, "wb") as out:
-                    out.write(MAGIC + len(header).to_bytes(2, "big") + header)
-                    shutil.copyfileobj(handle, out)
-            except BaseException:
-                temp.unlink(missing_ok=True)
-                raise
-        temp.replace(path)
-        return True
+                handle = path.open("rb")
+            except FileNotFoundError:
+                return False  # deleted since the directory was listed
+            with handle:
+                if handle.read(len(MAGIC)) != MAGIC:
+                    return False
+                wrapped = handle.read(int.from_bytes(handle.read(2), "big"))
+                header = sealer.rewrap_header(key, wrapped)
+                if header is None:
+                    return False
+                temp = path.with_name(f".{path.name}.{secrets.token_hex(6)}.part")
+                fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                try:
+                    with os.fdopen(fd, "wb") as out:
+                        out.write(MAGIC + len(header).to_bytes(2, "big") + header)
+                        shutil.copyfileobj(handle, out)
+                except BaseException:
+                    temp.unlink(missing_ok=True)
+                    raise
+            temp.replace(path)
+            return True
 
     async def delete(self, key: str) -> None:
         path = self.local_path(key)
-        await asyncio.to_thread(path.unlink, missing_ok=True)
+        await asyncio.to_thread(self._unlink, path)
+
+    def _unlink(self, path: Path) -> None:
+        with _exclusive(self._root):
+            path.unlink(missing_ok=True)
+
+    async def delete_tenant(self, org_id: UUID) -> int:
+        """Remove ``uploads/<org>`` and ``reports/<org>`` entirely - every file of
+        the tenant, whether a row still pointed to it or not; returns how many."""
+        return await asyncio.to_thread(self._delete_tenant, org_id)
+
+    def _delete_tenant(self, org_id: UUID) -> int:
+        removed = 0
+        with _exclusive(self._root):
+            for area in ("uploads", "reports"):
+                directory = self._root / area / str(org_id)  # str(UUID): canonical, no traversal
+                if directory.is_dir():
+                    removed += sum(
+                        1
+                        for path in _files_in(directory)
+                        if _KEY.fullmatch(f"{area}/{org_id}/{path.name}")
+                    )
+                    shutil.rmtree(directory)
+        return removed
 
     async def exists(self, key: str) -> bool:
         return await asyncio.to_thread(self.local_path(key).is_file)
@@ -174,4 +248,43 @@ class LocalFileStorage:
 
 
 def _files_in(directory: Path) -> list[Path]:
-    return sorted(p for p in directory.iterdir() if p.is_file()) if directory.is_dir() else []
+    try:
+        return sorted(p for p in directory.iterdir() if p.is_file())
+    except (FileNotFoundError, NotADirectoryError):
+        return []
+
+
+if sys.platform == "win32":  # development only: one process, so a thread lock serves
+    _LOCK = threading.Lock()
+
+    @contextmanager
+    def _exclusive(root: Path) -> Iterator[None]:
+        with _LOCK:
+            yield
+
+else:
+    import fcntl
+
+    @contextmanager
+    def _exclusive(root: Path) -> Iterator[None]:
+        """An exclusive lock on the storage, across processes (API, workers, CLI)."""
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(root / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)  # released when the descriptor closes
+            yield
+        finally:
+            os.close(fd)
+
+
+def _remove_older_than(directory: Path, age: timedelta) -> int:
+    cutoff = time.time() - age.total_seconds()
+    removed = 0
+    for path in _files_in(directory):
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+        except FileNotFoundError:
+            continue  # removed meanwhile by its owner
+    return removed

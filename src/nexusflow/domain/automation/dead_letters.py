@@ -36,6 +36,7 @@ RETRYABLE_TASKS = frozenset(
         TaskName.EVALUATE_ALERTS,
         TaskName.DELIVER_NOTIFICATION,
         TaskName.GENERATE_REPORT,
+        TaskName.SEAL_DATASET,
     }
 )
 

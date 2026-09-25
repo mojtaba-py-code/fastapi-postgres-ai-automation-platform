@@ -79,6 +79,7 @@ class CreatedEndpoint:
 class ReceiptResult:
     status: Literal["accepted", "duplicate"]
     run_id: UUID | None
+    truncated: bool = False  # items beyond the source's max_items were not taken
 
 
 def _generic_rejection(reason: str) -> AuthenticationError:
@@ -214,24 +215,32 @@ class WebhookService:
             await uow.commit()
             return endpoint
 
-    async def rewrap(self, org_id: UUID, *, batch: int = 500) -> int:
-        """Re-encrypt signing secrets under the active KEK (key rotation)."""
+    async def rewrap(self, org_id: UUID, *, active_key_id: str, batch: int = 500) -> int:
+        """Re-encrypt signing secrets under the active KEK (key rotation): every
+        endpoint with a secret under an older key, a batch at a time, by id."""
         rewrapped = 0
-        async with self._uow_factory(TenantScope.system(org_id)) as uow:
-            for endpoint in await uow.data.webhook_endpoints.list_for_update(org_id, limit=batch):
-                context = secret_context(org_id, endpoint.id)
-                if self._cipher.needs_rewrap(endpoint.secret_ciphertext):
-                    endpoint.secret_ciphertext = self._cipher.rewrap(
-                        endpoint.secret_ciphertext, context=context
-                    )
-                    rewrapped += 1
-                previous = endpoint.previous_secret_ciphertext
-                if previous is not None and self._cipher.needs_rewrap(previous):
-                    endpoint.previous_secret_ciphertext = self._cipher.rewrap(
-                        previous, context=context
-                    )
-            await uow.commit()
-        return rewrapped
+        after: UUID | None = None
+        while True:
+            async with self._uow_factory(TenantScope.system(org_id)) as uow:
+                endpoints = await uow.data.webhook_endpoints.stale_for_update(
+                    org_id, active_key_id, after=after, limit=batch
+                )
+                for endpoint in endpoints:
+                    context = secret_context(org_id, endpoint.id)
+                    if self._cipher.needs_rewrap(endpoint.secret_ciphertext):
+                        endpoint.secret_ciphertext = self._cipher.rewrap(
+                            endpoint.secret_ciphertext, context=context
+                        )
+                    previous = endpoint.previous_secret_ciphertext
+                    if previous is not None and self._cipher.needs_rewrap(previous):
+                        endpoint.previous_secret_ciphertext = self._cipher.rewrap(
+                            previous, context=context
+                        )
+                await uow.commit()
+            rewrapped += len(endpoints)
+            if len(endpoints) < batch:
+                return rewrapped
+            after = endpoints[-1].id
 
     async def list_endpoints(
         self, principal: Principal, page: PageRequest
@@ -321,7 +330,9 @@ class WebhookService:
                 "The target source is not a webhook source.", code="not_webhook_source"
             )
         document = loads_limited(body, max_bytes=self._max_body, max_depth=20)
-        raw_items, _ = extract_items(document, config.items_path, max_items=config.max_items)
+        raw_items, truncated = extract_items(
+            document, config.items_path, max_items=config.max_items
+        )
         items: list[JSONValue] = [map_fields(item, config.field_mapping) for item in raw_items]
         event = InboundWebhookEvent(
             id=uuid7(),
@@ -333,12 +344,12 @@ class WebhookService:
             payload_size=len(body),
             item_count=len(items),
         )
+        # A digest of the whole delivery id: cut to the column's 128 characters,
+        # two long ids with a common prefix became one key, and the second
+        # delivery was refused as a duplicate for ever.
+        run_key = hashlib.sha256(f"{endpoint.id}:{delivery_id}".encode()).hexdigest()
         run = await queue_run(
-            uow,
-            source,
-            trigger=RunTrigger.WEBHOOK,
-            idempotency_key=f"wh:{endpoint.id}:{delivery_id}"[:128],
-            now=now,
+            uow, source, trigger=RunTrigger.WEBHOOK, idempotency_key=f"wh:{run_key}", now=now
         )
         event.run_id = run.id
         if not await uow.data.webhook_events.add(event):
@@ -346,9 +357,12 @@ class WebhookService:
             await uow.rollback()
             return ReceiptResult(status="duplicate", run_id=None)
         await uow.data.payloads.put(org_id, run.id, items, now)
+        # Like a sandbox result, the run carries the cut-off: ingestion reports
+        # the run truncated (and the sender learns it from the receipt).
+        run.stats = {"source_truncated": truncated}
         endpoint.last_received_at = now
         await uow.commit()
-        return ReceiptResult(status="accepted", run_id=run.id)
+        return ReceiptResult(status="accepted", run_id=run.id, truncated=truncated)
 
     def _verify(
         self,

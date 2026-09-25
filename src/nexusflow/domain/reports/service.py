@@ -13,7 +13,7 @@ from nexusflow.core.clock import Clock
 from nexusflow.core.errors import ConflictError, InvalidInputError, NotFoundError
 from nexusflow.core.ids import uuid7
 from nexusflow.core.pagination import Page, PageRequest
-from nexusflow.core.text import clean_text, single_line
+from nexusflow.core.text import clean_text
 from nexusflow.domain.audit.model import AuditAction
 from nexusflow.domain.audit.recorder import AuditRecorder
 from nexusflow.domain.authorization.principal import Principal
@@ -35,6 +35,7 @@ from nexusflow.domain.reports.model import (
     report_storage_key,
 )
 from nexusflow.domain.shared.context import RequestMeta
+from nexusflow.domain.shared.idempotency import client_key, ensure_same_request
 from nexusflow.domain.shared.outbox import TaskName, new_message
 from nexusflow.domain.shared.ports import FileStorage
 from nexusflow.domain.shared.unit_of_work import TenantScope, UnitOfWork, UnitOfWorkFactory
@@ -85,12 +86,19 @@ class ReportService:
         principal.require(Permission.REPORTS_GENERATE)
         org_id = principal.require_org()
         _check_period(period_start, period_end)
-        key = single_line(idempotency_key, 128) if idempotency_key else None
+        key = client_key(idempotency_key) if idempotency_key else None
         now = self._clock.now()
         async with self._uow_factory(TenantScope.of(principal)) as uow:
             if key is not None:
                 existing = await uow.data.reports.get_by_idempotency_key(org_id, key)
                 if existing is not None:
+                    ensure_same_request(
+                        (existing.project_id, existing.dataset_id, existing.format)
+                        == (project_id, dataset_id, fmt)
+                        and (existing.period_start, existing.period_end)
+                        == (period_start, period_end)
+                        and (title is None or existing.title == clean_text(title, max_length=200))
+                    )
                     return existing, False
             project = await uow.data.projects.get(org_id, project_id)
             if project is None:
@@ -246,6 +254,10 @@ class ReportService:
         async with self._uow_factory(TenantScope.system(org_id)) as uow:
             report = await uow.data.reports.get_for_update(org_id, report_id)
             if report is None:
+                # Deleted (with its project or dataset) while it was rendered: the
+                # file just stored belongs to nothing, and would stay for ever.
+                if key is not None:
+                    await self._storage.delete(key)
                 raise NotFoundError()
             if error:
                 report.status = ReportStatus.FAILED

@@ -95,6 +95,13 @@ class FileSealer:
             return None
         return self._cipher.rewrap(wrapped, context=_context(storage_key))
 
+    def is_stale(self, wrapped: bytes) -> bool:
+        """Whether a file key is wrapped under another KEK than the active one."""
+        try:
+            return self._cipher.needs_rewrap(wrapped)
+        except DecryptionError:
+            return False  # not a key any KEK wrapped: rewrapping cannot help it
+
     def _unwrap(self, storage_key: str, wrapped: bytes) -> bytes:
         text = self._cipher.decrypt(wrapped, context=_context(storage_key))
         try:

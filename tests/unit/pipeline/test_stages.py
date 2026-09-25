@@ -7,14 +7,17 @@ from typing import Any
 import pytest
 
 from nexusflow.domain.catalog.model import DatasetSchema, FieldSpec, FieldType
+from nexusflow.domain.pipeline import stages
 from nexusflow.domain.pipeline.stages import (
     MAX_ISSUES,
+    MAX_KEY_LENGTH,
     ItemRejectedError,
     clean,
     deduplicate,
     enrich,
     normalize,
     normalize_value,
+    record_key,
     run_pipeline,
     validate,
     without_tracking_parameters,
@@ -132,10 +135,30 @@ class TestNormalize:
         assert url == "https://shop.example.com/?id=1"
 
     @pytest.mark.parametrize(
-        "value", ["javascript:alert(1)", "ftp://x.example/", "https://user@x.example/", "nope"]
+        "value",
+        [
+            "javascript:alert(1)",
+            "ftp://x.example/",
+            "https://user@x.example/",
+            "nope",
+            # Ports urllib cannot read: they raised ValueError, which failed the whole run.
+            "https://shop.example:99999/p/x",
+            "https://shop.example:abc/p",
+            "http://[::1/x",
+        ],
     )
     def test_unsafe_or_invalid_urls_are_rejected(self, value: str) -> None:
         assert _rejected(normalize_value, _spec("url"), value) == ("url", "invalid_url")
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("http://[::1]:8080/x", "http://[::1]:8080/x"),
+            ("HTTPS://[2001:DB8::1]/p?id=1", "https://[2001:db8::1]/p?id=1"),
+        ],
+    )
+    def test_ipv6_hosts_keep_their_brackets(self, value: str, expected: str) -> None:
+        assert normalize_value(_spec("url"), value) == expected
 
     def test_enums_take_the_declared_spelling(self) -> None:
         assert normalize_value(_spec("tier"), " gold ") == "Gold"
@@ -150,6 +173,13 @@ class TestNormalize:
 
     def test_structured_values_are_not_strings(self) -> None:
         assert _rejected(normalize_value, _spec("title"), {"a": 1}) == ("title", "invalid_type")
+
+    def test_text_the_database_cannot_store_is_rejected(self) -> None:
+        lone_surrogate = chr(0xD800)  # valid in JSON ("\ud800"), not in UTF-8
+        assert _rejected(normalize_value, _spec("title"), f"W{lone_surrogate}") == (
+            "title",
+            "invalid_text",
+        )
 
     def test_normalize_keeps_only_present_fields(self) -> None:
         assert normalize(SCHEMA, {"sku": " A-1 ", "stock": "3"}) == {"sku": "A-1", "stock": 3}
@@ -209,7 +239,16 @@ class TestDeduplicateAndEnrich:
         assert first.content_hash != enrich("A-1", {"title": "W", "price": "1.6"}).content_hash
 
     def test_keys_are_bounded(self) -> None:
-        assert len(enrich("k" * 2000, {}).key) == 512
+        assert len(enrich("k" * 2000, {}).key) == MAX_KEY_LENGTH
+        assert record_key("A-1") == "A-1"
+        assert record_key("k" * MAX_KEY_LENGTH) == "k" * MAX_KEY_LENGTH
+
+    def test_long_keys_stay_distinct_and_stable(self) -> None:
+        red, blue = "c" * 600 + "/red", "c" * 600 + "/blue"
+        assert record_key(red) != record_key(blue)
+        assert record_key(red) == record_key(red)
+        assert len(record_key(red)) == MAX_KEY_LENGTH
+        assert record_key(record_key(red)) == record_key(red)
 
 
 class TestRunPipeline:
@@ -236,6 +275,59 @@ class TestRunPipeline:
         items = ({"sku": f"S-{n}", "title": "W"} for n in range(10))
         result = run_pipeline(SCHEMA, items, max_items=3)
         assert (result.received, result.valid, result.truncated) == (3, 3, True)
+
+    def test_one_bad_url_is_an_invalid_item_not_a_failed_run(self) -> None:
+        schema = DatasetSchema(
+            key_field="sku",
+            fields=[
+                FieldSpec(name="sku", type=FieldType.STRING, required=True),
+                FieldSpec(name="link", type=FieldType.URL),
+            ],
+        )
+        items = [{"sku": f"A-{n}", "link": f"https://shop.example.com/p/{n}"} for n in range(50)]
+        items.append({"sku": "B-1", "link": "https://shop.example.com:99999/p/x"})
+        result = run_pipeline(schema, items, max_items=100)
+        assert (result.received, result.valid, result.invalid) == (51, 50, 1)
+        assert [(i.index, i.field, i.code) for i in result.issues] == [(50, "link", "invalid_url")]
+
+    def test_an_unexpected_error_on_one_item_counts_it_invalid(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real = stages.prepare_item
+
+        def fragile(schema: DatasetSchema, raw: Any) -> Any:
+            if raw.get("sku") == "boom":
+                raise OverflowError("an edge case no stage anticipated")
+            return real(schema, raw)
+
+        monkeypatch.setattr(stages, "prepare_item", fragile)
+        items = [{"sku": "A-1", "title": "W"}, {"sku": "boom", "title": "W"}]
+        result = run_pipeline(SCHEMA, items, max_items=100)
+        assert (result.valid, result.invalid) == (1, 1)
+        assert [(i.index, i.field, i.code) for i in result.issues] == [(1, None, "invalid_item")]
+
+    def test_long_keys_are_bounded_before_deduplication(self) -> None:
+        schema = DatasetSchema(
+            key_field="url",
+            fields=[
+                FieldSpec(name="url", type=FieldType.URL, required=True),
+                FieldSpec(name="title", type=FieldType.STRING),
+            ],
+        )
+        base = "https://shop.example.com/catalogue/" + "c" * 600
+        items = [
+            {"url": base + "/red", "title": "Red"},
+            {"url": base + "/blue", "title": "Blue"},
+            {"url": base + "/red", "title": "Red again"},
+        ]
+        result = run_pipeline(schema, items, max_items=100)
+        # Two distinct records (no collision on the stored 512 characters), and
+        # the repeated one deduplicated - every key unique as stored.
+        assert (result.valid, result.duplicates) == (2, 1)
+        keys = [record.key for record in result.records]
+        assert len(set(keys)) == 2
+        assert all(len(key) == MAX_KEY_LENGTH for key in keys)
+        assert result.records[0].data["title"] == "Red again"
 
     def test_issues_are_capped(self) -> None:
         result = run_pipeline(SCHEMA, [{}] * (MAX_ISSUES + 50), max_items=1000)

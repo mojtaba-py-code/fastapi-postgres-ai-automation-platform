@@ -413,6 +413,7 @@ def build_container(
                 webhook_events_days=settings.retention.webhook_events_days,
                 notification_deliveries_days=settings.retention.notification_deliveries_days,
                 dead_letters_days=settings.retention.dead_letters_days,
+                idempotency_keys_hours=settings.retention.idempotency_keys_hours,
             ),
             audit=audit,
         ),

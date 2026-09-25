@@ -127,6 +127,7 @@ async def test_rewrap_and_audit_verification(container: Container, api: httpx2.A
     org_id = (await owner.get("/api/v1/organizations/current")).json()["id"]
     rewrap = await _run(container, "keys", "rewrap")
     assert rewrap["active_key_id"] == container.settings.security.encryption_active_key_id
+    assert rewrap["ok"] is True  # nothing left under another key
     verified = await _run(container, "audit", "verify", "--org", org_id)
     assert verified["ok"] is True
 

@@ -48,6 +48,13 @@ class TenantRepository[E](Protocol):
     async def count(self, org_id: UUID, **filters: Any) -> int: ...
 
 
+class DatasetRepository(TenantRepository[Dataset], Protocol):
+    async def get_for_share(self, org_id: UUID, dataset_id: UUID) -> Dataset | None:
+        """Read a dataset and keep its schema from changing until the transaction
+        ends (``FOR SHARE``): a schema change waits for the readers."""
+        ...
+
+
 class IntegrationRepository(TenantRepository[Integration], Protocol):
     async def references(self, org_id: UUID, integration_id: UUID) -> int: ...
 
@@ -55,11 +62,17 @@ class IntegrationRepository(TenantRepository[Integration], Protocol):
         self, org_id: UUID, active_key_id: str, limit: int
     ) -> list[Integration]: ...
 
+    async def count_needing_rewrap(self, org_id: UUID, active_key_id: str) -> int: ...
+
 
 class SourceRepository(TenantRepository[Source], Protocol):
     async def lock(self, source_id: UUID) -> None: ...
 
     async def list_by_ids(self, org_id: UUID, ids: Sequence[UUID]) -> list[Source]: ...
+
+    async def wait_for_ingestions(self, org_id: UUID, dataset_id: UUID) -> None:
+        """Wait until no ingestion into the dataset that started earlier is running."""
+        ...
 
 
 class CollectionRunRepository(TenantRepository[CollectionRun], Protocol):
@@ -72,6 +85,11 @@ class CollectionRunRepository(TenantRepository[CollectionRun], Protocol):
     async def list_for_workflow_run(
         self, org_id: UUID, workflow_run_id: UUID
     ) -> list[CollectionRun]: ...
+
+    async def latest_collected_at(self, org_id: UUID, source_id: UUID) -> datetime | None:
+        """When the newest data applied from the source was collected (the
+        ``collected_at`` of its succeeded runs), if any run recorded it."""
+        ...
 
 
 class RunPayloadRepository(Protocol):
@@ -93,11 +111,31 @@ class RecordRepository(Protocol):
         """Re-encrypt sealed values of records and versions still under an older key."""
         ...
 
+    async def count_stale_sealed(self, org_id: UUID, active_key_id: str) -> tuple[int, int]:
+        """Records and versions still holding a value under an older key (no locks)."""
+        ...
+
+    async def seal_plaintext(
+        self, org_id: UUID, dataset_id: UUID, fields: frozenset[str], *, limit: int
+    ) -> int:
+        """Seal values of ``fields`` stored in clear, in up to ``limit`` records and
+        up to ``limit`` versions (rows other transactions hold are skipped)."""
+        ...
+
+    async def count_plaintext(self, org_id: UUID, dataset_id: UUID, fields: frozenset[str]) -> int:
+        """Records and versions holding a value of ``fields`` in clear (no locks)."""
+        ...
+
     async def add_many(self, records: Sequence[Record]) -> None: ...
 
     async def add_versions(self, versions: Sequence[RecordVersion]) -> None: ...
 
-    async def touch(self, record_ids: Sequence[UUID], *, run_id: UUID, now: datetime) -> None: ...
+    async def touch(
+        self, record_ids: Sequence[UUID], *, run_id: UUID, source_id: UUID, now: datetime
+    ) -> None:
+        """Mark unchanged records as seen by this run - and owned by its source,
+        which alone infers their deletion from its full snapshots."""
+        ...
 
     async def missing_from_run(
         self, dataset_id: UUID, source_id: UUID, run_id: UUID, *, limit: int
@@ -136,8 +174,11 @@ class RecordRepository(Protocol):
     ) -> list[Record]: ...
 
     async def purge_versions_before(
-        self, org_id: UUID, dataset_id: UUID, before: datetime
-    ) -> int: ...
+        self, org_id: UUID, dataset_id: UUID, before: datetime, *, limit: int
+    ) -> int:
+        """Delete up to ``limit`` versions captured before ``before`` that change
+        detection no longer needs (the next version has been diffed)."""
+        ...
 
 
 class ChangeRepository(Protocol):
@@ -159,6 +200,27 @@ class ChangeRepository(Protocol):
 
     async def rewrap_sealed(self, org_id: UUID, active_key_id: str, *, limit: int) -> int:
         """Re-encrypt sealed values of diffs still under an older key."""
+        ...
+
+    async def count_stale_sealed(self, org_id: UUID, active_key_id: str) -> int:
+        """Changes still holding a value under an older key (no locks)."""
+        ...
+
+    async def seal_plaintext(
+        self, org_id: UUID, dataset_id: UUID, fields: frozenset[str], *, limit: int
+    ) -> int:
+        """Seal old/new/pct values of ``fields`` stored in clear in up to ``limit`` diffs."""
+        ...
+
+    async def count_plaintext(self, org_id: UUID, dataset_id: UUID, fields: frozenset[str]) -> int:
+        """Changes whose diff holds a value of ``fields`` in clear (no locks)."""
+        ...
+
+    async def purge_before(
+        self, org_id: UUID, dataset_id: UUID, before: datetime, *, limit: int
+    ) -> int:
+        """Delete up to ``limit`` changes detected before ``before`` whose alerts
+        have been evaluated (retention: they hold old and new values)."""
         ...
 
     async def ranked_in_period(
@@ -234,7 +296,16 @@ class UploadRepository(TenantRepository[Upload], Protocol):
 
 
 class WebhookEndpointRepository(TenantRepository[WebhookEndpoint], Protocol):
-    async def list_for_update(self, org_id: UUID, *, limit: int) -> list[WebhookEndpoint]: ...
+    async def stale_for_update(
+        self, org_id: UUID, active_key_id: str, *, after: UUID | None, limit: int
+    ) -> list[WebhookEndpoint]:
+        """Endpoints (after ``after``, by id) whose current or previous secret is
+        wrapped under another key than the active one; locked rows are skipped."""
+        ...
+
+    async def count_stale(self, org_id: UUID, active_key_id: str) -> int:
+        """How many endpoints still hold a secret under an older key (no locks)."""
+        ...
 
 
 class WebhookEventRepository(Protocol):
@@ -258,17 +329,42 @@ class DeadLetterRepository(TenantRepository[DeadLetter], Protocol):
 
 
 class MaintenanceRepository(Protocol):
-    async def purge(self, org_id: UUID | None, target: str, before: datetime) -> int: ...
+    async def purge(
+        self, org_id: UUID | None, target: str, before: datetime, *, limit: int | None = None
+    ) -> int: ...
+
+    async def expire_idempotency_keys(
+        self, org_id: UUID, target: str, before: datetime, *, limit: int
+    ) -> int:
+        """Release up to ``limit`` client idempotency keys of ``target`` (runs,
+        workflow runs, insights, reports) stored before ``before``."""
+        ...
+
+    async def delete_batch(
+        self, org_id: UUID, target: str, *, dataset_id: UUID | None, limit: int
+    ) -> int:
+        """Delete up to ``limit`` rows of ``target`` belonging to the dataset (or,
+        without one, to the whole organization) - one short statement."""
+        ...
 
     async def stuck_deliveries(
         self, org_id: UUID, *, before: datetime, limit: int
     ) -> list[NotificationDelivery]: ...
 
-    async def storage_keys(self, org_id: UUID) -> list[str]: ...
+    async def file_keys(
+        self,
+        org_id: UUID,
+        *,
+        project_id: UUID | None = None,
+        dataset_id: UUID | None = None,
+        source_id: UUID | None = None,
+    ) -> list[str]: ...
+
+    async def referenced_keys(self, org_id: UUID, keys: Sequence[str]) -> set[str]: ...
 
     async def delete_organization(self, org_id: UUID) -> None: ...
 
-    async def purge_outbox(self, before: datetime) -> int: ...
+    async def purge_outbox(self, before: datetime, *, limit: int) -> int: ...
 
 
 class SystemQueries(Protocol):
@@ -288,7 +384,7 @@ class DataRepositories(Protocol):
     def projects(self) -> TenantRepository[Project]: ...
 
     @property
-    def datasets(self) -> TenantRepository[Dataset]: ...
+    def datasets(self) -> DatasetRepository: ...
 
     @property
     def integrations(self) -> IntegrationRepository: ...

@@ -7,12 +7,13 @@ rejected, identifiers must be UUIDs, strings are bounded).
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, IPvAnyAddress
 
 from nexusflow.domain.automation.events import EventType
+from nexusflow.domain.shared.files import FILES_PER_JOB
 
 
 class Message(BaseModel):
@@ -50,6 +51,15 @@ class DeliveryMessage(OrgMessage):
 
 class ReportMessage(OrgMessage):
     report_id: UUID
+
+
+StorageKey = Annotated[
+    str, Field(pattern=r"^(uploads|reports)/[0-9a-f-]{36}/[0-9a-f-]{36}\.[a-z]{3,4}$")
+]
+
+
+class FilesMessage(OrgMessage):
+    keys: list[StorageKey] = Field(min_length=1, max_length=FILES_PER_JOB)
 
 
 class SignInMessage(Message):

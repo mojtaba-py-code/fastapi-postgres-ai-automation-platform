@@ -8,14 +8,24 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
+    DateTime,
+    LargeBinary,
+    Select,
+    String,
     and_,
+    case,
+    cast,
     delete,
+    false,
     func,
+    literal,
     literal_column,
+    null,
     or_,
     select,
     text,
     tuple_,
+    union,
     update,
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -44,9 +54,12 @@ from nexusflow.domain.records.sealing import (
     is_sealed,
     open_value,
     rewrap_value,
+    seal_data,
+    seal_diff,
     seal_value,
 )
 from nexusflow.domain.reports.model import Report
+from nexusflow.domain.shared.idempotency import CLIENT_KEY_PREFIX
 from nexusflow.domain.shared.security import SecretCipher
 from nexusflow.domain.sources.model import CollectionRun, RunStatus, Source
 from nexusflow.domain.uploads.model import Upload, UploadStatus
@@ -68,6 +81,15 @@ class SqlDatasetRepository(TenantRepository[Dataset]):
     entity = Dataset
     table = d.datasets
     sortable = ("created_at", "name")
+
+    async def get_for_share(self, org_id: UUID, dataset_id: UUID) -> Dataset | None:
+        statement = (
+            select(Dataset)
+            .where(d.datasets.c.org_id == org_id, d.datasets.c.id == dataset_id)
+            .with_for_update(read=True)
+            .execution_options(populate_existing=True)
+        )
+        return (await self._s.execute(statement)).scalar_one_or_none()
 
     async def list_page(
         self,
@@ -118,6 +140,15 @@ class SqlIntegrationRepository(TenantRepository[Integration]):
         )
         return list((await self._s.execute(statement)).scalars().all())
 
+    async def count_needing_rewrap(self, org_id: UUID, active_key_id: str) -> int:
+        i = d.integrations
+        statement = (
+            select(func.count())
+            .select_from(i)
+            .where(i.c.org_id == org_id, i.c.secret_key_id != active_key_id)
+        )
+        return int((await self._s.execute(statement)).scalar_one())
+
 
 class SqlSourceRepository(TenantRepository[Source]):
     entity = Source
@@ -136,6 +167,17 @@ class SqlSourceRepository(TenantRepository[Source]):
             return []
         statement = select(Source).where(d.sources.c.org_id == org_id, d.sources.c.id.in_(ids))
         return list((await self._s.execute(statement)).scalars().all())
+
+    async def wait_for_ingestions(self, org_id: UUID, dataset_id: UUID) -> None:
+        """Lock the dataset's sources: an ingestion holds its source's row from
+        before it reads the dataset until it commits, so this waits for every
+        ingestion that may still work with an older schema."""
+        statement = (
+            select(d.sources.c.id)
+            .where(d.sources.c.org_id == org_id, d.sources.c.dataset_id == dataset_id)
+            .with_for_update()
+        )
+        await self._s.execute(statement)
 
 
 class SqlCollectionRunRepository(TenantRepository[CollectionRun]):
@@ -172,6 +214,17 @@ class SqlCollectionRunRepository(TenantRepository[CollectionRun]):
             d.collection_runs.c.workflow_run_id == workflow_run_id,
         )
         return list((await self._s.execute(statement)).scalars().all())
+
+    async def latest_collected_at(self, org_id: UUID, source_id: UUID) -> datetime | None:
+        runs = d.collection_runs
+        collected = runs.c.stats["collected_at"].astext.cast(DateTime(timezone=True))
+        statement = select(func.max(collected)).where(
+            runs.c.org_id == org_id,
+            runs.c.source_id == source_id,
+            runs.c.status == RunStatus.SUCCEEDED.value,
+        )
+        latest: datetime | None = (await self._s.execute(statement)).scalar_one_or_none()
+        return latest
 
 
 class SqlRunPayloadRepository:
@@ -270,6 +323,103 @@ async def _rewrap_rows(
     return len(rows)
 
 
+def _plaintext(table: Any, column: str, fields: Iterable[str]) -> ColumnElement[bool]:
+    """A value of one of ``fields`` stored in clear (a scalar where a sealed
+    marker - an object - belongs). Field names travel as bound parameters."""
+    value = table.c[column]
+    parts = ("old", "new", "pct") if column == "diff" else (None,)
+    return or_(
+        *(
+            func.jsonb_typeof(value[name] if part is None else value[name][part]).not_in(
+                ("object", "null")
+            )
+            for name in fields
+            for part in parts
+        )
+    )
+
+
+async def _seal_rows(
+    session: AsyncSession,
+    table: Any,
+    column: str,
+    record_column: str,
+    org_id: UUID,
+    dataset_id: UUID,
+    fields: frozenset[str],
+    limit: int,
+) -> int:
+    """Seal the plaintext values of ``fields`` in up to ``limit`` rows of
+    ``table`` (rows other transactions hold are skipped)."""
+    cipher = _session_cipher(session)
+    statement = (
+        select(table.c.id, table.c[record_column].label("record_id"), table.c[column])
+        .where(
+            table.c.org_id == org_id,
+            table.c.dataset_id == dataset_id,
+            _plaintext(table, column, fields),
+        )
+        .limit(limit)
+        .with_for_update(skip_locked=True)
+    )
+    rows = (await session.execute(statement)).all()
+    seal = seal_diff if column == "diff" else seal_data
+    for row_id, record_id, value in rows:
+        sealed = seal(
+            cipher, value, fields, org_id=org_id, dataset_id=dataset_id, record_id=record_id
+        )
+        await session.execute(update(table).where(table.c.id == row_id).values({column: sealed}))
+    return len(rows)
+
+
+async def _count_plaintext(
+    session: AsyncSession,
+    table: Any,
+    column: str,
+    org_id: UUID,
+    dataset_id: UUID,
+    fields: frozenset[str],
+) -> int:
+    statement = (
+        select(func.count())
+        .select_from(table)
+        .where(
+            table.c.org_id == org_id,
+            table.c.dataset_id == dataset_id,
+            _plaintext(table, column, fields),
+        )
+    )
+    return int((await session.execute(statement)).scalar_one())
+
+
+async def _count_stale(
+    session: AsyncSession, table: Any, column: str, org_id: UUID, active_key_id: str
+) -> int:
+    """Rows of ``table`` holding a value sealed under an older key - counted
+    without locks, so rows other transactions hold are counted too."""
+    stale = _STALE_IN_DIFF if column == "diff" else _STALE_IN_DATA
+    statement = (
+        select(func.count())
+        .select_from(table)
+        .where(
+            table.c.org_id == org_id,
+            func.jsonb_path_exists(
+                table.c[column], stale, func.jsonb_build_object("kid", active_key_id)
+            ),
+        )
+    )
+    return int((await session.execute(statement)).scalar_one())
+
+
+async def _delete_ids(session: AsyncSession, table: Any, ids: Select[Any]) -> int:
+    """Delete the rows ``ids`` selects - a bounded batch, so one short statement."""
+    statement = (
+        delete(table).where(table.c.id.in_(ids)).execution_options(synchronize_session=False)
+    )
+    result = await session.execute(statement)
+    return int(getattr(result, "rowcount", 0) or 0)
+
+
 class SqlRecordRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._s = session
@@ -278,6 +428,28 @@ class SqlRecordRepository:
         count = await _rewrap_rows(self._s, d.records, "data", "id", org_id, active_key_id, limit)
         return count + await _rewrap_rows(
             self._s, d.record_versions, "data", "record_id", org_id, active_key_id, limit
+        )
+
+    async def count_stale_sealed(self, org_id: UUID, active_key_id: str) -> tuple[int, int]:
+        return (
+            await _count_stale(self._s, d.records, "data", org_id, active_key_id),
+            await _count_stale(self._s, d.record_versions, "data", org_id, active_key_id),
+        )
+
+    async def seal_plaintext(
+        self, org_id: UUID, dataset_id: UUID, fields: frozenset[str], *, limit: int
+    ) -> int:
+        count = await _seal_rows(
+            self._s, d.records, "data", "id", org_id, dataset_id, fields, limit
+        )
+        return count + await _seal_rows(
+            self._s, d.record_versions, "data", "record_id", org_id, dataset_id, fields, limit
+        )
+
+    async def count_plaintext(self, org_id: UUID, dataset_id: UUID, fields: frozenset[str]) -> int:
+        count = await _count_plaintext(self._s, d.records, "data", org_id, dataset_id, fields)
+        return count + await _count_plaintext(
+            self._s, d.record_versions, "data", org_id, dataset_id, fields
         )
 
     async def fetch_for_update(self, dataset_id: UUID, keys: Sequence[str]) -> dict[str, Record]:
@@ -299,13 +471,15 @@ class SqlRecordRepository:
         self._s.add_all(versions)
         await self._s.flush()
 
-    async def touch(self, record_ids: Sequence[UUID], *, run_id: UUID, now: datetime) -> None:
+    async def touch(
+        self, record_ids: Sequence[UUID], *, run_id: UUID, source_id: UUID, now: datetime
+    ) -> None:
         if not record_ids:
             return
         await self._s.execute(
             update(d.records)
             .where(d.records.c.id.in_(list(record_ids)))
-            .values(last_seen_at=now, last_run_id=run_id)
+            .values(last_seen_at=now, last_run_id=run_id, source_id=source_id)
             .execution_options(synchronize_session=False)
         )
 
@@ -433,21 +607,32 @@ class SqlRecordRepository:
             statement = statement.where(r.c.id > after)
         return list((await self._s.execute(statement)).scalars().all())
 
-    async def purge_versions_before(self, org_id: UUID, dataset_id: UUID, before: datetime) -> int:
+    async def purge_versions_before(
+        self, org_id: UUID, dataset_id: UUID, before: datetime, *, limit: int
+    ) -> int:
         v = d.record_versions
-        # Keep the newest version of every record so history stays diffable.
-        statement = delete(v).where(
-            v.c.org_id == org_id,
-            v.c.dataset_id == dataset_id,
-            v.c.captured_at < before,
-            v.c.diffed.is_(True),
-            v.c.version
-            < select(func.max(d.records.c.version))
-            .where(d.records.c.id == v.c.record_id)
-            .scalar_subquery(),
+        successor = d.record_versions.alias("successor")
+        # Change detection diffs version n against version n - 1: a version may go
+        # only once its successor has been diffed. That keeps the newest version of
+        # every record, and every version a pending (undiffed) one still needs.
+        doomed = (
+            select(v.c.id)
+            .where(
+                v.c.org_id == org_id,
+                v.c.dataset_id == dataset_id,
+                v.c.captured_at < before,
+                v.c.diffed.is_(True),
+                select(successor.c.id)
+                .where(
+                    successor.c.record_id == v.c.record_id,
+                    successor.c.version == v.c.version + 1,
+                    successor.c.diffed.is_(True),
+                )
+                .exists(),
+            )
+            .limit(limit)
         )
-        result = await self._s.execute(statement.execution_options(synchronize_session=False))
-        return int(getattr(result, "rowcount", 0) or 0)
+        return await _delete_ids(self._s, v, doomed)
 
 
 _SIGNIFICANCE_ORDER = [s.value for s in Significance]
@@ -554,6 +739,38 @@ class SqlChangeRepository:
         return await _rewrap_rows(
             self._s, d.changes, "diff", "record_id", org_id, active_key_id, limit
         )
+
+    async def count_stale_sealed(self, org_id: UUID, active_key_id: str) -> int:
+        return await _count_stale(self._s, d.changes, "diff", org_id, active_key_id)
+
+    async def seal_plaintext(
+        self, org_id: UUID, dataset_id: UUID, fields: frozenset[str], *, limit: int
+    ) -> int:
+        return await _seal_rows(
+            self._s, d.changes, "diff", "record_id", org_id, dataset_id, fields, limit
+        )
+
+    async def count_plaintext(self, org_id: UUID, dataset_id: UUID, fields: frozenset[str]) -> int:
+        return await _count_plaintext(self._s, d.changes, "diff", org_id, dataset_id, fields)
+
+    async def purge_before(
+        self, org_id: UUID, dataset_id: UUID, before: datetime, *, limit: int
+    ) -> int:
+        c = d.changes
+        # Nothing references a change by foreign key (alerts keep their own text
+        # and subject id; insights their own summary): once its alerts have been
+        # evaluated, an old change can go like the versions it compared.
+        doomed = (
+            select(c.c.id)
+            .where(
+                c.c.org_id == org_id,
+                c.c.dataset_id == dataset_id,
+                c.c.detected_at < before,
+                c.c.alerts_evaluated.is_(True),
+            )
+            .limit(limit)
+        )
+        return await _delete_ids(self._s, c, doomed)
 
     async def mark_alerts_evaluated(self, change_ids: Sequence[UUID]) -> None:
         if change_ids:
@@ -825,18 +1042,53 @@ class SqlUploadRepository(TenantRepository[Upload]):
         return (await self._s.execute(statement)).scalar_one_or_none()
 
 
+def _sealed_under_other_key(blob: Any, active_key_id: str) -> ColumnElement[bool]:
+    """A secret blob wrapped under a key other than ``active_key_id``: its key id
+    is stored in clear in the blob header (``NF | version | length | key id``)."""
+    # CASE, not AND: SQL does not promise to test the length before get_byte runs.
+    key_id = case(
+        (func.octet_length(blob) > 4, func.substring(blob, 5, func.get_byte(blob, 3))),
+        else_=null(),
+    )
+    condition: ColumnElement[bool] = key_id != literal(active_key_id.encode("ascii"), LargeBinary)
+    return condition
+
+
+def _stale_endpoint(active_key_id: str) -> ColumnElement[bool]:
+    w = d.webhook_endpoints
+    return or_(
+        _sealed_under_other_key(w.c.secret_ciphertext, active_key_id),
+        _sealed_under_other_key(w.c.previous_secret_ciphertext, active_key_id),
+    )
+
+
 class SqlWebhookEndpointRepository(TenantRepository[WebhookEndpoint]):
     entity = WebhookEndpoint
     table = d.webhook_endpoints
 
-    async def list_for_update(self, org_id: UUID, *, limit: int) -> list[WebhookEndpoint]:
+    async def stale_for_update(
+        self, org_id: UUID, active_key_id: str, *, after: UUID | None, limit: int
+    ) -> list[WebhookEndpoint]:
+        w = d.webhook_endpoints
         statement = (
             select(WebhookEndpoint)
-            .where(d.webhook_endpoints.c.org_id == org_id)
+            .where(w.c.org_id == org_id, _stale_endpoint(active_key_id))
+            .order_by(w.c.id)
             .limit(limit)
             .with_for_update(skip_locked=True)
         )
+        if after is not None:
+            statement = statement.where(w.c.id > after)
         return list((await self._s.execute(statement)).scalars().all())
+
+    async def count_stale(self, org_id: UUID, active_key_id: str) -> int:
+        w = d.webhook_endpoints
+        statement = (
+            select(func.count())
+            .select_from(w)
+            .where(w.c.org_id == org_id, _stale_endpoint(active_key_id))
+        )
+        return int((await self._s.execute(statement)).scalar_one())
 
 
 class SqlWebhookEventRepository:
@@ -912,16 +1164,100 @@ _PURGE_TARGETS = {
 _PURGE_DEAD_LETTERS = text("SELECT nf_purge_dead_letters(:before)")
 
 
+# Children removed bottom-up, in batches, before a dataset or an organization
+# row goes: one cascading DELETE of a large dataset outlasts the statement
+# timeout. Each entry scopes its table to a dataset (tables reached through
+# sources or alert rules by subquery); workflow runs belong to projects.
+_BATCHED_PURGE = {
+    "record_versions": d.record_versions,
+    "changes": d.changes,
+    "records": d.records,
+    "insights": d.insights,
+    "inbound_webhook_events": d.inbound_webhook_events,
+    "collection_runs": d.collection_runs,
+    "notification_deliveries": d.notification_deliveries,
+    "alerts": d.alerts,
+    "workflow_runs": d.workflow_runs,
+}
+
+
+def _dataset_scope(target: str, dataset_id: UUID) -> ColumnElement[bool]:
+    sources = select(d.sources.c.id).where(d.sources.c.dataset_id == dataset_id)
+    rules = select(d.alert_rules.c.id).where(d.alert_rules.c.dataset_id == dataset_id)
+    match target:
+        case "record_versions" | "changes" | "records" | "insights":
+            column: ColumnElement[bool] = _BATCHED_PURGE[target].c.dataset_id == dataset_id
+            return column
+        case "collection_runs":
+            return d.collection_runs.c.source_id.in_(sources)
+        case "inbound_webhook_events":
+            endpoints = select(d.webhook_endpoints.c.id).where(
+                d.webhook_endpoints.c.source_id.in_(sources)
+            )
+            return d.inbound_webhook_events.c.endpoint_id.in_(endpoints)
+        case "alerts":
+            return d.alerts.c.rule_id.in_(rules)
+        case "notification_deliveries":
+            alerts = select(d.alerts.c.id).where(d.alerts.c.rule_id.in_(rules))
+            return d.notification_deliveries.c.alert_id.in_(alerts)
+    raise ValueError(f"{target} rows are not purged per dataset")
+
+
+# Tables that keep client idempotency keys. A released key of a NOT NULL column
+# becomes a tombstone unique to its row (``expired:<id>``).
+_KEYED = {
+    "collection_runs": d.collection_runs,
+    "workflow_runs": d.workflow_runs,
+    "insights": d.insights,
+    "reports": d.reports,
+}
+
+
+def _client_keys(target: str) -> ColumnElement[bool]:
+    key = _KEYED[target].c.idempotency_key
+    if target == "reports":
+        return key.is_not(None)  # every report key came from a client
+    if target == "workflow_runs":  # "manual:<key>": the form before digests
+        return or_(key.like(f"{CLIENT_KEY_PREFIX}%"), key.like("manual:%"))
+    return key.like(f"{CLIENT_KEY_PREFIX}%")  # internal keys (webhooks, slots) stay
+
+
 class SqlMaintenanceRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._s = session
 
-    async def purge(self, org_id: UUID | None, target: str, before: datetime) -> int:
-        """Retention delete for an allowlisted table (never built from input).
+    async def expire_idempotency_keys(
+        self, org_id: UUID, target: str, before: datetime, *, limit: int
+    ) -> int:
+        table = _KEYED[target]
+        keyed = (
+            select(table.c.id)
+            .where(table.c.org_id == org_id, table.c.created_at < before, _client_keys(target))
+            .limit(limit)
+        )
+        released: Any = (
+            null()
+            if table.c.idempotency_key.nullable
+            else literal("expired:") + cast(table.c.id, String)
+        )
+        statement = (
+            update(table)
+            .where(table.c.id.in_(keyed))
+            .values(idempotency_key=released)
+            .execution_options(synchronize_session=False)
+        )
+        result = await self._s.execute(statement)
+        return int(getattr(result, "rowcount", 0) or 0)
+
+    async def purge(
+        self, org_id: UUID | None, target: str, before: datetime, *, limit: int | None = None
+    ) -> int:
+        """Retention delete for an allowlisted table (never built from input): up
+        to ``limit`` rows, so the caller can purge in short batches.
 
         Dead letters are purged in the unit of work's tenant context - or,
-        with ``org_id=None``, the platform-level ones; every other target
-        belongs to a tenant.
+        with ``org_id=None``, the platform-level ones - all at once (their
+        purge function takes no limit); every other target belongs to a tenant.
         """
         if target == "dead_letters":
             return int(
@@ -930,15 +1266,60 @@ class SqlMaintenanceRepository:
         if org_id is None:
             raise ValueError(f"{target} rows always belong to a tenant")
         table, column = _PURGE_TARGETS[target]
-        statement = delete(table).where(table.c.org_id == org_id, column < before)
+        doomed = select(table.c.id).where(table.c.org_id == org_id, column < before)
         if target == "collection_runs":
-            statement = statement.where(
+            doomed = doomed.where(
                 table.c.status.in_(
                     [s.value for s in RunStatus if s not in (RunStatus.QUEUED, RunStatus.RUNNING)]
                 )
             )
-        result = await self._s.execute(statement.execution_options(synchronize_session=False))
-        return int(getattr(result, "rowcount", 0) or 0)
+        return await _delete_ids(self._s, table, doomed.limit(limit))
+
+    async def delete_batch(
+        self, org_id: UUID, target: str, *, dataset_id: UUID | None, limit: int
+    ) -> int:
+        table = _BATCHED_PURGE[target]
+        doomed = select(table.c.id).where(table.c.org_id == org_id)
+        if dataset_id is not None:
+            doomed = doomed.where(_dataset_scope(target, dataset_id))
+        return await _delete_ids(self._s, table, doomed.limit(limit))
+
+    async def file_keys(
+        self,
+        org_id: UUID,
+        *,
+        project_id: UUID | None = None,
+        dataset_id: UUID | None = None,
+        source_id: UUID | None = None,
+    ) -> list[str]:
+        """Storage keys of the uploads and reports a project, dataset or source holds."""
+        u, s, r = d.uploads, d.sources, d.reports
+        sources = select(s.c.id).where(s.c.org_id == org_id)
+        reports = select(r.c.storage_key).where(r.c.org_id == org_id, r.c.storage_key.is_not(None))
+        if source_id is not None:
+            sources = sources.where(s.c.id == source_id)
+            reports = reports.where(false())  # a source holds no reports
+        if dataset_id is not None:
+            sources = sources.where(s.c.dataset_id == dataset_id)
+            reports = reports.where(r.c.dataset_id == dataset_id)
+        if project_id is not None:
+            sources = sources.where(s.c.project_id == project_id)
+            reports = reports.where(r.c.project_id == project_id)
+        uploads = select(u.c.storage_key).where(u.c.org_id == org_id, u.c.source_id.in_(sources))
+        keys = (await self._s.execute(union(uploads, reports))).scalars().all()
+        return sorted(str(key) for key in keys)
+
+    async def referenced_keys(self, org_id: UUID, keys: Sequence[str]) -> set[str]:
+        """Which of ``keys`` an upload or a report still points to."""
+        if not keys:
+            return set()
+        uploads = select(d.uploads.c.storage_key).where(
+            d.uploads.c.org_id == org_id, d.uploads.c.storage_key.in_(list(keys))
+        )
+        reports = select(d.reports.c.storage_key).where(
+            d.reports.c.org_id == org_id, d.reports.c.storage_key.in_(list(keys))
+        )
+        return {str(key) for key in (await self._s.execute(union(uploads, reports))).scalars()}
 
     async def stuck_deliveries(
         self, org_id: UUID, *, before: datetime, limit: int
@@ -952,26 +1333,15 @@ class SqlMaintenanceRepository:
         )
         return list((await self._s.execute(statement)).scalars().all())
 
-    async def storage_keys(self, org_id: UUID) -> list[str]:
-        uploads = select(d.uploads.c.storage_key).where(d.uploads.c.org_id == org_id)
-        reports = select(d.reports.c.storage_key).where(
-            d.reports.c.org_id == org_id, d.reports.c.storage_key.is_not(None)
-        )
-        keys = list((await self._s.execute(uploads)).scalars().all())
-        keys.extend(k for k in (await self._s.execute(reports)).scalars().all() if k)
-        return keys
-
     async def delete_organization(self, org_id: UUID) -> None:
         await self._s.execute(delete(t.organizations).where(t.organizations.c.id == org_id))
 
-    async def purge_outbox(self, before: datetime) -> int:
-        result = await self._s.execute(
-            delete(t.outbox_messages).where(
-                t.outbox_messages.c.dispatched_at.is_not(None),
-                t.outbox_messages.c.dispatched_at < before,
-            )
-        )
-        return int(getattr(result, "rowcount", 0) or 0)
+    async def purge_outbox(self, before: datetime, *, limit: int) -> int:
+        o = t.outbox_messages
+        doomed = (
+            select(o.c.id).where(o.c.dispatched_at.is_not(None), o.c.dispatched_at < before)
+        ).limit(limit)
+        return await _delete_ids(self._s, o, doomed)
 
 
 class SqlSystemQueries:

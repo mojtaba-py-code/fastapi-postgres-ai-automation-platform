@@ -18,6 +18,7 @@ from nexusflow.apps.workers.messages import (
     DeliveryMessage,
     Empty,
     EventMessage,
+    FilesMessage,
     InsightMessage,
     InvitationMessage,
     Message,
@@ -425,13 +426,28 @@ async def relay_outbox(deps: WorkerDeps, msg: Empty) -> None:
 
 
 async def purge_organizations(deps: WorkerDeps, msg: OptionalOrgMessage) -> None:
-    purged = await deps.container.maintenance.purge_due_organizations()
+    def failed(org_id: UUID, exc: Exception) -> None:  # retried by the next run
+        _log.error("organization_purge_failed", org_id=str(org_id), error=type(exc).__name__)
+
+    purged = await deps.container.maintenance.purge_due_organizations(on_error=failed)
     if purged:
         _log.info("organizations_purged", count=len(purged))
 
 
 async def purge_dataset(deps: WorkerDeps, msg: DatasetMessage) -> None:
     await deps.container.maintenance.purge_dataset(msg.org_id, msg.dataset_id)
+
+
+async def delete_files(deps: WorkerDeps, msg: FilesMessage) -> None:
+    await deps.container.maintenance.delete_files(msg.org_id, msg.keys)
+
+
+async def seal_dataset(deps: WorkerDeps, msg: DatasetMessage) -> None:
+    remaining = await deps.container.maintenance.seal_sensitive(msg.org_id, msg.dataset_id)
+    if remaining:
+        # Rows in use were skipped: retried with backoff (then dead-lettered,
+        # retryable from the API) until every stored value is sealed.
+        raise TransientError(code="sealing_incomplete", internal_detail=f"{remaining} rows")
 
 
 async def _each_tenant(c: Container, work: Callable[[UUID], Awaitable[Any]], task: str) -> None:
@@ -448,8 +464,9 @@ async def _each_tenant(c: Container, work: Callable[[UUID], Awaitable[Any]], tas
 async def apply_retention(deps: WorkerDeps, msg: Empty) -> None:
     await _each_tenant(deps.container, deps.container.maintenance.apply_retention, "retention")
     purged = await deps.container.maintenance.apply_platform_retention()
-    if purged:
-        _log.info("platform_retention", dead_letters=purged)
+    scratch = await deps.container.maintenance.purge_scratch()
+    if purged or scratch:
+        _log.info("platform_retention", dead_letters=purged, scratch_files=scratch)
 
 
 async def reap_stuck_work(deps: WorkerDeps, msg: Empty) -> None:
@@ -475,7 +492,7 @@ async def rewrap_keys(deps: WorkerDeps, msg: Empty) -> None:
 
     async def rewrap(org_id: UUID) -> None:
         count = await c.integrations.rewrap(org_id, active_key_id=active)
-        count += await c.webhooks.rewrap(org_id)
+        count += await c.webhooks.rewrap(org_id, active_key_id=active)
         count += await c.maintenance.rewrap_sealed(org_id, active_key_id=active)
         if count:
             _log.info("secrets_rewrapped", org_id=str(org_id), count=count, key_id=active)

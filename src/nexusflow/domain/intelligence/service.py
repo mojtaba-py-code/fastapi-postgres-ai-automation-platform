@@ -20,7 +20,6 @@ from nexusflow.core.clock import Clock
 from nexusflow.core.errors import NotFoundError, PermanentError
 from nexusflow.core.ids import uuid7
 from nexusflow.core.pagination import Page, PageRequest
-from nexusflow.core.text import single_line
 from nexusflow.domain.audit.model import AuditAction, AuditResult
 from nexusflow.domain.audit.recorder import AuditRecorder
 from nexusflow.domain.authorization.principal import Principal
@@ -40,6 +39,7 @@ from nexusflow.domain.intelligence.tools import ToolContext, ToolGateway
 from nexusflow.domain.intelligence.validation import OutputRejectedError, validate_output
 from nexusflow.domain.records.model import Change
 from nexusflow.domain.shared.context import SYSTEM_META, RequestMeta
+from nexusflow.domain.shared.idempotency import client_key, ensure_same_request
 from nexusflow.domain.shared.outbox import TaskName, new_message
 from nexusflow.domain.shared.unit_of_work import TenantScope, UnitOfWork, UnitOfWorkFactory
 from nexusflow.domain.sources.model import RestApiConfig, WebsiteConfig
@@ -92,10 +92,12 @@ class IntelligenceService:
     ) -> tuple[Insight, bool]:
         principal.require(Permission.INSIGHTS_GENERATE)
         org_id = principal.require_org()
-        key = f"req:{single_line(idempotency_key, 100)}" if idempotency_key else f"req:{uuid7()}"
+        # Without a client key, a unique one: the column is required.
+        key = client_key(idempotency_key) if idempotency_key else f"once:{uuid7()}"
         async with self._uow_factory(TenantScope.of(principal)) as uow:
             existing = await uow.data.insights.get_by_idempotency_key(org_id, key)
             if existing is not None:
+                ensure_same_request(existing.dataset_id == dataset_id)
                 return existing, False
             dataset = await get_dataset(uow, org_id, dataset_id)
             insight = await self._create(

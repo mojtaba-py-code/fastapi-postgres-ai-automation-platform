@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
+import threading
+import time
 from collections.abc import AsyncIterator, Callable
+from datetime import timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -124,10 +128,48 @@ async def test_a_file_copied_under_another_key_does_not_open(tmp_path: Path) -> 
         await _read(storage, copy)
 
 
-async def test_files_written_before_sealing_still_read(tmp_path: Path) -> None:
+async def test_a_file_without_the_sealed_header_is_refused(tmp_path: Path) -> None:
+    # Every file the platform stores is sealed (no release stored plaintext), so a
+    # file without the header was put there by someone else: it is never served.
     key = _key()
-    await LocalFileStorage(tmp_path).save_bytes(key, b"legacy plaintext")
-    assert await _read(_storage(tmp_path), key) == b"legacy plaintext"
+    await LocalFileStorage(tmp_path).save_bytes(key, b"SKU,Title\r\nA-1,Planted\r\n")
+    with pytest.raises(DecryptionError):
+        await _read(_storage(tmp_path), key)
+    with pytest.raises(DecryptionError):
+        async with _storage(tmp_path).plaintext(key):
+            pass
+
+
+async def test_a_sealed_file_replaced_by_plaintext_is_refused(tmp_path: Path) -> None:
+    storage = _storage(tmp_path)
+    key = f"reports/{ORG}/{uuid4()}.json"
+    await storage.save_bytes(key, b'{"genuine": true}')
+    storage.local_path(key).write_bytes(b'{"forged": true}')  # write access to the volume
+    with pytest.raises(DecryptionError):
+        await _read(storage, key)
+
+
+async def test_without_a_sealer_files_are_stored_and_read_as_they_are(tmp_path: Path) -> None:
+    storage, key = LocalFileStorage(tmp_path), _key()
+    await storage.save_bytes(key, b"plain")
+    assert await _read(storage, key) == b"plain"
+
+
+async def test_stale_plaintext_copies_are_purged(tmp_path: Path) -> None:
+    storage = _storage(tmp_path)
+    key = _key()
+    await storage.save_bytes(key, b"SKU\r\nA-1\r\n")
+    async with storage.plaintext(key) as abandoned:  # a worker killed while scanning...
+        stale = abandoned.with_name("left-behind.csv")
+        stale.write_bytes(abandoned.read_bytes())
+    hour_ago = time.time() - 3700
+    os.utime(stale, (hour_ago, hour_ago))
+    async with storage.plaintext(key) as in_use:  # ...and a scan in progress
+        assert await storage.purge_scratch(older_than=timedelta(hours=1)) == 1
+        assert in_use.exists()
+    assert not stale.exists()
+    assert await storage.purge_scratch(older_than=timedelta(0)) == 0
+    assert await LocalFileStorage(tmp_path / "empty").purge_scratch() == 0
 
 
 async def test_a_sealed_file_never_opens_without_a_sealer(tmp_path: Path) -> None:
@@ -153,6 +195,42 @@ async def test_rotation_rewraps_headers_so_the_old_key_can_go(tmp_path: Path) ->
     retired = _storage(tmp_path, keys={"k2": KEY_2}, active="k2")
     for index, key in enumerate(keys):
         assert await _read(retired, key) == f"payload {index}".encode() * 5000
+
+
+async def test_a_rewrap_never_recreates_a_file_deleted_meanwhile(tmp_path: Path) -> None:
+    key = _key()
+    await _storage(tmp_path).save_bytes(key, os.urandom(3 * CHUNK))
+    reading, release = threading.Event(), threading.Event()
+
+    class SlowSealer(FileSealer):
+        def rewrap_header(self, storage_key: str, wrapped: bytes) -> bytes | None:
+            reading.set()  # the re-wrap has read the file...
+            assert release.wait(timeout=10)  # ...and is slow to write the new one
+            return super().rewrap_header(storage_key, wrapped)
+
+    rotated = LocalFileStorage(
+        tmp_path, SlowSealer(EnvelopeCipher({"k1": KEY_1, "k2": KEY_2}, "k2"))
+    )
+    rewrap = asyncio.create_task(rotated.rewrap(ORG, limit=10))
+    assert await asyncio.to_thread(reading.wait, 10)
+    delete = asyncio.create_task(rotated.delete(key))  # the upload's row went meanwhile
+    await asyncio.sleep(0.2)
+    release.set()
+    await asyncio.gather(rewrap, delete)
+    assert not rotated.local_path(key).exists()
+
+
+async def test_a_tenants_files_go_with_their_directories(tmp_path: Path) -> None:
+    storage = _storage(tmp_path)
+    keys = [_key(), f"reports/{ORG}/{uuid4()}.pdf"]
+    other = f"uploads/{uuid4()}/{uuid4()}.csv"
+    for key in [*keys, other]:
+        await storage.save_bytes(key, b"x")
+    assert await storage.delete_tenant(ORG) == 2
+    assert not (tmp_path / "uploads" / str(ORG)).exists()
+    assert not (tmp_path / "reports" / str(ORG)).exists()
+    assert await storage.exists(other)
+    assert await storage.delete_tenant(ORG) == 0  # nothing left: idempotent
 
 
 async def test_rotation_stops_at_its_batch_limit(tmp_path: Path) -> None:

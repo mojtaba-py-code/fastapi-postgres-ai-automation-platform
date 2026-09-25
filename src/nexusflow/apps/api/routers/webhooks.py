@@ -67,4 +67,4 @@ async def receive_webhook(
     metrics.WEBHOOK_EVENTS.labels(result=result.status).inc()
     if result.status == "duplicate":
         response.status_code = status.HTTP_200_OK
-    return WebhookReceiptOut(status=result.status, run_id=result.run_id)
+    return WebhookReceiptOut(status=result.status, run_id=result.run_id, truncated=result.truncated)
