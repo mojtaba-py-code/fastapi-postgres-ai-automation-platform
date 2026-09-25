@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import csv
+import math
 import zipfile
 import zlib
 from dataclasses import dataclass
@@ -19,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import openpyxl
+from openpyxl.utils.exceptions import InvalidFileException
 
 from nexusflow.core.errors import InvalidInputError
 from nexusflow.domain.sources.model import FileUploadConfig
@@ -42,6 +44,7 @@ _UNREADABLE = (
     EOFError,
     zipfile.BadZipFile,
     zlib.error,
+    InvalidFileException,  # not a workbook openpyxl can open
 )
 
 
@@ -63,6 +66,11 @@ def _require_columns(header: list[str], config: FileUploadConfig) -> dict[str, i
 
 
 def _cell(value: Any) -> Any:
+    if isinstance(value, float) and not math.isfinite(value):
+        # 1E999 reads as infinity, which no JSON consumer accepts.
+        raise InvalidInputError(
+            "A cell holds a number that is not finite.", code="upload_malformed"
+        )
     if isinstance(value, datetime):
         return value.isoformat()
     if isinstance(value, date):
@@ -128,44 +136,51 @@ def parse_xlsx(
 def _parse_xlsx(
     path: Path, config: FileUploadConfig, *, max_rows: int, max_columns: int
 ) -> ParsedFile:
-    workbook = openpyxl.load_workbook(
-        path, read_only=True, data_only=True, keep_links=False, keep_vba=False
-    )
-    try:
-        sheet: Any
-        if config.sheet_name is not None:
-            if config.sheet_name not in workbook.sheetnames:
-                raise InvalidInputError("The worksheet was not found.", code="upload_missing_sheet")
-            sheet = workbook[config.sheet_name]
-        else:
-            sheet = workbook.worksheets[0]
-        # The header, the capped data rows and the blank-row allowance: openpyxl
-        # stops at this row number, so no row numbering makes it walk further.
-        last_row = 1 + max_rows + BLANK_ROW_ALLOWANCE
-        row_iter = sheet.iter_rows(values_only=True, max_col=max_columns, max_row=last_row)
-        header_row = next(row_iter, None)
-        if header_row is None:
-            raise InvalidInputError("The worksheet is empty.", code="upload_empty")
-        header = [str(value).strip() if value is not None else "" for value in header_row]
-        positions = _require_columns(header, config)
-        items: list[dict[str, Any]] = []
-        rows = 0
-        walked = 1
-        truncated = False
-        for row in row_iter:
-            walked += 1
-            if rows >= max_rows:
-                truncated = True
-                break
-            if all(value is None for value in row):
-                continue
-            rows += 1
-            items.append({f: _cell(row[i]) if i < len(row) else None for f, i in positions.items()})
-        if walked >= last_row:
-            truncated = True  # stopped at the walking bound: rows beyond were not read
-        return ParsedFile(items=items, truncated=truncated, rows=rows)
-    finally:
-        workbook.close()
+    # An open file, not the path: openpyxl refuses a path without an Excel
+    # extension, and the sandbox stores its input as plain "input".
+    with path.open("rb") as handle:
+        workbook = openpyxl.load_workbook(
+            handle, read_only=True, data_only=True, keep_links=False, keep_vba=False
+        )
+        try:
+            sheet: Any
+            if config.sheet_name is not None:
+                if config.sheet_name not in workbook.sheetnames:
+                    raise InvalidInputError(
+                        "The worksheet was not found.", code="upload_missing_sheet"
+                    )
+                sheet = workbook[config.sheet_name]
+            else:
+                sheet = workbook.worksheets[0]
+            # The header, the capped data rows and the blank-row allowance: openpyxl
+            # stops at this row number, so no row numbering makes it walk further.
+            last_row = 1 + max_rows + BLANK_ROW_ALLOWANCE
+            row_iter = sheet.iter_rows(values_only=True, max_col=max_columns, max_row=last_row)
+            header_row = next(row_iter, None)
+            if header_row is None:
+                raise InvalidInputError("The worksheet is empty.", code="upload_empty")
+            header = [str(value).strip() if value is not None else "" for value in header_row]
+            positions = _require_columns(header, config)
+            items: list[dict[str, Any]] = []
+            rows = 0
+            walked = 1
+            truncated = False
+            for row in row_iter:
+                walked += 1
+                if rows >= max_rows:
+                    truncated = True
+                    break
+                if all(value is None for value in row):
+                    continue
+                rows += 1
+                items.append(
+                    {f: _cell(row[i]) if i < len(row) else None for f, i in positions.items()}
+                )
+            if walked >= last_row:
+                truncated = True  # stopped at the walking bound: rows beyond were not read
+            return ParsedFile(items=items, truncated=truncated, rows=rows)
+        finally:
+            workbook.close()
 
 
 def parse_upload(
