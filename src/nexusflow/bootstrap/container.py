@@ -30,6 +30,7 @@ from nexusflow.domain.identity.account_service import AccountService
 from nexusflow.domain.identity.auth_service import AuthPolicy, AuthService
 from nexusflow.domain.identity.authenticator import Authenticator
 from nexusflow.domain.identity.password_policy import PasswordPolicy
+from nexusflow.domain.identity.privacy import PrivacyService
 from nexusflow.domain.identity.security_emails import SecurityEmailService
 from nexusflow.domain.identity.service_accounts import ServiceAccountService
 from nexusflow.domain.integrations.service import IntegrationService
@@ -101,6 +102,7 @@ class Container:
     authenticator: Authenticator
     organizations: OrganizationService
     accounts: AccountService
+    privacy: PrivacyService
     audit_log: AuditService
     catalog: CatalogService
     integrations: IntegrationService
@@ -322,6 +324,7 @@ def build_container(
             token_hasher=token_hasher,
             confirm_password=auth.confirm_password,
         ),
+        privacy=PrivacyService(uow_factory=uow_factory, clock=clock, audit=audit),
         audit_log=AuditService(uow_factory=uow_factory),
         catalog=CatalogService(uow_factory=uow_factory, clock=clock, audit=audit),
         integrations=integrations,
@@ -414,6 +417,7 @@ def build_container(
                 notification_deliveries_days=settings.retention.notification_deliveries_days,
                 dead_letters_days=settings.retention.dead_letters_days,
                 idempotency_keys_hours=settings.retention.idempotency_keys_hours,
+                sessions_days=settings.retention.sessions_days,
             ),
             audit=audit,
         ),

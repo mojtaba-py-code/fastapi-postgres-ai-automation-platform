@@ -48,11 +48,22 @@ class SessionRepository(Protocol):
         self, user_id: UUID, *, now: datetime, reason: str, except_session: UUID | None = None
     ) -> int: ...
 
+    async def list_for_user(self, user_id: UUID, *, limit: int) -> list[UserSession]:
+        """Every session still kept, ended ones too, newest first."""
+        ...
+
+    async def purge_expired(self, before: datetime, *, limit: int) -> int:
+        """Delete up to ``limit`` sessions that expired before ``before`` (their
+        refresh tokens go with them); returns how many."""
+        ...
+
 
 class RefreshTokenRepository(Protocol):
     async def add(self, token: RefreshToken) -> None: ...
 
     async def get_by_hash_for_update(self, token_hash: str) -> RefreshToken | None: ...
+
+    async def purge_expired(self, before: datetime, *, limit: int) -> int: ...
 
 
 class PasswordResetRepository(Protocol):
@@ -63,6 +74,8 @@ class PasswordResetRepository(Protocol):
     async def get_by_hash_for_update(self, token_hash: str) -> PasswordResetToken | None: ...
 
     async def invalidate_for_user(self, user_id: UUID, *, now: datetime) -> None: ...
+
+    async def purge_expired(self, before: datetime, *, limit: int) -> int: ...
 
 
 class SignupRequestRepository(Protocol):
@@ -75,6 +88,8 @@ class SignupRequestRepository(Protocol):
     async def lock_for_email(self, email: str) -> list[SignupRequest]:
         """Every request for the address, locked in one order (no deadlocks)."""
         ...
+
+    async def purge_expired(self, before: datetime, *, limit: int) -> int: ...
 
 
 class RecoveryCodeRepository(Protocol):
@@ -93,6 +108,8 @@ class ApiKeyRepository(Protocol):
     async def find_by_prefix(self, prefix: str) -> ApiKey | None: ...
 
     async def list_page(self, org_id: UUID, page: PageRequest) -> Page[ApiKey]: ...
+
+    async def list_created_by(self, org_id: UUID, user_id: UUID, limit: int) -> list[ApiKey]: ...
 
     async def revoke_created_by(self, org_id: UUID, user_id: UUID, *, now: datetime) -> int:
         """Revoke every live key a member created in this org; returns the count."""

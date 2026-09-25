@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Annotated
 from uuid import UUID
 
@@ -13,6 +14,8 @@ from nexusflow.apps.api.dependencies import (
     CurrentPrincipal,
     DefaultPage,
     Meta,
+    StateDep,
+    budget_identity,
     page_params,
     require,
 )
@@ -115,6 +118,28 @@ async def revoke_my_session(
 ) -> Response:
     await container.auth.revoke_session(principal, session_id, meta)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@users.get(
+    "/me/export",
+    summary="A copy of my personal data (JSON; GDPR art. 15 and 20)",
+    response_class=Response,
+    responses={200: {"content": {"application/json": {}}}},
+)
+async def export_me(
+    principal: CurrentPrincipal, container: ContainerDep, state: StateDep, meta: Meta
+) -> Response:
+    rule = container.settings.rate_limits.rules["api.export"]
+    await state.limiter.enforce("api.export", budget_identity(principal), rule)
+    document = await container.privacy.export_own(principal, meta)
+    return Response(
+        content=json.dumps(document, ensure_ascii=False, indent=2),
+        media_type="application/json",
+        headers={
+            "Content-Disposition": 'attachment; filename="nexusflow-personal-data.json"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @users.post("/me/delete", status_code=status.HTTP_204_NO_CONTENT, summary="Erase my account")

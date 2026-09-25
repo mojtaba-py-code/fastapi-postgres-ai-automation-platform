@@ -242,6 +242,9 @@ class RetentionSettings(_Section):
     dead_letters_days: int = Field(default=30, ge=1)
     default_record_versions_days: int = Field(default=180, ge=1)
     idempotency_keys_hours: int = Field(default=24, ge=1)
+    # Ended sign-in sessions (device, address) are deleted this long after they
+    # expire; sign-in risk compares a new sign-in with the last 90 days.
+    sessions_days: int = Field(default=90, ge=30)
 
 
 class RateLimitRule(_Section):

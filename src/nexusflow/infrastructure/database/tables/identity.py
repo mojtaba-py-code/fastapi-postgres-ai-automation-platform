@@ -90,6 +90,7 @@ user_sessions = Table(
     Column("ip", String(45)),
     Column("user_agent", String(256)),
     Column("mfa_verified", Boolean, nullable=False),
+    Index("ix_user_sessions_expires_at", "expires_at"),  # identity retention
 )
 
 refresh_tokens = Table(
@@ -110,6 +111,7 @@ refresh_tokens = Table(
     Column("used_at", TS),
     Column("replaced_by_id", Uuid),
     UniqueConstraint("token_hash"),
+    Index("ix_refresh_tokens_expires_at", "expires_at"),  # identity retention
 )
 
 password_reset_tokens = Table(
@@ -123,6 +125,7 @@ password_reset_tokens = Table(
     Column("used_at", TS),
     Column("requested_ip", String(45)),
     UniqueConstraint("token_hash"),
+    Index("ix_password_reset_tokens_expires_at", "expires_at"),  # identity retention
 )
 
 # Pending self-service sign-ups: the address only, until its owner opens the

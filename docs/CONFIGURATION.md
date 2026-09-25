@@ -233,6 +233,7 @@ How long operational data is kept before the maintenance job purges it.
 | `NEXUSFLOW_RETENTION__DEAD_LETTERS_DAYS` | int | `30` | >= 1 |
 | `NEXUSFLOW_RETENTION__DEFAULT_RECORD_VERSIONS_DAYS` | int | `180` | >= 1 |
 | `NEXUSFLOW_RETENTION__IDEMPOTENCY_KEYS_HOURS` | int | `24` | >= 1 |
+| `NEXUSFLOW_RETENTION__SESSIONS_DAYS` | int | `90` | >= 30 |
 
 ### `rate_limits`
 

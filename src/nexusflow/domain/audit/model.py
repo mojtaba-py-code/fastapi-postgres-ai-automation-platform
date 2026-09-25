@@ -74,6 +74,8 @@ class AuditAction(StrEnum):
     # started without the organization) by its network allowlist.
     NETWORK_ACCESS_DENIED = "auth.network_denied"
     ACCOUNT_DELETED = "auth.account_deleted"
+    # A person's copy of their data (GDPR art. 15/20), self-service or operator.
+    PERSONAL_DATA_EXPORTED = "privacy.data_exported"
     # organization & membership
     ORG_CREATED = "org.created"
     ORG_UPDATED = "org.updated"
@@ -141,6 +143,7 @@ class AuditAction(StrEnum):
     PLATFORM_KILL_SWITCH_ENGAGED = "platform.kill_switch_engaged"
     PLATFORM_KILL_SWITCH_RELEASED = "platform.kill_switch_released"
     ENCRYPTION_KEYS_REWRAPPED = "platform.encryption_keys_rewrapped"
+    AUDIT_LOGS_PURGED = "platform.audit_logs_purged"
     DEAD_LETTER_RETRIED = "dead_letter.retried"
     DEAD_LETTER_DISCARDED = "dead_letter.discarded"
 

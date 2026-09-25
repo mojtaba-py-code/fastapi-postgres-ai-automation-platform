@@ -412,6 +412,8 @@ restoring the pre-upgrade backup.
 - [ ] Release images verified with cosign and run by digest; Dependabot enabled.
 - [ ] Alerts routed; logs shipped to append-only storage.
 - [ ] Backups scheduled, signed (`BACKUP_SIGNING_KEY`), and a restore tested.
+- [ ] Audit retention decided and scheduled (`nexusflow audit purge`, see PRIVACY.md);
+  privacy notice and processing agreements in place.
 - [ ] n8n and Grafana reachable only through SSH tunnels; n8n's owner set up the
   moment it is enabled.
 - [ ] ClamAV enabled if tenants upload files from untrusted parties.

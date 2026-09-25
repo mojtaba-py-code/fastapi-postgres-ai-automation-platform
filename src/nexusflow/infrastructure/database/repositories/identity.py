@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import Table, delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,6 +37,15 @@ from nexusflow.domain.organizations.model import (
 )
 from nexusflow.infrastructure.database.pagination import paginate, paginate_rows
 from nexusflow.infrastructure.database.tables import identity as t
+
+
+async def _purge_expired(session: AsyncSession, table: Table, before: datetime, limit: int) -> int:
+    """Delete up to ``limit`` rows of ``table`` that expired before ``before``."""
+    doomed = select(table.c.id).where(table.c.expires_at < before).limit(limit).scalar_subquery()
+    result = await session.execute(
+        delete(table).where(table.c.id.in_(doomed)).execution_options(synchronize_session=False)
+    )
+    return int(getattr(result, "rowcount", 0) or 0)
 
 
 class SqlUserRepository:
@@ -117,6 +126,18 @@ class SqlSessionRepository:
         result = await self._s.execute(statement.execution_options(synchronize_session=False))
         return int(getattr(result, "rowcount", 0) or 0)
 
+    async def list_for_user(self, user_id: UUID, *, limit: int) -> list[UserSession]:
+        statement = (
+            select(UserSession)
+            .where(t.user_sessions.c.user_id == user_id)
+            .order_by(t.user_sessions.c.created_at.desc())
+            .limit(limit)
+        )
+        return list((await self._s.execute(statement)).scalars().all())
+
+    async def purge_expired(self, before: datetime, *, limit: int) -> int:
+        return await _purge_expired(self._s, t.user_sessions, before, limit)
+
 
 class SqlRefreshTokenRepository:
     def __init__(self, session: AsyncSession) -> None:
@@ -134,6 +155,9 @@ class SqlRefreshTokenRepository:
             .execution_options(populate_existing=True)
         )
         return (await self._s.execute(statement)).scalar_one_or_none()
+
+    async def purge_expired(self, before: datetime, *, limit: int) -> int:
+        return await _purge_expired(self._s, t.refresh_tokens, before, limit)
 
 
 class SqlPasswordResetRepository:
@@ -155,6 +179,9 @@ class SqlPasswordResetRepository:
             .execution_options(populate_existing=True)
         )
         return (await self._s.execute(statement)).scalar_one_or_none()
+
+    async def purge_expired(self, before: datetime, *, limit: int) -> int:
+        return await _purge_expired(self._s, t.password_reset_tokens, before, limit)
 
     async def invalidate_for_user(self, user_id: UUID, *, now: datetime) -> None:
         await self._s.execute(
@@ -192,6 +219,9 @@ class SqlSignupRequestRepository:
             .execution_options(populate_existing=True)
         )
         return list((await self._s.execute(statement)).scalars().all())
+
+    async def purge_expired(self, before: datetime, *, limit: int) -> int:
+        return await _purge_expired(self._s, t.signup_requests, before, limit)
 
 
 class SqlRecoveryCodeRepository:
@@ -253,6 +283,15 @@ class SqlApiKeyRepository:
             .returning(keys.c.id)
         )
         return len((await self._s.execute(statement)).all())
+
+    async def list_created_by(self, org_id: UUID, user_id: UUID, limit: int) -> list[ApiKey]:
+        statement = (
+            select(ApiKey)
+            .where(t.api_keys.c.org_id == org_id, t.api_keys.c.created_by == user_id)
+            .order_by(t.api_keys.c.created_at.desc())
+            .limit(limit)
+        )
+        return list((await self._s.execute(statement)).scalars().all())
 
     async def list_page(self, org_id: UUID, page: PageRequest) -> Page[ApiKey]:
         return await paginate(

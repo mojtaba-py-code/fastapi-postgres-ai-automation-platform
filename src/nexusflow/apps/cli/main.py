@@ -19,6 +19,7 @@ import sys
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import asdict
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -30,7 +31,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from nexusflow.bootstrap.container import Container, build_container
 from nexusflow.core.config import Settings
 from nexusflow.core.correlation import correlation
-from nexusflow.core.errors import NexusFlowError
+from nexusflow.core.errors import InvalidInputError, NexusFlowError
 from nexusflow.core.ids import uuid7
 from nexusflow.domain.audit.model import AuditAction
 from nexusflow.domain.authorization.principal import Principal, ServiceScope
@@ -193,6 +194,20 @@ async def signup_issue(c: Container, args: argparse.Namespace) -> dict[str, Any]
     }
 
 
+# ------------------------------------------------ data-subject requests
+
+
+async def user_export(c: Container, args: argparse.Namespace) -> dict[str, Any]:
+    """An access request received outside the platform (GDPR art. 15)."""
+    return await c.privacy.export_for(args.email, meta=CLI_META)
+
+
+async def user_erase(c: Container, args: argparse.Namespace) -> dict[str, Any]:
+    """An erasure request received outside the platform (GDPR art. 17)."""
+    user_id = await c.privacy.erase_for(args.email, reason=args.reason, meta=CLI_META)
+    return {"user_id": user_id, "erased": True}
+
+
 # -------------------------------------------------------- keys and audit
 
 
@@ -234,6 +249,49 @@ async def keys_rewrap(c: Container, args: argparse.Namespace) -> dict[str, Any]:
             "before removing any key from NEXUSFLOW_SECURITY__ENCRYPTION_KEYS."
         )
     return result
+
+
+MIN_AUDIT_RETENTION_DAYS = 90
+
+
+async def audit_purge(c: Container, args: argparse.Namespace) -> dict[str, Any]:
+    """Delete audit entries older than ``--older-than-days``, a prefix of every
+    chain (so what remains still verifies). The runtime role cannot delete
+    audit entries: this runs as the migrator, the table's owner."""
+    if args.older_than_days < MIN_AUDIT_RETENTION_DAYS:
+        raise InvalidInputError(
+            f"Keep at least {MIN_AUDIT_RETENTION_DAYS} days of audit entries.",
+            code="retention_too_short",
+        )
+    if c.settings.database.migrator_url is None:
+        raise InvalidInputError(
+            "NEXUSFLOW_DATABASE__MIGRATOR_URL(_FILE) is required to purge audit entries.",
+            code="migrator_required",
+        )
+    before = c.clock.now() - timedelta(days=args.older_than_days)
+    deleted = await purge_audit_logs(
+        c.settings.database.migrator_url.get_secret_value(),
+        before,
+        connect_args=ssl_connect_args(c.settings.database),
+    )
+    await _platform_audit(
+        c, AuditAction.AUDIT_LOGS_PURGED, {"before": before.isoformat(), "deleted": deleted}
+    )
+    return {"before": before, "deleted": deleted}
+
+
+async def purge_audit_logs(
+    migrator_url: str, before: datetime, *, connect_args: dict[str, Any] | None = None
+) -> int:
+    engine = create_async_engine(migrator_url, connect_args=connect_args or {})
+    try:
+        async with engine.begin() as conn:
+            result = await conn.execute(
+                text("SELECT nf_purge_audit_logs(:before)"), {"before": before}
+            )
+            return int(result.scalar_one())
+    finally:
+        await engine.dispose()
 
 
 async def audit_verify(c: Container, args: argparse.Namespace) -> dict[str, Any]:
@@ -370,15 +428,7 @@ def build_parser() -> argparse.ArgumentParser:
     clear.add_argument("--reason", required=True)
     clear.set_defaults(handler=org_clear_network_allowlist)
 
-    signup = sub.add_parser("signup", help="sign-up links").add_subparsers(
-        dest="action", required=True
-    )
-    issue = signup.add_parser(
-        "issue",
-        help="print a sign-up link for an address (it works while self-service is disabled)",
-    )
-    issue.add_argument("--email", required=True)
-    issue.set_defaults(handler=signup_issue)
+    _people_commands(sub)
 
     keys = sub.add_parser("keys", help="encryption key maintenance").add_subparsers(
         dest="action", required=True
@@ -393,6 +443,11 @@ def build_parser() -> argparse.ArgumentParser:
     rewrap.set_defaults(handler=keys_rewrap)
 
     audit = sub.add_parser("audit", help="audit trail").add_subparsers(dest="action", required=True)
+    purge = audit.add_parser(
+        "purge", help="delete audit entries past their retention (runs as the migrator)"
+    )
+    purge.add_argument("--older-than-days", type=int, required=True)
+    purge.set_defaults(handler=audit_purge)
     verify = audit.add_parser("verify", help="recompute tenant hash chains")
     verify.add_argument("--org", help="one organization id (default: all)")
     verify.set_defaults(handler=audit_verify)
@@ -402,6 +457,32 @@ def build_parser() -> argparse.ArgumentParser:
     deactivate.add_argument("--workflow-id", required=True)
     deactivate.set_defaults(handler=n8n_deactivate)
     return parser
+
+
+def _people_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    """Sign-up links and data-subject requests."""
+    signup = sub.add_parser("signup", help="sign-up links").add_subparsers(
+        dest="action", required=True
+    )
+    issue = signup.add_parser(
+        "issue",
+        help="print a sign-up link for an address (it works while self-service is disabled)",
+    )
+    issue.add_argument("--email", required=True)
+    issue.set_defaults(handler=signup_issue)
+
+    person = sub.add_parser("user", help="data-subject requests").add_subparsers(
+        dest="action", required=True
+    )
+    export = person.add_parser("export", help="a person's copy of their data (JSON)")
+    export.add_argument("--email", required=True)
+    export.set_defaults(handler=user_export)
+    erase = person.add_parser(
+        "erase", help="erase a person's account (refused while they solely own an organization)"
+    )
+    erase.add_argument("--email", required=True)
+    erase.add_argument("--reason", required=True)
+    erase.set_defaults(handler=user_erase)
 
 
 async def _run(settings: Settings, handler: Command, args: argparse.Namespace) -> dict[str, Any]:

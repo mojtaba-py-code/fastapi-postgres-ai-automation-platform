@@ -45,6 +45,9 @@ STUCK_INSIGHT_AFTER = timedelta(minutes=30)  # an analysis takes minutes, not ha
 MAX_RUN_ATTEMPTS = 3
 MAX_ANALYSIS_ATTEMPTS = 3
 ORG_PURGE_GRACE = timedelta(days=7)
+# Expired refresh, password-reset and sign-up tokens are kept a week (for an
+# investigation), then deleted: they can never be used again.
+EXPIRED_TOKENS_GRACE = timedelta(days=7)
 DELETE_BATCH = 1000
 # The large children of a dataset, deleted before the dataset row (whose
 # cascade then only meets small tables): records last, so that neither their
@@ -72,6 +75,7 @@ class RetentionPolicy:
     dead_letters_days: int
     outbox_days: int = 7
     idempotency_keys_hours: int = 24
+    sessions_days: int = 90
 
 
 @dataclass(slots=True)
@@ -239,6 +243,54 @@ class MaintenanceService:
         async with self._uow_factory(TenantScope.system(None)) as uow:
             purged = await uow.data.maintenance.purge(None, "dead_letters", cutoff)
             await uow.commit()
+        return purged
+
+    async def apply_identity_retention(self) -> dict[str, int]:
+        """Delete sign-in data past its use (GDPR storage limitation): sessions -
+        with their device and address - ``sessions_days`` after they expired,
+        and refresh, password-reset and sign-up tokens a week after. In
+        batches, each its own transaction; the counts are audited."""
+        now = self._clock.now()
+        sessions_cutoff = now - timedelta(days=self._policy.sessions_days)
+        tokens_cutoff = now - EXPIRED_TOKENS_GRACE
+        steps: tuple[tuple[str, Callable[[UnitOfWork, int], Awaitable[int]]], ...] = (
+            ("user_sessions", lambda uow, n: uow.sessions.purge_expired(sessions_cutoff, limit=n)),
+            (
+                "refresh_tokens",
+                lambda uow, n: uow.refresh_tokens.purge_expired(tokens_cutoff, limit=n),
+            ),
+            (
+                "password_reset_tokens",
+                lambda uow, n: uow.password_resets.purge_expired(tokens_cutoff, limit=n),
+            ),
+            (
+                "signup_requests",
+                lambda uow, n: uow.signup_requests.purge_expired(tokens_cutoff, limit=n),
+            ),
+        )
+        purged: dict[str, int] = {}
+        for name, step in steps:
+            total = 0
+            while True:
+                async with self._uow_factory(TenantScope.auth()) as uow:
+                    count = await step(uow, self._batch)
+                    await uow.commit()
+                total += count
+                if count < self._batch:
+                    break
+            if total:
+                purged[name] = total
+        if purged:
+            async with self._uow_factory(TenantScope.system(None)) as uow:
+                await self._audit.record(
+                    uow.audit,
+                    action=AuditAction.RETENTION_PURGED,
+                    principal=Principal.system(),
+                    meta=SYSTEM_META,
+                    resource_type="platform",
+                    metadata=purged,
+                )
+                await uow.commit()
         return purged
 
     async def purge_scratch(self) -> int:

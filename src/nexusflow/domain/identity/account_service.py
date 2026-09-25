@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Protocol
 from uuid import UUID
 
@@ -26,7 +26,7 @@ from nexusflow.domain.identity.api_keys import CredentialKind, generate_credenti
 from nexusflow.domain.identity.model import ApiKey, User
 from nexusflow.domain.shared.context import RequestMeta
 from nexusflow.domain.shared.security import TokenHasher
-from nexusflow.domain.shared.unit_of_work import TenantScope, UnitOfWorkFactory
+from nexusflow.domain.shared.unit_of_work import TenantScope, UnitOfWork, UnitOfWorkFactory
 
 MAX_API_KEY_LIFETIME_DAYS = 365
 
@@ -37,6 +37,48 @@ class PasswordConfirmation(Protocol):
     async def __call__(
         self, principal: Principal, password: str, meta: RequestMeta, *, purpose: str
     ) -> str: ...
+
+
+async def erase_user(
+    uow: UnitOfWork,
+    user: User,
+    *,
+    audit: AuditRecorder,
+    actor: Principal,
+    meta: RequestMeta,
+    now: datetime,
+    reason: str,
+) -> None:
+    """Erase a person (GDPR art. 17): leave every organization - refused for the
+    sole owner of one - with their API keys revoked, end every session, forget
+    the recovery codes and anonymise the account. The caller records the
+    erasure itself and commits."""
+    for org_id in await uow.memberships.list_org_ids_for_user(user.id):
+        await uow.switch_tenant(org_id)
+        membership = await uow.memberships.get(org_id, user.id)
+        if membership is None:
+            continue
+        if membership.role is Role.OWNER and await uow.memberships.count_owners(org_id) <= 1:
+            raise ConflictError(
+                "Transfer ownership or delete your organizations first.", code="sole_owner"
+            )
+        await uow.memberships.delete(membership)
+        revoked = await uow.api_keys.revoke_created_by(org_id, user.id, now=now)
+        # Each organization's own chain shows the member leaving.
+        await audit.record(
+            uow.audit,
+            action=AuditAction.MEMBER_REMOVED,
+            principal=actor,
+            meta=meta,
+            org_id=org_id,
+            resource_type="membership",
+            resource_id=membership.id,
+            metadata={"user_id": str(user.id), "reason": reason, "api_keys_revoked": revoked},
+        )
+    await uow.switch_tenant(None)
+    await uow.sessions.revoke_all_for_user(user.id, now=now, reason="account_deleted")
+    await uow.recovery_codes.delete_for_user(user.id)
+    user.anonymize(now)
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,39 +145,15 @@ class AccountService:
                 raise NotFoundError()
             if user.password_hash != verified:  # changed since it was confirmed
                 raise PermissionDeniedError("The password is incorrect.", code="invalid_password")
-            for org_id in await uow.memberships.list_org_ids_for_user(user_id):
-                await uow.switch_tenant(org_id)
-                membership = await uow.memberships.get(org_id, user_id)
-                if membership is None:
-                    continue
-                if (
-                    membership.role is Role.OWNER
-                    and await uow.memberships.count_owners(org_id) <= 1
-                ):
-                    raise ConflictError(
-                        "Transfer ownership or delete your organizations first.", code="sole_owner"
-                    )
-                await uow.memberships.delete(membership)
-                revoked = await uow.api_keys.revoke_created_by(org_id, user_id, now=now)
-                # Each organization's own chain shows the member leaving.
-                await self._audit.record(
-                    uow.audit,
-                    action=AuditAction.MEMBER_REMOVED,
-                    principal=principal,
-                    meta=meta,
-                    org_id=org_id,
-                    resource_type="membership",
-                    resource_id=membership.id,
-                    metadata={
-                        "user_id": str(user_id),
-                        "reason": "account_deleted",
-                        "api_keys_revoked": revoked,
-                    },
-                )
-            await uow.switch_tenant(None)
-            await uow.sessions.revoke_all_for_user(user_id, now=now, reason="account_deleted")
-            await uow.recovery_codes.delete_for_user(user_id)
-            user.anonymize(now)
+            await erase_user(
+                uow,
+                user,
+                audit=self._audit,
+                actor=principal,
+                meta=meta,
+                now=now,
+                reason="account_deleted",
+            )
             # The erasure itself belongs to the platform chain: record it as the
             # user acting outside any organization (``org_id=None`` alone would
             # fall back to the organization the session was scoped to).

@@ -492,8 +492,9 @@ async def apply_retention(deps: WorkerDeps, msg: Empty) -> None:
     await _each_tenant(deps.container, deps.container.maintenance.apply_retention, "retention")
     purged = await deps.container.maintenance.apply_platform_retention()
     scratch = await deps.container.maintenance.purge_scratch()
-    if purged or scratch:
-        _log.info("platform_retention", dead_letters=purged, scratch_files=scratch)
+    identity = await deps.container.maintenance.apply_identity_retention()
+    if purged or scratch or identity:
+        _log.info("platform_retention", dead_letters=purged, scratch_files=scratch, **identity)
 
 
 async def reap_stuck_work(deps: WorkerDeps, msg: Empty) -> None:
