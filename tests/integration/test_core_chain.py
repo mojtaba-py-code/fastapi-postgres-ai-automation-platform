@@ -32,7 +32,12 @@ from nexusflow.bootstrap.container import Container
 from nexusflow.core.clock import FrozenClock
 from nexusflow.core.config import RateLimitRule
 from nexusflow.core.errors import PermanentError, PolicyViolationError, TransientError
-from nexusflow.domain.automation.maintenance import MAX_ANALYSIS_ATTEMPTS, STUCK_INSIGHT_AFTER
+from nexusflow.domain.automation.maintenance import (
+    MAX_ANALYSIS_ATTEMPTS,
+    MAX_RUN_ATTEMPTS,
+    STUCK_INSIGHT_AFTER,
+    STUCK_RUN_AFTER,
+)
 from nexusflow.domain.integrations.model import IntegrationKind, ResolvedCredential
 from nexusflow.domain.intelligence.model import Insight, InsightStatus
 from nexusflow.domain.intelligence.ports import (
@@ -53,6 +58,7 @@ from nexusflow.domain.notifications.model import (
 )
 from nexusflow.domain.shared.outbox import TaskName
 from nexusflow.domain.shared.unit_of_work import TenantScope
+from nexusflow.domain.sources.model import RunStatus
 from nexusflow.infrastructure.redis.rate_limit import RateLimiter
 from nexusflow.infrastructure.redis.throttles import ChannelDeliveryThrottle
 from tests.support.api import ApiSession, signup
@@ -1298,6 +1304,49 @@ class TestCrashRecovery:
             if m.payload.get("event") == "job.failed"
         ]
         assert [job["dead_letter_id"] for job in failed_jobs] == [letter["id"]]
+
+    async def test_a_run_whose_workers_keep_dying_fails_like_any_failed_run(
+        self, api: httpx2.AsyncClient, container: Container, bus: InProcessBus
+    ) -> None:
+        tenant = await _tenant(api)
+        source_id = await create_source(
+            tenant.owner, tenant.project_id, await _dataset(tenant), _website()
+        )
+        await _rule(tenant, name="Broken sources", condition={"type": "run_failed"})
+        workflow = await tenant.owner.post(
+            "/api/v1/workflows",
+            json={
+                "project_id": tenant.project_id,
+                "name": "Nightly",
+                "trigger": "manual",
+                "source_ids": [source_id],
+            },
+        )
+        assert workflow.status_code == 201, workflow.text
+        workflow_path = f"/api/v1/workflows/{workflow.json()['id']}"
+        started = await tenant.owner.post(f"{workflow_path}/runs")
+        assert started.status_code == 202, started.text
+        await bus.drain(tenant.org_id)  # the run starts and goes to the sandbox
+        async with container.uow_factory(TenantScope.system(tenant.org_id)) as uow:
+            [run] = await uow.data.runs.list_for_workflow_run(
+                tenant.org_id, UUID(started.json()["id"])
+            )
+            assert run.status is RunStatus.RUNNING
+            run.started_at = datetime.now(UTC) - STUCK_RUN_AFTER * 2
+            run.attempt = MAX_RUN_ATTEMPTS  # every sandbox job of it died with its worker
+            await uow.commit()
+
+        assert (await container.maintenance.reap(tenant.org_id)).failed_runs == 1
+        await bus.drain(tenant.org_id)
+
+        failed = (await tenant.owner.get(f"/api/v1/runs/{run.id}")).json()
+        assert (failed["status"], failed["error_code"]) == ("failed", "worker_lost")
+        source = (await tenant.owner.get(f"/api/v1/sources/{source_id}")).json()
+        assert source["consecutive_failures"] == 1
+        [alert] = await _alerts(tenant)  # the run_failed rule fired
+        assert "Error: worker_lost" in alert["body"]
+        [workflow_run] = (await tenant.owner.get(f"{workflow_path}/runs")).json()["items"]
+        assert workflow_run["status"] == "failed"  # not left "running" for ever
 
     async def test_a_delivery_stuck_once_is_retried_with_backoff(
         self, api: httpx2.AsyncClient, container: Container
