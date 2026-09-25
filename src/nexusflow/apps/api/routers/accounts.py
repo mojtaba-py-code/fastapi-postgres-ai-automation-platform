@@ -32,6 +32,7 @@ from nexusflow.apps.api.schemas.identity import (
     OrganizationResponse,
     OrganizationSummary,
     PasswordConfirmation,
+    SessionResponse,
     UpdateOrganizationRequest,
     UpdateProfileRequest,
     UserResponse,
@@ -39,6 +40,7 @@ from nexusflow.apps.api.schemas.identity import (
 from nexusflow.core.pagination import PageRequest, SortSpec
 from nexusflow.domain.audit.ports import AuditFilter
 from nexusflow.domain.authorization.roles import Permission
+from nexusflow.domain.identity.login_risk import describe_client
 
 users = APIRouter(prefix="/users", tags=["users"], responses=ERROR_RESPONSES)
 organizations = APIRouter(
@@ -78,6 +80,41 @@ async def update_me(
 ) -> UserResponse:
     user = await container.accounts.update_profile(principal, full_name=body.full_name)
     return UserResponse.model_validate(user)
+
+
+@users.get(
+    "/me/sessions",
+    response_model=list[SessionResponse],
+    summary="My signed-in sessions (devices), most recently used first",
+)
+async def my_sessions(
+    principal: CurrentPrincipal, container: ContainerDep
+) -> list[SessionResponse]:
+    return [
+        SessionResponse(
+            id=session.id,
+            current=session.id == principal.session_id,
+            device=describe_client(session.user_agent),
+            ip=session.ip,
+            mfa_verified=session.mfa_verified,
+            created_at=session.created_at,
+            last_used_at=session.last_used_at,
+            expires_at=session.expires_at,
+        )
+        for session in await container.auth.list_sessions(principal)
+    ]
+
+
+@users.delete(
+    "/me/sessions/{session_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="End one of my sessions (its tokens stop working at once)",
+)
+async def revoke_my_session(
+    session_id: UUID, principal: CurrentPrincipal, container: ContainerDep, meta: Meta
+) -> Response:
+    await container.auth.revoke_session(principal, session_id, meta)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @users.post("/me/delete", status_code=status.HTTP_204_NO_CONTENT, summary="Erase my account")

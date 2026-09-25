@@ -21,16 +21,20 @@ ENV UV_COMPILE_BYTECODE=1 \
 WORKDIR /build
 COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY src ./src
-# The base image's own tooling - the global pip and the virtualenv it used to
-# install Playwright, with what they vendor or seed (setuptools, msgpack) - is
-# never used at run time (the renderer runs from /opt/venv) and would only carry
-# vulnerabilities into the image: it is removed, and the build checks it is gone.
+# The base image's own Python tooling - the global pip and the virtualenv it
+# used to install Playwright, their dependencies, and virtualenv's wheel cache
+# (an unpacked pip with vendored setuptools and msgpack) - is never used at run
+# time (the renderer runs from /opt/venv, isolated from the global packages)
+# and would only carry vulnerabilities: it is deleted, and the build checks.
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-editable --extra browser \
  && rm -rf /build /usr/local/bin/uv \
- && { python3 -m pip uninstall --yes --break-system-packages \
-        virtualenv setuptools msgpack wheel pip > /dev/null 2>&1 || true; } \
- && ! python3 -m pip --version > /dev/null 2>&1 \
+ && rm -rf /usr/local/lib/python3*/dist-packages/* \
+           /root/.cache/virtualenv /root/.cache/pip \
+           /usr/local/bin/pip /usr/local/bin/pip3* /usr/local/bin/virtualenv \
+ && test -z "$(ls -A /usr/local/lib/python3*/dist-packages)" \
+ && ! /usr/bin/python3 -c "import pip" 2> /dev/null \
+ && /opt/venv/bin/python -c "import playwright, nexusflow.apps.browser.app" \
  && groupadd --system --gid 10002 renderer \
  && useradd --system --uid 10002 --gid renderer --create-home --shell /usr/sbin/nologin renderer
 

@@ -80,6 +80,8 @@ for the role matrix.
 | GET/PATCH | `/users/me` | Profile |
 | GET | `/users` | Users of the current organization, with their roles [members:read] |
 | POST | `/users/me/delete` | Erase own account (password confirmation) |
+| GET | `/users/me/sessions` | My signed-in sessions: device (a coarse description such as "Firefox on Windows"), IP address, times, MFA, and which one this request uses. Signed-in users only - never with an API key (`403 session_required`) |
+| DELETE | `/users/me/sessions/{id}` | End one of my sessions: its access and refresh tokens stop working at once (audited as `auth.session.revoked`); another user's session is `404` |
 | GET | `/organizations` | Organizations of the current user |
 | GET/PATCH | `/organizations/current` | View / update [org:update]. `settings` is a partial update |
 | POST | `/organizations/current/automation-freeze` | Tenant kill switch with reason [workflows:disable] |

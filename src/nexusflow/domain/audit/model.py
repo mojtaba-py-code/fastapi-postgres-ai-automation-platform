@@ -57,6 +57,7 @@ class AuditAction(StrEnum):
     MFA_RECOVERY_USED = "auth.mfa.recovery_code_used"
     LOGOUT = "auth.logout"
     LOGOUT_ALL = "auth.logout_all"
+    SESSION_REVOKED = "auth.session.revoked"
     REFRESH_REUSE_DETECTED = "auth.refresh.reuse_detected"
     PASSWORD_CHANGED = "auth.password.changed"  # noqa: S105 - event name  # nosec B105
     PASSWORD_CHANGE_FAILED = "auth.password.change_failed"  # noqa: S105 - event name  # nosec B105

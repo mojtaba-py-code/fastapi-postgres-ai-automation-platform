@@ -66,6 +66,7 @@ EXTRA_ROUTES: dict[str, str] = {
     "nexusflow.maintenance.outbox_cleanup": PIPELINE,
     "nexusflow.maintenance.rewrap_keys": PIPELINE,
     "nexusflow.audit.anchor": PIPELINE,
+    "nexusflow.audit.verify": PIPELINE,
     "nexusflow.events.forward": INTEGRATIONS,
 }
 
@@ -86,6 +87,7 @@ def beat_schedule(*, internal_orchestration: bool) -> dict[str, dict[str, Any]]:
         "outbox-cleanup": {"task": "nexusflow.maintenance.outbox_cleanup", "schedule": 86_400.0},
         "rewrap-keys": {"task": "nexusflow.maintenance.rewrap_keys", "schedule": 86_400.0},
         "audit-anchor": {"task": "nexusflow.audit.anchor", "schedule": 3600.0},
+        "audit-verify": {"task": "nexusflow.audit.verify", "schedule": 86_400.0},
     }
     if internal_orchestration:
         schedule["dispatch-due-workflows"] = {

@@ -123,10 +123,12 @@ network, or a new device or network right after several wrong passwords.
 2. Review the affected insights and the dataset content that fed them. Insights are
    advisory; tell users about misleading ones.
 
-### 3.9 Audit chain verification fails (SEV-1)
-`nexusflow audit verify` recomputes every tenant chain and the platform chain
-(events without a tenant: failed sign-ins for unknown accounts, operator
-commands); `--org <id>` checks one tenant.
+### 3.9 Audit chain verification fails (SEV-1, alert `AuditChainBroken`)
+A daily job recomputes every chain; a break raises `AuditChainBroken`, pages the
+operators and logs `audit_chain_broken` with the chain and the first invalid
+`seq`. `nexusflow audit verify` recomputes every tenant chain and the platform
+chain (events without a tenant: failed sign-ins for unknown accounts, operator
+commands) on demand; `--org <id>` checks one tenant.
 1. Treat it as tampering until proven otherwise. Freeze, snapshot the database volume,
    and collect the anchored chain heads (`audit_anchor` log events, one per chain
    per hour, `chain=platform` for the platform chain).

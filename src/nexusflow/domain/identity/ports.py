@@ -39,6 +39,10 @@ class SessionRepository(Protocol):
         self, user_id: UUID, *, since: datetime
     ) -> list[UserSession]: ...
 
+    async def list_active_for_user(
+        self, user_id: UUID, *, now: datetime, limit: int
+    ) -> list[UserSession]: ...
+
     async def revoke_all_for_user(
         self, user_id: UUID, *, now: datetime, reason: str, except_session: UUID | None = None
     ) -> int: ...

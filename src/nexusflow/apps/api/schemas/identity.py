@@ -105,6 +105,17 @@ class AcceptInvitationRequest(RequestModel):
 # ----------------------------------------------------------------- users
 
 
+class SessionResponse(ResponseModel):
+    id: UUID
+    current: bool = Field(description="The session this request was made with.")
+    device: str = Field(description='A coarse client description, e.g. "Firefox on Windows".')
+    ip: str | None
+    mfa_verified: bool
+    created_at: datetime
+    last_used_at: datetime
+    expires_at: datetime
+
+
 class UserResponse(ResponseModel):
     id: UUID
     email: str

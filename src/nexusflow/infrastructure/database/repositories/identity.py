@@ -82,6 +82,18 @@ class SqlSessionRepository:
         )
         return list((await self._s.execute(statement)).scalars().all())
 
+    async def list_active_for_user(
+        self, user_id: UUID, *, now: datetime, limit: int
+    ) -> list[UserSession]:
+        s = t.user_sessions
+        statement = (
+            select(UserSession)
+            .where(s.c.user_id == user_id, s.c.revoked_at.is_(None), s.c.expires_at > now)
+            .order_by(s.c.last_used_at.desc())
+            .limit(limit)
+        )
+        return list((await self._s.execute(statement)).scalars().all())
+
     async def revoke_all_for_user(
         self, user_id: UUID, *, now: datetime, reason: str, except_session: UUID | None = None
     ) -> int:

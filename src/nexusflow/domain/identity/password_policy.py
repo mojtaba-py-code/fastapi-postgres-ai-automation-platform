@@ -1,14 +1,24 @@
 """Password policy (NIST SP 800-63B style).
 
 Length-based with a deny-list instead of composition rules: minimum length,
-maximum length (bounds Argon2 work per request), rejection of well-known
-passwords and of passwords derived from the account's own identifiers.
+maximum length (bounds Argon2 work per request), rejection of well-known and
+breached passwords, and of passwords derived from the account's own identifiers.
+
+``breached_passwords.txt.gz`` holds every password of at least 12 characters
+(the minimum length) from three public corpora of breached passwords, NFKC- and
+lower-cased: the UK NCSC's 100,000 most used passwords, and the top million of
+both the Pwdb and the xato.net lists - 72,985 entries, all from SecLists (MIT
+licence, https://github.com/danielmiessler/SecLists). It is loaded once per
+process, on first use.
 """
 
 from __future__ import annotations
 
+import gzip
 import unicodedata
 from dataclasses import dataclass
+from functools import cache
+from importlib import resources
 
 from nexusflow.core.errors import ErrorDetail, InvalidInputError
 
@@ -86,8 +96,8 @@ class PasswordPolicy:
         if len(normalized) > self.max_length:
             problems.append(f"Use at most {self.max_length} characters.")
         lowered = normalized.lower()
-        if lowered in _COMMON_PASSWORDS:
-            problems.append("This password is too common.")
+        if lowered in _COMMON_PASSWORDS or lowered in breached_passwords():
+            problems.append("This password is too common: it appears in breached-password lists.")
         if len(set(normalized)) <= 3:
             problems.append("Use more varied characters.")
         for identifier in _identifiers(email, name):
@@ -95,6 +105,12 @@ class PasswordPolicy:
                 problems.append("The password must not contain your name or email address.")
                 break
         return problems
+
+
+@cache
+def breached_passwords() -> frozenset[str]:
+    data = resources.files(__package__).joinpath("breached_passwords.txt.gz").read_bytes()
+    return frozenset(gzip.decompress(data).decode("utf-8").splitlines())
 
 
 def _identifiers(email: str | None, name: str | None) -> list[str]:

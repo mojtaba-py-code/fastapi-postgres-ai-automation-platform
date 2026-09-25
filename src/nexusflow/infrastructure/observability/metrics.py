@@ -52,6 +52,11 @@ WEBHOOK_EVENTS = Counter(
     "Inbound webhook deliveries.",
     ["result"],
 )
+AUDIT_CHAIN_VERIFICATIONS = Counter(
+    "nexusflow_audit_chain_verifications_total",
+    "Scheduled audit hash-chain verifications, by result (ok or broken).",
+    ["result"],
+)
 AUTHORIZATION_DENIALS = Counter(
     "nexusflow_authorization_denials_total",
     "Operations denied by authorization checks.",

@@ -108,6 +108,12 @@ residual risk in the threat model. The full record is in
   client's user agent (no sender-chosen text in platform e-mails).
 * Changing the password is rate limited per user, and a wrong current password
   counts toward lockout (a stolen access token is no password oracle).
+* Breached passwords are refused: 72,985 of 12 characters or more from public
+  corpora, including the UK NCSC's 100,000 most used.
+* Users list their signed-in sessions (`GET /api/v1/users/me/sessions`) and end any
+  one of them at once; API keys cannot manage sessions.
+* A daily job verifies every audit hash chain; a break is alerted
+  (`AuditChainBroken`) and pages the operators.
 * AI analyses and exports are charged to the person behind an API key, so more
   keys do not buy more budget.
 * Uploads: macro-enabled workbooks are recognised by their content types and
@@ -139,6 +145,8 @@ residual risk in the threat model. The full record is in
   of failing the upload.
 * Tuning a fail-closed rate limit silently made it fail open, and the limiter
   admitted more than a fractional-interval rule allowed.
+* For accounts with MFA, a successful sign-in right after several wrong passwords
+  lost its "after failures" risk signal (R10-1).
 * From the deployment review: Prometheus could not start; JavaScript rendering
   could not be used; large uploads spooled to a small in-memory `/tmp`; RabbitMQ
   lost its queues when recreated; delayed retries held worker slots; nginx kept a

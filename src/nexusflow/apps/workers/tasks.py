@@ -151,6 +151,7 @@ PLATFORM_TASKS: tuple[TaskSpec[Any], ...] = (
     ),
     TaskSpec("nexusflow.maintenance.rewrap_keys", m.Empty, h.rewrap_keys, retries=0, periodic=True),
     TaskSpec("nexusflow.audit.anchor", m.Empty, h.anchor_audit_chains, retries=0, periodic=True),
+    TaskSpec("nexusflow.audit.verify", m.Empty, h.verify_audit_chains, retries=0, periodic=True),
 )
 
 

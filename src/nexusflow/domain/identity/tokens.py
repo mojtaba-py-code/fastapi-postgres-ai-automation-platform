@@ -25,6 +25,9 @@ class MfaChallengeClaims:
     org_id: UUID | None
     challenge_id: str
     expires_at: datetime
+    # Wrong passwords before the one that issued the challenge: the sign-in-risk
+    # assessment at completion must still see them (the counter is reset here).
+    prior_failures: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,7 +51,7 @@ class TokenCodec(Protocol):
     def decode_access_token(self, token: str, *, now: datetime) -> AccessTokenClaims: ...
 
     def issue_mfa_challenge(
-        self, *, user_id: UUID, org_id: UUID | None, now: datetime
+        self, *, user_id: UUID, org_id: UUID | None, now: datetime, prior_failures: int = 0
     ) -> IssuedToken: ...
 
     def decode_mfa_challenge(self, token: str, *, now: datetime) -> MfaChallengeClaims: ...

@@ -295,8 +295,9 @@ queried: mark every personal or confidential field `sensitive`.
   never through the platform being monitored.
 * **Audit**: a hash-chained, append-only audit log per tenant, plus a platform chain
   for events without a tenant (failed sign-ins for unknown accounts, operator
-  commands). Every chain is verifiable (`nexusflow audit verify`) and its head is
-  logged hourly for external anchoring.
+  commands). Every chain is verifiable (`nexusflow audit verify`), its head is
+  logged hourly for external anchoring, and a daily job verifies them all: a break
+  pages the operators.
 
 ## 10. Key decisions
 

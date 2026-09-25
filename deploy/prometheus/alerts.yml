@@ -84,6 +84,13 @@ groups:
         labels: {severity: warning}
         annotations:
           summary: "Many webhook deliveries failed signature verification"
+      - alert: AuditChainBroken
+        # The daily verification found an audit hash chain that no longer matches:
+        # history was edited. Operators are paged by the job as well.
+        expr: sum(increase(nexusflow_audit_chain_verifications_total{result="broken"}[2d])) > 0
+        labels: {severity: critical}
+        annotations:
+          summary: "An audit hash chain failed verification - see INCIDENT_RESPONSE.md"
       - alert: AuthorizationDenialsSpike
         expr: sum(increase(nexusflow_authorization_denials_total[15m])) > 50
         labels: {severity: warning}

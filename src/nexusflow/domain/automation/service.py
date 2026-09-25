@@ -386,6 +386,10 @@ class AutomationService:
         alert was already queued within ``OPERATOR_ALERT_DEDUP_SECONDS``, so a
         failure storm pages once instead of once per failed job."""
         principal.require_scope(ServiceScope.OPERATOR_ALERT)
+        return await self.page_operators(severity=severity, summary=summary)
+
+    async def page_operators(self, *, severity: str, summary: str) -> bool:
+        """The same page, raised by the platform's own scheduled jobs."""
         severity, summary = single_line(severity, 16), single_line(summary, 500)
         fingerprint = hashlib.sha256(f"{severity}\n{summary}".encode()).hexdigest()
         if not await self._first_alert(fingerprint):

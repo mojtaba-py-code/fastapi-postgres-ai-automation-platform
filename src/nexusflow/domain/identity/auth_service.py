@@ -69,6 +69,7 @@ from nexusflow.domain.shared.unit_of_work import TenantScope, UnitOfWork, UnitOf
 _INVALID_CREDENTIALS = "Invalid email or password."
 _RECOVERY_CODE_COUNT = 10
 _FAMILIARITY_WINDOW = timedelta(days=90)  # sign-ins a new one is compared with
+_MAX_LISTED_SESSIONS = 100
 
 
 @dataclass(frozen=True, slots=True)
@@ -318,8 +319,13 @@ class AuthService:
             if upgraded_hash is not None:
                 user.password_hash = upgraded_hash
             if user.mfa_enabled:
+                # The counter restarts for the second factor; the failures so far
+                # travel in the (signed) challenge to the risk assessment.
+                prior_failures = user.failed_login_attempts
                 user.failed_login_attempts = 0
-                challenge = self._codec.issue_mfa_challenge(user_id=user.id, org_id=org_id, now=now)
+                challenge = self._codec.issue_mfa_challenge(
+                    user_id=user.id, org_id=org_id, now=now, prior_failures=prior_failures
+                )
                 await uow.commit()
                 return LoginResult(
                     mfa_challenge=challenge.token, mfa_challenge_expires_in=challenge.expires_in
@@ -357,7 +363,13 @@ class AuthService:
                 await uow.commit()
                 raise AuthenticationError("Verification failed.", code="mfa_failed")
             tokens = await self._complete_login(
-                uow, user, claims.org_id, meta, now, mfa_verified=True
+                uow,
+                user,
+                claims.org_id,
+                meta,
+                now,
+                mfa_verified=True,
+                prior_failures=claims.prior_failures,
             )
             await uow.commit()
         return tokens
@@ -406,10 +418,11 @@ class AuthService:
         now: datetime,
         *,
         mfa_verified: bool,
+        prior_failures: int = 0,
     ) -> TokenPair:
         org_id, role = await self._resolve_login_org(uow, user, requested_org)
         # Before the success resets the failure counters the assessment looks at.
-        assessment = await self._assess_login(uow, user, meta, now)
+        assessment = await self._assess_login(uow, user, meta, now, prior_failures)
         user.register_successful_login(now)
         await uow.switch_tenant(org_id)
         principal = Principal.for_user(user_id=user.id, org_id=org_id, role=role, session_id=None)
@@ -463,14 +476,20 @@ class AuthService:
         return membership.org_id, membership.role
 
     async def _assess_login(
-        self, uow: UnitOfWork, user: User, meta: RequestMeta, now: datetime
+        self,
+        uow: UnitOfWork,
+        user: User,
+        meta: RequestMeta,
+        now: datetime,
+        prior_failures: int = 0,
     ) -> LoginAssessment:
         recent = await uow.sessions.list_recent_for_user(user.id, since=now - _FAMILIARITY_WINDOW)
         return assess_login(
             ip=meta.ip,
             user_agent=meta.user_agent,
             history=[(session.ip, session.user_agent) for session in recent],
-            failed_attempts=user.failed_login_attempts,
+            # With MFA, wrong passwords before the challenge plus wrong codes after it.
+            failed_attempts=user.failed_login_attempts + prior_failures,
             lockouts=user.lockout_count,
         )
 
@@ -632,6 +651,36 @@ class AuthService:
                 meta=meta,
                 resource_type="session",
                 resource_id=principal.session_id,
+            )
+            await uow.commit()
+
+    async def list_sessions(self, principal: Principal) -> list[UserSession]:
+        """The caller's live sign-in sessions, most recently used first."""
+        user_id = _require_session(principal)
+        async with self._uow_factory(TenantScope.of(principal)) as uow:
+            return await uow.sessions.list_active_for_user(
+                user_id, now=self._clock.now(), limit=_MAX_LISTED_SESSIONS
+            )
+
+    async def revoke_session(
+        self, principal: Principal, session_id: UUID, meta: RequestMeta
+    ) -> None:
+        """End one of the caller's sessions: its tokens stop working at once."""
+        user_id = _require_session(principal)
+        now = self._clock.now()
+        async with self._uow_factory(TenantScope.of(principal)) as uow:
+            session = await uow.sessions.get_for_update(session_id)
+            if session is None or session.user_id != user_id:
+                raise NotFoundError()  # another user's session does not exist for you
+            session.revoke(now, "revoked_by_user")
+            await self._audit.record(
+                uow.audit,
+                action=AuditAction.SESSION_REVOKED,
+                principal=principal,
+                meta=meta,
+                resource_type="session",
+                resource_id=session_id,
+                metadata={"current": session_id == principal.session_id},
             )
             await uow.commit()
 
@@ -961,6 +1010,16 @@ class AuthService:
         await uow.outbox.add(
             new_message(TaskName.SEND_SECURITY_EMAIL, payload, org_id=None, now=now)
         )
+
+
+def _require_session(principal: Principal) -> UUID:
+    """Sessions are managed from a signed-in session - never with an API key,
+    so a leaked key can neither list its creator's devices nor end their sessions."""
+    if principal.session_id is None or principal.user_id is None:
+        raise PermissionDeniedError(
+            "This action requires a signed-in user session.", code="session_required"
+        )
+    return principal.user_id
 
 
 def _require_user(principal: Principal) -> UUID:

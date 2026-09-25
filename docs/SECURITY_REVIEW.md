@@ -30,6 +30,7 @@ for an independent assessment:
 | R7 | Deployment startup review | Every Compose, nginx, Dockerfile and configuration file; the settings and application objects of all 8 application roles built with their Compose environment and secrets; upstream behaviour checked against the upstream sources | 1 certain startup failure, 14 further findings |
 | R8 | Test-driven review: hostile uploads and rate limits | Hand-built hostile CSV/XLSX files (zip bombs, traversal names, encrypted parts, macros, XXE, entity expansion, sparse sheets, invalid UTF-8) through intake, the parser and the API; every rate-limit scope, its budget and its failure policy - 143 tests | 6 defects (strict failing tests first), 3 gaps closed |
 | R9 | Second completion pass | Reports at scale, backup and restore, request correlation, sign-in risk | 6 findings |
+| R10 | Adversarial review of the day's new code | Change analytics, sign-in risk, password change, request correlation, rate limiting, uploads, operations and CI workflows | 1 finding |
 
 In R4 and R5, every defect was first committed as a *strict expected failure*
 (the test fails because of the bug), then fixed, which turned the test into a
@@ -37,7 +38,7 @@ permanent regression test.
 
 ## 2. Findings and resolutions
 
-Severities in R1 and R2 are the reviewers'; in R4-R9 they were assigned when the defect was fixed. "Test" names the regression test that pins the fix.
+Severities in R1 and R2 are the reviewers'; in R4-R10 they were assigned when the defect was fixed. "Test" names the regression test that pins the fix.
 
 ### R1 - adversarial code review
 
@@ -175,6 +176,21 @@ the failure policy of every scope during a Redis outage.
 | R9-4 | Low | Security e-mails, invitations and organization deletions were queued without the request's correlation ID (built outside the outbox helper) | One constructor for every outbox message, enforced by a test | `tests/unit/core/test_correlation.py` |
 | R9-5 | Low | The new-device check compared exact IP addresses: every new DHCP lease e-mailed the user, which trains users to ignore the warning | Sign-in risk compares networks (/24, /48) and devices separately, and adds failures before success; suspicious sign-ins are audited, counted and alerted on | `tests/unit/security/test_login_risk.py`, `tests/integration/test_login_risk.py` |
 | R9-6 | Low | Sign-in e-mails could have quoted the client's user agent, i.e. text chosen by whoever signed in | E-mails describe the device from a fixed vocabulary ("Firefox on Windows") and give a parsed IP address | `test_login_risk.py` |
+
+### R10 - adversarial review of the day's new code
+
+| # | Severity | Finding | Resolution | Test |
+|---|---|---|---|---|
+| R10-1 | Medium | For accounts with MFA the "success after failures" sign-in signal was lost: the failure counter was reset when the MFA challenge was issued, so a correct password and code from a new network right after several wrong passwords was only "unfamiliar" - not audited as suspicious, not alerted | The signed MFA challenge carries the preceding failures to the risk assessment (the lockout counter still restarts for the second factor) | `tests/security/test_r10_login_risk.py`, `test_crypto_primitives.py` |
+
+Checked and found sound: analytics tenant isolation and period validation;
+the password-change flow; request-ID handling (only well-formed IDs, only from
+trusted proxies); the rate limiter after R8; upload inspection after R8; the
+sandbox gateway's body limits; sign-in e-mail content; and, by inspection, the
+backup scripts, workflows (SHA-pinned actions, least-privilege permissions, no
+untrusted expressions in `run:`), nginx and the image pinning script. Noted,
+not a defect: the request ID deliberately stops at the sandbox-to-gateway hop -
+the internal API does not trust request IDs from the sandbox.
 
 ## 3. Checklist (specification section 39)
 

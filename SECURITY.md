@@ -24,7 +24,12 @@ Details are in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) and
 **Identity and access**
 * Passwords are hashed with Argon2id (64 MiB, t=3, p=4, bounded by a concurrency
   semaphore). The policy is length-based, in line with NIST SP 800-63B: it rejects
-  common passwords and passwords derived from the account's own identifiers.
+  passwords found in breached-password corpora (72,985 of 12 characters or more,
+  including the UK NCSC's 100,000 most used) and passwords derived from the
+  account's own identifiers.
+* Users see their signed-in sessions (device, address, times) and can end any one
+  of them, which invalidates its tokens at once. A sign-in from an unfamiliar device
+  or network is e-mailed to the user; a suspicious one is also audited and alerted.
 * Access tokens are 10-minute EdDSA (Ed25519) JWTs with issuer, audience, `token_use`
   and key-ID checks, plus a JWKS for rotation. Algorithm confusion is impossible.
 * Refresh tokens are opaque, HMAC-peppered at rest and rotated on every use. Reuse of
@@ -100,7 +105,9 @@ Details are in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) and
 * The audit log is append-only and hash-chained per tenant, plus a platform chain for
   events without a tenant (failed sign-ins for unknown accounts, operator commands).
   It is writable only through a `SECURITY DEFINER` function, verifiable through the API
-  and CLI, and every chain head is anchored hourly to external logs.
+  and CLI, and every chain head is anchored hourly to external logs. A daily job
+  recomputes every chain: a break is alerted (`AuditChainBroken`) and pages the
+  operators.
 * Kill switches: per n8n workflow (service account), per tenant (automation freeze)
   and platform-wide (Redis flag with no TTL, which fails safe when Redis is
   unreachable). They apply in both orchestration modes (n8n and internal).

@@ -33,6 +33,9 @@ _ACCESS = "access"
 _MFA = "mfa_challenge"
 
 
+_MAX_PRIOR_FAILURES = 1000
+
+
 def _invalid(code: str = "invalid_token") -> AuthenticationError:
     return AuthenticationError("The access token is invalid or expired.", code=code)
 
@@ -137,21 +140,27 @@ class JwtTokenCodec:
     # -------------------------------------------------------------------- mfa
 
     def issue_mfa_challenge(
-        self, *, user_id: UUID, org_id: UUID | None, now: datetime
+        self, *, user_id: UUID, org_id: UUID | None, now: datetime, prior_failures: int = 0
     ) -> IssuedToken:
         claims: dict[str, Any] = {"sub": str(user_id)}
         if org_id is not None:
             claims["org"] = str(org_id)
+        if prior_failures > 0:
+            claims["pf"] = min(prior_failures, _MAX_PRIOR_FAILURES)
         return self._encode(claims, token_use=_MFA, now=now, ttl=self._mfa_ttl)
 
     def decode_mfa_challenge(self, token: str, *, now: datetime) -> MfaChallengeClaims:
         payload = self._decode(token, token_use=_MFA, now=now)
         org_raw = payload.get("org")
+        prior = payload.get("pf", 0)
+        if not isinstance(prior, int) or isinstance(prior, bool) or not 0 <= prior <= 1000:
+            raise _invalid()
         return MfaChallengeClaims(
             user_id=_uuid_claim(payload, "sub"),
             org_id=_uuid_claim(payload, "org") if org_raw is not None else None,
             challenge_id=str(payload["jti"]),
             expires_at=datetime.fromtimestamp(payload["exp"], tz=now.tzinfo),
+            prior_failures=prior,
         )
 
     # ---------------------------------------------------------------- helpers

@@ -37,6 +37,7 @@ from nexusflow.core.errors import (
     ServiceUnavailableError,
     TransientError,
 )
+from nexusflow.domain.audit.model import ChainVerification
 from nexusflow.domain.authorization.principal import Principal, PrincipalType, ServiceScope
 from nexusflow.domain.automation.events import EventType
 from nexusflow.domain.identity.login_risk import SignInDetails
@@ -457,6 +458,41 @@ async def rewrap_keys(deps: WorkerDeps, msg: Empty) -> None:
             _log.info("secrets_rewrapped", org_id=str(org_id), count=count, key_id=active)
 
     await _each_tenant(c, rewrap, "rewrap_keys")
+
+
+async def verify_audit_chains(deps: WorkerDeps, msg: Empty) -> None:
+    """Daily tamper check: recompute every tenant chain and the platform chain.
+
+    Hash chains only protect the audit trail if something checks them; a break
+    is logged, counted (``AuditChainBroken`` alert) and pages the operators.
+    """
+    c = deps.container
+    broken: list[str] = []
+
+    def record(chain: str, verification: ChainVerification) -> None:
+        metrics.AUDIT_CHAIN_VERIFICATIONS.labels(result="ok" if verification.ok else "broken").inc()
+        if not verification.ok:
+            broken.append(chain)
+            _log.error(
+                "audit_chain_broken",
+                chain=chain,
+                first_invalid_seq=verification.first_invalid_seq,
+                reason=verification.reason,
+            )
+
+    async def verify(org_id: UUID) -> None:
+        record(str(org_id), await c.audit_log.verify_integrity(Principal.system(org_id)))
+
+    await _each_tenant(c, verify, "audit_verify")
+    record("platform", await c.audit_log.verify_platform_chain())
+    if broken:
+        await c.automation.page_operators(
+            severity="critical",
+            summary=(
+                f"Audit hash chain verification failed for {len(broken)} chain(s): "
+                f"{', '.join(broken[:5])}. Follow INCIDENT_RESPONSE.md (audit tampering)."
+            ),
+        )
 
 
 async def anchor_audit_chains(deps: WorkerDeps, msg: Empty) -> None:
