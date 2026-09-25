@@ -142,6 +142,20 @@ class TestCatalog:
         expect_error(replayed, 422, "invalid_cursor")
         expect_error(await owner.get("/api/v1/projects", params={"sort": "password_hash"}), 422)
 
+    async def test_the_next_page_after_a_long_non_ascii_name_is_served(
+        self, api: httpx2.AsyncClient
+    ) -> None:
+        owner = await signup(api)
+        names = ["\U0001f600" * 120, "数据" * 60]  # 120 characters each
+        for name in names:
+            await create_project(owner, name)
+        first = (await owner.get("/api/v1/projects", params={"limit": 1, "sort": "name"})).json()
+        second = await owner.get(
+            "/api/v1/projects", params={"limit": 1, "sort": "name", "cursor": first["next_cursor"]}
+        )
+        assert second.status_code == 200, second.text  # was 422 invalid_cursor
+        assert {first["items"][0]["name"], second.json()["items"][0]["name"]} == set(names)
+
     @pytest.mark.parametrize(
         ("path", "sort", "value"),
         [

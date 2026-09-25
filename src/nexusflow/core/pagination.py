@@ -21,7 +21,10 @@ from nexusflow.core.ids import parse_uuid
 
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 200
-_MAX_CURSOR_LENGTH = 512
+# Every cursor the server issues fits: the longest sort value is a 120-character
+# name, at most 4 bytes of UTF-8 per character (JSON escapes a quote or a
+# backslash in 2), so 531 bytes with the id and 708 characters of base64url.
+MAX_CURSOR_LENGTH = 1024
 _INT64_MIN, _INT64_MAX = -(2**63), 2**63 - 1
 
 type SortValue = str | int | float | None
@@ -60,13 +63,18 @@ class Page[T]:
 
 def encode_cursor(sort_value: SortValue | datetime, last_id: UUID) -> str:
     value: SortValue = sort_value.isoformat() if isinstance(sort_value, datetime) else sort_value
-    raw = json.dumps({"v": value, "i": str(last_id)}, separators=(",", ":")).encode()
+    # UTF-8, not ASCII escapes: "\uXXXX" took 6 to 12 bytes per non-ASCII
+    # character, and the cursor after such a name was longer than accepted back.
+    document = json.dumps(
+        {"v": value, "i": str(last_id)}, separators=(",", ":"), ensure_ascii=False
+    )
+    raw = document.encode("utf-8", "surrogatepass")  # a lone surrogate is refused on decode
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
 
 def decode_cursor(token: str) -> Cursor:
     invalid = InvalidInputError("The pagination cursor is invalid.", code="invalid_cursor")
-    if not token or len(token) > _MAX_CURSOR_LENGTH:
+    if not token or len(token) > MAX_CURSOR_LENGTH:
         raise invalid
     try:
         padded = token + "=" * (-len(token) % 4)
