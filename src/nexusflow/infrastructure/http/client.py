@@ -215,7 +215,6 @@ class SafeHttpClient:
                     json_body=json_body,
                     content=content,
                     policy=effective_policy,
-                    accept_content_types=accept_content_types,
                     max_bytes=limit,
                     follow_redirects=follow_redirects,
                     sensitive_headers=sensitive_headers,
@@ -255,6 +254,14 @@ class SafeHttpClient:
         )
         if raise_for_status:
             _raise_for_status(final)
+        # Only a success has to be of the expected type: an outage answered with an
+        # HTML error page (proxies, load balancers) stays a retryable outage.
+        if (
+            accept_content_types is not None
+            and 200 <= final.status_code < 300
+            and final.content_type not in accept_content_types
+        ):
+            raise UnexpectedContentTypeError(internal_detail=f"got {final.content_type!r}")
         return final
 
     async def _send_following_redirects(
@@ -267,7 +274,6 @@ class SafeHttpClient:
         json_body: JSONValue | None,
         content: bytes | None,
         policy: UrlPolicy,
-        accept_content_types: frozenset[str] | None,
         max_bytes: int,
         follow_redirects: bool,
         sensitive_headers: frozenset[str],
@@ -314,8 +320,6 @@ class SafeHttpClient:
             finally:
                 await response.aclose()
             content_type, charset = _parse_content_type(response.headers.get("content-type"))
-            if accept_content_types is not None and content_type not in accept_content_types:
-                raise UnexpectedContentTypeError(internal_detail=f"got {content_type!r}")
             kept = {
                 k: v for k, v in response.headers.items() if k.lower() in _KEPT_RESPONSE_HEADERS
             }

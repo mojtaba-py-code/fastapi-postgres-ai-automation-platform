@@ -17,6 +17,7 @@ from nexusflow.infrastructure.http.client import (
     HttpClientLimits,
     RedirectNotFollowedError,
     ResponseTooLargeError,
+    RetryableUpstreamStatusError,
     SafeHttpClient,
     TooManyRedirectsError,
     UnexpectedContentTypeError,
@@ -326,6 +327,28 @@ class TestSafeHttpClient:
 
         with pytest.raises(UpstreamStatusError):
             await _client(handler).request("GET", "https://example.com/")
+
+    @pytest.mark.parametrize("status", [429, 502, 503, 504])
+    async def test_an_outage_page_in_html_is_still_an_outage(self, status: int) -> None:
+        # Load balancers and proxies answer outages with HTML error pages: the
+        # status decides, the content type only matters for a successful answer.
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            return _resp(status, b"<html>busy</html>", content_type="text/html", retry_after="30")
+
+        with pytest.raises(RetryableUpstreamStatusError) as raised:
+            await _client(handler).request(
+                "GET", "https://example.com/", accept_content_types=frozenset({"application/json"})
+            )
+        assert raised.value.retry_after_seconds == 30
+
+    async def test_a_rejection_in_html_is_reported_by_its_status(self) -> None:
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            return _resp(404, b"<html>not here</html>", content_type="text/html")
+
+        with pytest.raises(UpstreamStatusError):
+            await _client(handler).request(
+                "GET", "https://example.com/", accept_content_types=frozenset({"application/json"})
+            )
 
     async def test_environment_proxies_are_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("HTTPS_PROXY", "http://10.0.0.1:3128")
