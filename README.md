@@ -117,6 +117,7 @@ for the developer workflow.
 | [DEVELOPMENT.md](docs/DEVELOPMENT.md) | Local setup, testing strategy, quality gates |
 | [INCIDENT_RESPONSE.md](docs/INCIDENT_RESPONSE.md) | Playbooks, kill switches, forensics |
 | [PRIVACY.md](docs/PRIVACY.md) | Personal data held, retention, data-subject requests, sub-processors (UK GDPR / GDPR) |
+| [DPA_TEMPLATE.md](docs/DPA_TEMPLATE.md) | Article 28 terms of a data processing agreement, with what the platform provides for each (a drafting aid) |
 | [FINAL_REVIEW.md](docs/FINAL_REVIEW.md) | Architecture, security, dependency, test and deployment review; known limitations |
 | [adr/](docs/adr/) | Architecture decision records |
 | [workflows/n8n](workflows/n8n/README.md) | The five n8n workflows and their security model |

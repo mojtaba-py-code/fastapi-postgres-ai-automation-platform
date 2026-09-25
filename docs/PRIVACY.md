@@ -10,7 +10,8 @@ your roles, lawful bases and contracts are yours to decide and document.
 * Each **organization** (tenant) decides what business data it collects and why: it
   is the controller of that data. The **operator** of the deployment processes it on
   the organization's behalf, so an agreement under article 28 (a data processing
-  agreement) belongs between them.
+  agreement) belongs between them; [DPA_TEMPLATE.md](DPA_TEMPLATE.md) lists its
+  required terms with what NexusFlow provides for each.
 * **Account data** - the people who sign in, their sessions and their activity - is
   processed to run and secure the service. Whether the operator is its controller,
   or processes it for the organizations, depends on your arrangement; say so in your
