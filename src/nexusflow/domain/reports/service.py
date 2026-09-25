@@ -314,7 +314,15 @@ class ReportService:
             if dataset_ids
             else []
         )
-        alerts = await uow.data.alerts.in_period(org_id, start=start, end=end, limit=100)
+        # The report's own alerts: of its project's rules, and about its dataset.
+        alerts = await uow.data.alerts.in_period(
+            org_id,
+            start=start,
+            end=end,
+            limit=100,
+            project_id=report.project_id,
+            dataset_id=report.dataset_id,
+        )
         summary = summarize_volume(volume, start, end)
         scope = datasets[0].name if len(datasets) == 1 else (project.name if project else "project")
         executive = [headline(summary, scope)]
