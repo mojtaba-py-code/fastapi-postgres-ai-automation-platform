@@ -226,34 +226,46 @@ class ReportService:
             key = report_storage_key(org_id, report.id, report.format)
             stored = await self._storage.save_bytes(key, data)
         except Exception:
-            await self._finish(org_id, report_id, error="render_failed")
+            # Possibly transient (storage full or unavailable): back to PENDING, so
+            # the job's retry renders it again. The report fails only once the
+            # retries are spent (``mark_failed``, with a dead letter).
+            await self._release(org_id, report_id)
             raise
         return await self._finish(
             org_id, report_id, key=key, size=stored.size, sha256=stored.sha256
         )
 
+    async def _release(self, org_id: UUID, report_id: UUID) -> None:
+        async with self._uow_factory(TenantScope.system(org_id)) as uow:
+            report = await uow.data.reports.get_for_update(org_id, report_id)
+            if report is not None and report.status is ReportStatus.GENERATING:
+                report.status = ReportStatus.PENDING
+                await uow.commit()
+
+    async def mark_failed(self, *, org_id: UUID, report_id: UUID) -> None:
+        """Called when the job's retries are exhausted (dead-letter path)."""
+        async with self._uow_factory(TenantScope.system(org_id)) as uow:
+            report = await uow.data.reports.get_for_update(org_id, report_id)
+            if report is not None and report.status in (
+                ReportStatus.PENDING,
+                ReportStatus.GENERATING,
+            ):
+                report.status = ReportStatus.FAILED
+                report.error_code = "render_failed"
+                report.completed_at = self._clock.now()
+                await uow.commit()
+
     async def _finish(
-        self,
-        org_id: UUID,
-        report_id: UUID,
-        *,
-        key: str | None = None,
-        size: int | None = None,
-        sha256: str | None = None,
-        error: str | None = None,
+        self, org_id: UUID, report_id: UUID, *, key: str, size: int, sha256: str
     ) -> Report:
         now = self._clock.now()
         async with self._uow_factory(TenantScope.system(org_id)) as uow:
             report = await uow.data.reports.get_for_update(org_id, report_id)
             if report is None:
                 raise NotFoundError()
-            if error:
-                report.status = ReportStatus.FAILED
-                report.error_code = error
-            else:
-                report.status = ReportStatus.READY
-                report.storage_key, report.size_bytes, report.sha256 = key, size, sha256
-                report.expires_at = now + self._ttl
+            report.status = ReportStatus.READY
+            report.storage_key, report.size_bytes, report.sha256 = key, size, sha256
+            report.expires_at = now + self._ttl
             report.completed_at = now
             await uow.commit()
             return report

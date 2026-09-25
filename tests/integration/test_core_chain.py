@@ -29,8 +29,9 @@ import asyncpg
 import httpx2
 import pytest
 
+from nexusflow.apps.workers import tasks as worker_tasks
 from nexusflow.apps.workers.handlers import WorkerDeps, sweep_alerts
-from nexusflow.apps.workers.messages import Empty
+from nexusflow.apps.workers.messages import Empty, InsightMessage, ReportMessage, RunMessage
 from nexusflow.bootstrap.container import Container
 from nexusflow.core.clock import FrozenClock
 from nexusflow.core.config import RateLimitRule
@@ -60,7 +61,7 @@ from nexusflow.domain.notifications.model import (
     NotificationDelivery,
     OutboundMessage,
 )
-from nexusflow.domain.shared.outbox import TaskName
+from nexusflow.domain.shared.outbox import OutboxMessage, TaskName
 from nexusflow.domain.shared.unit_of_work import TenantScope
 from nexusflow.domain.sources.model import RunStatus
 from nexusflow.infrastructure.redis.rate_limit import RateLimiter
@@ -69,6 +70,7 @@ from tests.support.api import ApiSession, signup
 from tests.support.bus import InProcessBus
 from tests.support.business import (
     SCHEMA,
+    UPLOAD_CONFIG,
     WEBHOOK_CONFIG,
     create_source,
     org_id_of,
@@ -1329,6 +1331,173 @@ class TestAlertBacklog:
         await sweep_alerts(deps, Empty())
 
         assert await _evaluation_state(admin_conn, tenant.org_id) == (30, 0)
+
+
+# --------------------------------------------------------------------------
+# Retrying dead letters
+# --------------------------------------------------------------------------
+
+
+async def _give_up(bus: InProcessBus, task: str, message: Any) -> None:
+    """The job's retries are spent: compensation and dead letter, as the worker does."""
+    [spec] = [spec for spec in worker_tasks.PLATFORM_TASKS if spec.name == task]
+    error = TransientError(code="upstream_down")
+    await worker_tasks._give_up(bus._deps, spec, message, error, spec.retries + 1)
+
+
+async def _retry(tenant: Tenant, bus: InProcessBus) -> OutboxMessage:
+    """Retry the tenant's open dead letter through the API: the job it re-drives."""
+    [letter] = [item for item in await _dead_letters(tenant) if item["status"] == "open"]
+    before = len(bus.messages)
+    retried = await tenant.owner.post(f"/api/v1/dead-letters/{letter['id']}/retry")
+    assert (retried.status_code, retried.json()["status"]) == (200, "retried"), retried.text
+    [job] = [m for m in bus.messages[before:] if m.task.value == letter["task_name"]]
+    return job
+
+
+async def _report(tenant: Tenant) -> UUID:
+    now = datetime.now(UTC)
+    requested = await tenant.owner.post(
+        "/api/v1/reports",
+        json={
+            "project_id": tenant.project_id,
+            "format": "json",
+            "period_start": (now - timedelta(days=1)).isoformat(),
+            "period_end": now.isoformat(),
+        },
+    )
+    assert requested.status_code == 202, requested.text
+    return UUID(requested.json()["id"])
+
+
+class TestDeadLetterRetries:
+    async def test_a_retried_dead_notification_is_sent(
+        self, api: httpx2.AsyncClient, container: Container, bus: InProcessBus, sender: FakeSender
+    ) -> None:
+        alerting = await _alerting(api)
+        org_id, [channel_id] = alerting.tenant.org_id, alerting.channel_ids
+        delivery_id = (await _fire(alerting, container))[channel_id]
+        sender.failures = [PermanentError(code="smtp_rejected")]  # fixed by the admin since
+        assert await container.notifications.deliver(org_id=org_id, delivery_id=delivery_id) is DEAD
+
+        await bus.run(await _retry(alerting.tenant, bus))
+
+        delivered = await _delivery(container, org_id, delivery_id)
+        assert (delivered.status, delivered.attempts) == (SENT, 2)
+        assert len(sender.sent) == 1
+
+    async def test_a_retried_failed_collection_is_dispatched_with_a_new_ticket(
+        self, api: httpx2.AsyncClient, container: Container, bus: InProcessBus
+    ) -> None:
+        tenant = await _tenant(api)
+        source_id = await create_source(
+            tenant.owner, tenant.project_id, await _dataset(tenant), _website()
+        )
+        run = await tenant.owner.post(f"/api/v1/sources/{source_id}/runs")
+        run_path = f"/api/v1/runs/{run.json()['id']}"
+        message = RunMessage(org_id=tenant.org_id, run_id=UUID(run.json()["id"]))
+        await _give_up(bus, "nexusflow.collect.dispatch", message)  # e.g. the broker was down
+        failed = (await tenant.owner.get(run_path)).json()
+        assert (failed["status"], failed["error_code"]) == ("failed", "upstream_down")
+
+        await bus.run(await _retry(tenant, bus))
+
+        started = (await tenant.owner.get(run_path)).json()
+        assert (started["status"], started["attempt"], started["error_code"]) == (
+            "running",
+            1,
+            None,
+        )
+        [(task, kwargs, _)] = cast(Any, bus._deps.dispatcher).sent
+        assert (task, kwargs["run_id"]) == (
+            "nexusflow.sandbox.collect_website",
+            str(message.run_id),
+        )
+
+    async def test_a_retried_upload_run_gets_its_file_back_unless_it_was_uploaded_again(
+        self, api: httpx2.AsyncClient, container: Container, bus: InProcessBus
+    ) -> None:
+        tenant = await _tenant(api)
+        dataset_id = await _dataset(tenant)
+        source_id = await create_source(tenant.owner, tenant.project_id, dataset_id, UPLOAD_CONFIG)
+        uploads = f"/api/v1/sources/{source_id}/uploads"
+        csv_file = {"file": ("parts.csv", b"SKU,Title\r\nB-1,Bolt\r\n", "text/csv")}
+        uploaded = (await tenant.owner.post(uploads, files=csv_file)).json()
+        message = RunMessage(org_id=tenant.org_id, run_id=UUID(uploaded["run_id"]))
+        await _give_up(bus, "nexusflow.collect.dispatch", message)
+        [upload] = (await tenant.owner.get(uploads)).json()["items"]
+        assert upload["status"] == "failed"  # released: the file could be uploaded again
+
+        await bus.run(await _retry(tenant, bus))
+
+        [upload] = (await tenant.owner.get(uploads)).json()["items"]
+        assert upload["status"] == "accepted"  # the retried run has its input again
+        [(task, _, _)] = cast(Any, bus._deps.dispatcher).sent
+        assert task == "nexusflow.sandbox.parse_upload"
+
+        # Had the file been uploaded again meanwhile, that newer upload is the one to run.
+        await _give_up(bus, "nexusflow.collect.dispatch", message)
+        again = await tenant.owner.post(uploads, files=csv_file)
+        assert again.status_code == 201, again.text
+        [letter] = [item for item in await _dead_letters(tenant) if item["status"] == "open"]
+        refused = await tenant.owner.post(f"/api/v1/dead-letters/{letter['id']}/retry")
+        assert (refused.status_code, refused.json()["error"]) == (409, "upload_superseded")
+
+    async def test_a_retried_failed_analysis_is_analysed(
+        self, api: httpx2.AsyncClient, container: Container, bus: InProcessBus
+    ) -> None:
+        analysed = await _with_changes(api, container, external_ai=False)
+        insight_id = await _request_analysis(analysed)
+        message = InsightMessage(org_id=analysed.tenant.org_id, insight_id=insight_id)
+        await _give_up(bus, "nexusflow.intelligence.analyze", message)
+        assert (await _insight(analysed, insight_id))["status"] == "failed"
+
+        await bus.run(await _retry(analysed.tenant, bus))
+
+        stored = await _insight(analysed, insight_id)
+        assert (stored["status"], stored["error_code"], stored["change_count"]) == (
+            "completed",
+            None,
+            2,
+        )
+
+    async def test_a_report_outlives_a_transient_storage_error(
+        self, api: httpx2.AsyncClient, container: Container, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        tenant = await _tenant(api)
+        report_id = await _report(tenant)
+        save = container.storage.save_bytes
+
+        async def disk_full(key: str, data: bytes) -> Any:
+            raise OSError("No space left on device")
+
+        monkeypatch.setattr(container.storage, "save_bytes", disk_full)
+        with pytest.raises(OSError):  # the job fails, and is retried ...
+            await container.reports.generate(org_id=tenant.org_id, report_id=report_id)
+        pending = (await tenant.owner.get(f"/api/v1/reports/{report_id}")).json()
+        assert (pending["status"], pending["error_code"]) == ("pending", None)  # ... not failed
+
+        monkeypatch.setattr(container.storage, "save_bytes", save)
+        retried = await container.reports.generate(org_id=tenant.org_id, report_id=report_id)
+        assert retried.status.value == "ready"
+
+    async def test_a_report_fails_once_its_retries_are_spent_and_can_be_retried(
+        self, api: httpx2.AsyncClient, container: Container, bus: InProcessBus
+    ) -> None:
+        tenant = await _tenant(api)
+        report_id = await _report(tenant)
+        await _give_up(
+            bus,
+            "nexusflow.reports.generate",
+            ReportMessage(org_id=tenant.org_id, report_id=report_id),
+        )
+        failed = (await tenant.owner.get(f"/api/v1/reports/{report_id}")).json()
+        assert (failed["status"], failed["error_code"]) == ("failed", "render_failed")
+
+        await bus.run(await _retry(tenant, bus))
+
+        ready = (await tenant.owner.get(f"/api/v1/reports/{report_id}")).json()
+        assert (ready["status"], ready["error_code"]) == ("ready", None)
 
 
 # --------------------------------------------------------------------------

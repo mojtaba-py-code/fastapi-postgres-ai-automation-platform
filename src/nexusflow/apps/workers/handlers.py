@@ -289,6 +289,11 @@ async def generate_report(deps: WorkerDeps, msg: ReportMessage) -> None:
     await deps.container.reports.generate(org_id=msg.org_id, report_id=msg.report_id)
 
 
+async def fail_report(c: Container, msg: ReportMessage, code: str) -> None:
+    # The dead letter keeps the job's error code; the report says what failed.
+    await c.reports.mark_failed(org_id=msg.org_id, report_id=msg.report_id)
+
+
 # ------------------------------------------------------------ security mail
 
 

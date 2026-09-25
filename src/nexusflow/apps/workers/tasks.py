@@ -109,6 +109,7 @@ PLATFORM_TASKS: tuple[TaskSpec[Any], ...] = (
         TaskName.GENERATE_REPORT,
         retries=2,
         reference=("report", "report_id"),
+        on_give_up=h.fail_report,
     ),
     TaskSpec("nexusflow.security.notify", m.SecurityEmailMessage, h.send_security_email),
     TaskSpec("nexusflow.security.invitation", m.InvitationMessage, h.send_invitation),

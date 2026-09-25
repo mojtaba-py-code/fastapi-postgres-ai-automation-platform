@@ -137,6 +137,13 @@ class NotificationDelivery:
             self.status = DeliveryState.FAILED
             self.next_attempt_at = retry_at
 
+    def reopen(self) -> None:
+        """DEAD -> FAILED and due now: retried from the dead-letter store, the
+        delivery gets one more attempt (it is dead again if that one fails)."""
+        if self.status is DeliveryState.DEAD:
+            self.status = DeliveryState.FAILED
+            self.next_attempt_at = None
+
 
 @dataclass(frozen=True, slots=True)
 class OutboundMessage:

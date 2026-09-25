@@ -352,3 +352,12 @@ class CollectionRun:
         """Allow a retry of a RUNNING run whose worker died (reaper)."""
         if self.status is RunStatus.RUNNING:
             self.status = RunStatus.QUEUED
+
+    def reopen(self) -> None:
+        """FAILED -> QUEUED: retried from the dead-letter store. ``attempt`` keeps
+        counting, so the dispatcher's next start issues a new ticket."""
+        if self.status is RunStatus.FAILED:
+            self.status = RunStatus.QUEUED
+            self.error_code = None
+            self.error_detail = None
+            self.finished_at = None
