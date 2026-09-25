@@ -112,7 +112,10 @@ IdempotencyKey = Annotated[
         min_length=8,
         max_length=128,
         pattern=r"^[A-Za-z0-9._:-]+$",
-        description="Retries with the same key return the original result instead of repeating it.",
+        description=(
+            "Retries with the same key return the original result instead of repeating it; "
+            "the key of another request is refused (409 idempotency_key_reused)."
+        ),
     ),
 ]
 

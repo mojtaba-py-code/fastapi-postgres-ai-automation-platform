@@ -10,11 +10,15 @@ from uuid import UUID
 from sqlalchemy import (
     DateTime,
     Select,
+    String,
     and_,
+    cast,
     delete,
     false,
     func,
+    literal,
     literal_column,
+    null,
     or_,
     select,
     text,
@@ -51,6 +55,7 @@ from nexusflow.domain.records.sealing import (
     seal_value,
 )
 from nexusflow.domain.reports.model import Report
+from nexusflow.domain.shared.idempotency import CLIENT_KEY_PREFIX
 from nexusflow.domain.shared.security import SecretCipher
 from nexusflow.domain.sources.model import CollectionRun, RunStatus, Source
 from nexusflow.domain.uploads.model import Upload, UploadStatus
@@ -1007,9 +1012,51 @@ def _dataset_scope(target: str, dataset_id: UUID) -> ColumnElement[bool]:
     raise ValueError(f"{target} rows are not purged per dataset")
 
 
+# Tables that keep client idempotency keys. A released key of a NOT NULL column
+# becomes a tombstone unique to its row (``expired:<id>``).
+_KEYED = {
+    "collection_runs": d.collection_runs,
+    "workflow_runs": d.workflow_runs,
+    "insights": d.insights,
+    "reports": d.reports,
+}
+
+
+def _client_keys(target: str) -> ColumnElement[bool]:
+    key = _KEYED[target].c.idempotency_key
+    if target == "reports":
+        return key.is_not(None)  # every report key came from a client
+    if target == "workflow_runs":  # "manual:<key>": the form before digests
+        return or_(key.like(f"{CLIENT_KEY_PREFIX}%"), key.like("manual:%"))
+    return key.like(f"{CLIENT_KEY_PREFIX}%")  # internal keys (webhooks, slots) stay
+
+
 class SqlMaintenanceRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._s = session
+
+    async def expire_idempotency_keys(
+        self, org_id: UUID, target: str, before: datetime, *, limit: int
+    ) -> int:
+        table = _KEYED[target]
+        keyed = (
+            select(table.c.id)
+            .where(table.c.org_id == org_id, table.c.created_at < before, _client_keys(target))
+            .limit(limit)
+        )
+        released: Any = (
+            null()
+            if table.c.idempotency_key.nullable
+            else literal("expired:") + cast(table.c.id, String)
+        )
+        statement = (
+            update(table)
+            .where(table.c.id.in_(keyed))
+            .values(idempotency_key=released)
+            .execution_options(synchronize_session=False)
+        )
+        result = await self._s.execute(statement)
+        return int(getattr(result, "rowcount", 0) or 0)
 
     async def purge(
         self, org_id: UUID | None, target: str, before: datetime, *, limit: int | None = None

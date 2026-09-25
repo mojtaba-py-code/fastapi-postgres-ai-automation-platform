@@ -333,12 +333,12 @@ class WebhookService:
             payload_size=len(body),
             item_count=len(items),
         )
+        # A digest of the whole delivery id: cut to the column's 128 characters,
+        # two long ids with a common prefix became one key, and the second
+        # delivery was refused as a duplicate for ever.
+        run_key = hashlib.sha256(f"{endpoint.id}:{delivery_id}".encode()).hexdigest()
         run = await queue_run(
-            uow,
-            source,
-            trigger=RunTrigger.WEBHOOK,
-            idempotency_key=f"wh:{endpoint.id}:{delivery_id}"[:128],
-            now=now,
+            uow, source, trigger=RunTrigger.WEBHOOK, idempotency_key=f"wh:{run_key}", now=now
         )
         event.run_id = run.id
         if not await uow.data.webhook_events.add(event):

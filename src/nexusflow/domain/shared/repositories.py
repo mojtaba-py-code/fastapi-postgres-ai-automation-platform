@@ -282,6 +282,13 @@ class MaintenanceRepository(Protocol):
         self, org_id: UUID | None, target: str, before: datetime, *, limit: int | None = None
     ) -> int: ...
 
+    async def expire_idempotency_keys(
+        self, org_id: UUID, target: str, before: datetime, *, limit: int
+    ) -> int:
+        """Release up to ``limit`` client idempotency keys of ``target`` (runs,
+        workflow runs, insights, reports) stored before ``before``."""
+        ...
+
     async def delete_batch(
         self, org_id: UUID, target: str, *, dataset_id: UUID | None, limit: int
     ) -> int:

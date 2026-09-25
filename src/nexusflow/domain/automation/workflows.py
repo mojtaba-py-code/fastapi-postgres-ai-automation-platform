@@ -9,7 +9,7 @@ from nexusflow.core.clock import Clock
 from nexusflow.core.errors import ConflictError, InvalidInputError, NotFoundError
 from nexusflow.core.ids import uuid7
 from nexusflow.core.pagination import Page, PageRequest
-from nexusflow.core.text import clean_text, required_name, single_line
+from nexusflow.core.text import clean_text, required_name
 from nexusflow.domain.audit.model import AuditAction
 from nexusflow.domain.audit.recorder import AuditRecorder
 from nexusflow.domain.authorization.principal import Principal
@@ -25,6 +25,7 @@ from nexusflow.domain.automation.model import (
     WorkflowTrigger,
 )
 from nexusflow.domain.shared.context import RequestMeta
+from nexusflow.domain.shared.idempotency import client_key, ensure_same_request
 from nexusflow.domain.shared.unit_of_work import TenantScope, UnitOfWork, UnitOfWorkFactory
 from nexusflow.domain.sources.model import RunStatus, RunTrigger, SourceKind
 from nexusflow.domain.sources.service import queue_run
@@ -233,14 +234,12 @@ class WorkflowService:
         principal.require(Permission.WORKFLOWS_EXECUTE)
         org_id = principal.require_org()
         now = self._clock.now()
-        key = (
-            f"manual:{single_line(idempotency_key, 100)}"
-            if idempotency_key
-            else f"manual:{uuid7()}"
-        )
+        # Without a client key, a unique one: the column is required.
+        key = client_key(idempotency_key) if idempotency_key else f"once:{uuid7()}"
         async with self._uow_factory(TenantScope.of(principal)) as uow:
             existing = await uow.data.workflow_runs.get_by_idempotency_key(org_id, key)
             if existing is not None:
+                ensure_same_request(existing.workflow_id == workflow_id)
                 return existing, False
             workflow = await _workflow(uow, org_id, workflow_id, lock=True)
             if not workflow.is_runnable:
@@ -288,7 +287,7 @@ async def start_workflow_run(
         org_id=workflow.org_id,
         workflow_id=workflow.id,
         trigger=trigger,
-        idempotency_key=key[:128],
+        idempotency_key=key,  # bounded by construction (slot keys, digests)
         created_at=now,
     )
     await uow.data.workflow_runs.add(run)

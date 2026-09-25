@@ -11,7 +11,7 @@ from nexusflow.core.clock import Clock
 from nexusflow.core.errors import ConflictError, InvalidInputError, NotFoundError
 from nexusflow.core.ids import uuid7
 from nexusflow.core.pagination import Page, PageRequest
-from nexusflow.core.text import required_name, single_line
+from nexusflow.core.text import required_name
 from nexusflow.domain.audit.model import AuditAction
 from nexusflow.domain.audit.recorder import AuditRecorder
 from nexusflow.domain.authorization.principal import Principal
@@ -21,6 +21,7 @@ from nexusflow.domain.catalog.service import get_dataset
 from nexusflow.domain.integrations.model import SOURCE_AUTH_KINDS, IntegrationStatus
 from nexusflow.domain.shared.context import RequestMeta
 from nexusflow.domain.shared.files import file_deletions
+from nexusflow.domain.shared.idempotency import client_key, ensure_same_request
 from nexusflow.domain.shared.outbox import TaskName, new_message
 from nexusflow.domain.shared.unit_of_work import TenantScope, UnitOfWork, UnitOfWorkFactory
 from nexusflow.domain.shared.url_policy import UrlPolicy
@@ -205,12 +206,13 @@ class SourceService:
         ``Idempotency-Key`` return the original run instead of starting another."""
         principal.require(Permission.SOURCES_RUN)
         org_id = principal.require_org()
-        key = _idempotency_key(idempotency_key)
+        key = client_key(idempotency_key) if idempotency_key is not None else None
         now = self._clock.now()
         async with self._uow_factory(TenantScope.of(principal)) as uow:
             if key is not None:
                 existing = await uow.data.runs.get_by_idempotency_key(org_id, key)
                 if existing is not None:
+                    ensure_same_request(existing.source_id == source_id)
                     return existing, False
             source = await uow.data.sources.get(org_id, source_id)
             if source is None:
@@ -348,18 +350,6 @@ async def queue_run(
             )
         )
     return run
-
-
-def _idempotency_key(raw: str | None) -> str | None:
-    if raw is None:
-        return None
-    key = single_line(raw, 128)
-    if not 8 <= len(key) <= 128 or not all(c.isalnum() or c in "-_.:" for c in key):
-        raise InvalidInputError(
-            "Idempotency-Key must be 8-128 characters of [A-Za-z0-9-_.:].",
-            code="invalid_idempotency_key",
-        )
-    return key
 
 
 def _audit_summary(config: AnySourceConfig) -> dict[str, Any]:

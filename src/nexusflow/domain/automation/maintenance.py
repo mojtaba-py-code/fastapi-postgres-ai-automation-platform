@@ -69,6 +69,7 @@ class RetentionPolicy:
     notification_deliveries_days: int
     dead_letters_days: int
     outbox_days: int = 7
+    idempotency_keys_hours: int = 24
 
 
 @dataclass(slots=True)
@@ -185,6 +186,11 @@ class MaintenanceService:
             cutoff = now - timedelta(days=dataset.retention_days)
             await purge("record_versions", _versions_batch(org_id, dataset.id, cutoff))
             await purge("changes", _changes_batch(org_id, dataset.id, cutoff))
+        # Idempotency keys are honoured for a while, then released: the key
+        # starts a new request again (the resources themselves stay).
+        keys_cutoff = now - timedelta(hours=policy.idempotency_keys_hours)
+        for target in ("collection_runs", "workflow_runs", "insights", "reports"):
+            await purge("idempotency_keys", _keys_batch(org_id, target, keys_cutoff))
         if any(report.purged.values()):
             async with self._uow_factory(TenantScope.system(org_id)) as uow:
                 await self._audit.record(
@@ -427,5 +433,16 @@ def _changes_batch(
 ) -> Callable[[UnitOfWork, int], Awaitable[int]]:
     async def step(uow: UnitOfWork, limit: int) -> int:
         return await uow.data.changes.purge_before(org_id, dataset_id, before, limit=limit)
+
+    return step
+
+
+def _keys_batch(
+    org_id: UUID, target: str, before: datetime
+) -> Callable[[UnitOfWork, int], Awaitable[int]]:
+    async def step(uow: UnitOfWork, limit: int) -> int:
+        return await uow.data.maintenance.expire_idempotency_keys(
+            org_id, target, before, limit=limit
+        )
 
     return step
