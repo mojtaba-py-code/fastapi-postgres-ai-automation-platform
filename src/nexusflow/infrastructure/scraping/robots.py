@@ -19,10 +19,10 @@ for at least 500 KiB); a larger file is truncated, not rejected.
 
 A hostile file cannot make a check slow: patterns are matched segment by
 segment with ``str.find`` (in C, no backtracking), so a check costs at most in
-the order of ``_MAX_RULE_CHARS * _MAX_PATH`` character comparisons - well under
-a second. Only the rules of the groups that apply to us are kept, deduplicated
-and counted against those caps; a path longer than ``_MAX_PATH`` (normalised)
-is not crawled.
+the order of ``_MAX_RULE_CHARS * _MAX_PATH`` character comparisons - about a
+second for the most hostile file against the longest URL, a few milliseconds
+for real ones. Only the rules of the groups that apply to us are kept,
+deduplicated and counted against those caps.
 """
 
 from __future__ import annotations
@@ -39,14 +39,16 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from nexusflow.core.errors import PermanentError, PolicyViolationError, TransientError
-from nexusflow.domain.shared.url_policy import UrlPolicy
+from nexusflow.domain.shared.url_policy import MAX_URL_LENGTH, UrlPolicy
 from nexusflow.infrastructure.http.client import SafeHttpClient, TooManyRedirectsError
 
 _MAX_ROBOTS_BYTES = 512 * 1024
 _MAX_RULES = 10_000  # that apply to us, per file
 _MAX_PATTERN = 2_048  # characters of one rule
 _MAX_RULE_CHARS = 128 * 1024  # of all the rules that apply to us, normalised
-_MAX_PATH = 4_096  # characters of a normalised path checked against them
+# The longest a URL the policy accepts can normalise to ("%XX" per UTF-8 byte, up
+# to four per character): no such URL is refused for its length.
+_MAX_PATH = MAX_URL_LENGTH * 12
 _UNRESERVED = frozenset(string.ascii_letters + string.digits + "-._~")
 # Printable ASCII except "%": already canonical, nothing to rewrite.
 _CANONICAL = re.compile(r"[!-$&-~]*")

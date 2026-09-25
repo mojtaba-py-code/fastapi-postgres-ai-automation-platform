@@ -23,7 +23,7 @@ from hypothesis import strategies as st
 from redis.asyncio import Redis
 from redis.exceptions import ConnectionError as RedisConnectionError
 
-from nexusflow.domain.shared.url_policy import UrlPolicy
+from nexusflow.domain.shared.url_policy import MAX_URL_LENGTH, UrlPolicy
 from nexusflow.infrastructure.scraping.robots import (
     _MAX_PATH,
     _MAX_ROBOTS_BYTES,
@@ -439,7 +439,7 @@ class TestGroups:
         text = _full_file(rules())
         started = time.perf_counter()
         parsed = RobotsRules.parse(text, "NexusFlowBot")
-        for path in ("/" + "a" * 1900, "/" + "a" * 4000, "/" + "é" * 600):
+        for path in ("/" + "a" * 1900, "/" + "é" * 1000, "/" + "a" * (_MAX_PATH - 1)):
             assert parsed.allows(path) is True
         assert time.perf_counter() - started < 10.0  # generous: about a second at worst
 
@@ -460,10 +460,12 @@ class TestGroups:
         assert sum(len(pattern) for _, pattern in rules.rules) <= _MAX_RULE_CHARS
         assert len(rules.rules) < len(wide)
 
-    def test_a_path_longer_than_a_check_is_bounded_for_is_not_crawled(self) -> None:
+    def test_any_url_the_policy_accepts_is_checked_but_longer_paths_are_refused(self) -> None:
         rules = RobotsRules.parse("User-agent: *\nAllow: /\n", "NexusFlowBot")
-        assert rules.allows("/" + "a" * (_MAX_PATH - 1)) is True
-        assert rules.allows("/" + "a" * _MAX_PATH) is False
+        # The longest URL the policy accepts, all four-byte characters: 12 per character.
+        widest = "/" + "😀" * (MAX_URL_LENGTH - 1)
+        assert rules.allows(widest) is True
+        assert rules.allows("/" + "a" * _MAX_PATH) is False  # beyond any check's bound
 
     @settings(max_examples=400, deadline=None)
     @given(
