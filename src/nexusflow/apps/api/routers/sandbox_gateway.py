@@ -84,7 +84,7 @@ async def _read_body(request: Request, limit: int) -> bytearray:
 
 def _declared_length(request: Request) -> int | None:
     raw = request.headers.get("content-length", "")
-    return int(raw) if raw.isdigit() and len(raw) <= 12 else None
+    return int(raw) if raw.isascii() and raw.isdigit() and len(raw) <= 12 else None
 
 
 @asynccontextmanager

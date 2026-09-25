@@ -173,6 +173,12 @@ async def collect_rest_api(deps: WorkerDeps, msg: RunMessage) -> None:
     except NexusFlowError as exc:  # blocked URL, 4xx, invalid JSON, unusable credential
         await c.ingestion.fail_run(org_id=msg.org_id, run_id=msg.run_id, code=exc.code, detail=None)
         return
+    except Exception:
+        # Unexpected (a bug, a library error): hand the run back like a transient
+        # failure, so the task's retry can start it again instead of finding it
+        # RUNNING and returning; after the last retry it fails (fail_collection).
+        await c.collection.release(org_id=msg.org_id, run_id=msg.run_id)
+        raise
     outcome = await c.ingestion.ingest(
         org_id=msg.org_id,
         run_id=msg.run_id,

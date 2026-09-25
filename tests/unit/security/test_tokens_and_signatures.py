@@ -13,6 +13,7 @@ from nexusflow.domain.identity.api_keys import (
 from nexusflow.domain.webhooks.signatures import (
     build_signature_header,
     compute_signature,
+    parse_signature_header,
     verify_signature,
 )
 
@@ -151,6 +152,14 @@ class TestWebhookSignatures:
                 now_timestamp=NOW,
                 tolerance_seconds=300,
             )
+
+    # str.isdigit() accepts all of these; int() refuses "²" (a 500 for any endpoint)
+    # and reads the others, although a timestamp is ASCII digits only.
+    @pytest.mark.parametrize("timestamp", ["²", "¹⁷⁸", "١٧٨٠٠٠٠٠٠٠", "１７８０００００００"])
+    def test_a_timestamp_is_ascii_digits_only(self, timestamp: str) -> None:
+        with pytest.raises(AuthenticationError) as exc:
+            parse_signature_header(f"t={timestamp},v1=" + "0" * 64)
+        assert exc.value.internal_detail == "signature_malformed"
 
     @pytest.mark.parametrize("delivery_id", [None, "", "short", "has space in it", "a" * 200])
     def test_invalid_delivery_ids_rejected(self, delivery_id: str | None) -> None:

@@ -241,6 +241,12 @@ class NotificationService:
             # message, a revoked credential, a destination the URL policy blocks -
             # settles the delivery at once, so none is left in SENDING.
             return await self._settle(org_id, delivery_id, error=error)
+        except Exception:
+            # Not an application error (a bug, a library failing unexpectedly): the
+            # attempt counts as a transient failure - retried with backoff, dead-
+            # lettered after the last one - and the error still reaches the worker.
+            await self._settle(org_id, delivery_id, error=TransientError(code="unexpected_error"))
+            raise
         return await self._settle(org_id, delivery_id, error=None)
 
     async def _defer(self, org_id: UUID, delivery_id: UUID, *, delay: float) -> DeliveryState:

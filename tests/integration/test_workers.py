@@ -18,6 +18,7 @@ from nexusflow.apps.workers.handlers import (
     WorkerDeps,
     analyze_changes,
     collect_dispatch,
+    collect_rest_api,
     detect_changes,
     dispatch_due_workflows,
     evaluate_alerts,
@@ -312,6 +313,46 @@ class TestSandboxBoundary:
         assert {r["record_key"] for r in records} == {"B-1", "B-2"}
         upload = (await owner.get(f"/api/v1/sources/{source_id}/uploads")).json()["items"][0]
         assert (upload["status"], upload["row_count"]) == ("processed", 2)
+
+
+REST_CONFIG = {
+    "kind": "rest_api",
+    "url": "https://api.example.com/items",
+    "items_path": "items",
+    "field_mapping": {"sku": "sku", "title": "title"},
+}
+
+
+class TestRestApiRuns:
+    async def test_an_unexpected_error_hands_the_run_back_to_the_task_retry(
+        self, api: httpx2.AsyncClient, container: Container, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        owner = await signup(api)
+        project_id = await create_project(owner)
+        dataset_id = await create_dataset(owner, project_id)
+        source_id = await create_source(owner, project_id, dataset_id, REST_CONFIG)
+        run = await owner.post(f"/api/v1/sources/{source_id}/runs")
+        assert run.status_code == 202, run.text
+        run_path = f"/api/v1/runs/{run.json()['id']}"
+        message = RunMessage(org_id=await org_id_of(owner), run_id=UUID(run.json()["id"]))
+        deps, _ = _deps(container)
+
+        async def broken(*args: Any, **kwargs: Any) -> Any:
+            raise ValueError("a bug, or a library error that nobody mapped")
+
+        monkeypatch.setattr(container.rest_collector, "collect", broken)
+        with pytest.raises(ValueError):  # the task logs it and retries
+            await collect_rest_api(deps, message)
+        assert (await owner.get(run_path)).json()["status"] == "queued"  # not left RUNNING
+
+        async def working(*args: Any, **kwargs: Any) -> Any:
+            items = [{"sku": "R-1", "title": "Relay"}]
+            return SimpleNamespace(items=items, truncated=False, detail={})
+
+        monkeypatch.setattr(container.rest_collector, "collect", working)
+        await collect_rest_api(deps, message)  # the task's retry starts the run again
+        finished = (await owner.get(run_path)).json()
+        assert (finished["status"], finished["attempt"]) == ("succeeded", 2)
 
 
 class _Spy:

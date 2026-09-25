@@ -341,8 +341,8 @@ async def _read_bounded(response: httpx2.Response, max_bytes: int, *, truncate: 
     Past the cap the response is rejected - or, with ``truncate``, cut at the
     cap and the rest of the stream left unread.
     """
-    declared = response.headers.get("content-length")
-    if not truncate and declared and declared.isdigit() and int(declared) > max_bytes:
+    declared = _header_int(response.headers.get("content-length"))
+    if not truncate and declared is not None and declared > max_bytes:
         raise ResponseTooLargeError(internal_detail=f"declared {declared} bytes")
     decoder = _BoundedDecoder(
         response.headers.get("content-encoding", ""), max_bytes, truncate=truncate
@@ -448,5 +448,19 @@ def _raise_for_status(response: HttpResponse) -> None:
 
 
 def _retry_after(headers: Mapping[str, str]) -> int | None:
-    raw = headers.get("retry-after", "")
-    return min(int(raw), 3600) if raw.isdigit() else None
+    seconds = _header_int(headers.get("retry-after"))
+    return min(seconds, 3600) if seconds is not None else None
+
+
+def _header_int(raw: str | None) -> int | None:
+    """A header's non-negative decimal value, or None if it is not one.
+
+    ``str.isdigit`` alone accepts digits ``int()`` refuses (``"²"``) or reads
+    although HTTP does not (``"٣"``), and ``int()`` refuses - or takes quadratic
+    time over - thousands of digits: only ASCII digits count, and a value too long
+    for any real size or delay is clamped instead of converted.
+    """
+    if not raw or not (raw.isascii() and raw.isdigit()):
+        return None
+    digits = raw.lstrip("0") or "0"
+    return int(digits) if len(digits) <= 18 else 10**18

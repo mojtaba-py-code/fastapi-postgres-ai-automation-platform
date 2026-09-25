@@ -350,6 +350,50 @@ class TestSafeHttpClient:
                 "GET", "https://example.com/", accept_content_types=frozenset({"application/json"})
             )
 
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            pytest.param(b"120", 120, id="seconds"),
+            pytest.param(b"0007", 7, id="leading-zeros"),
+            pytest.param(b"86400", 3600, id="capped"),
+            # int() refuses more than 4300 digits (and is quadratic below that).
+            pytest.param(b"9" * 5000, 3600, id="huge"),
+            # "²": str.isdigit() accepts it, int() does not.
+            pytest.param(b"\xb2", None, id="superscript"),
+            # int() accepts Arabic-Indic digits, but they are not HTTP delta-seconds.
+            pytest.param("٣".encode(), None, id="arabic-indic"),
+            pytest.param(b"-1", None, id="negative"),
+            pytest.param(b"Wed, 21 Oct 2026 07:28:00 GMT", None, id="http-date"),
+        ],
+    )
+    async def test_retry_after_is_parsed_defensively(
+        self, value: bytes, expected: int | None
+    ) -> None:
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(503, headers=[(b"retry-after", value)], stream=_Chunked(b""))
+
+        with pytest.raises(RetryableUpstreamStatusError) as raised:
+            await _client(handler).request("GET", "https://example.com/")
+        assert raised.value.retry_after_seconds == expected
+
+    async def test_a_content_length_that_is_no_number_is_ignored(self) -> None:
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(
+                200, headers=[(b"content-length", b"\xb2")], stream=_Chunked(b"{}")
+            )
+
+        response = await _client(handler).request("GET", "https://example.com/")
+        assert response.content == b"{}"  # the body itself is still bounded while read
+
+    async def test_an_absurd_content_length_is_refused_as_too_large(self) -> None:
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(
+                200, headers=[(b"content-length", b"9" * 5000)], stream=_Chunked(b"{}")
+            )
+
+        with pytest.raises(ResponseTooLargeError):
+            await _client(handler).request("GET", "https://example.com/")
+
     async def test_environment_proxies_are_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("HTTPS_PROXY", "http://10.0.0.1:3128")
         seen_hosts: list[str] = []

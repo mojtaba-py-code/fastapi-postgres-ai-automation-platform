@@ -472,6 +472,39 @@ class TestNotificationDelivery:
         ]
         assert [job["dead_letter_id"] for job in failed_jobs] == [letter["id"]]
 
+    async def test_an_unexpected_sender_error_is_retried_like_a_transient_one(
+        self,
+        api: httpx2.AsyncClient,
+        container: Container,
+        bus: InProcessBus,
+        sender: FakeSender,
+        delivery_clock: FrozenClock,
+    ) -> None:
+        alerting = await _alerting(api)
+        org_id, [channel_id] = alerting.tenant.org_id, alerting.channel_ids
+        delivery_id = (await _fire(alerting, container))[channel_id]
+        # No application error: a bug, or a library failing in a way nobody mapped.
+        sender.failures = [ValueError("invalid literal for int() with base 10: '²'")]
+
+        with pytest.raises(ValueError):  # still raised, so the worker logs it
+            await container.notifications.deliver(org_id=org_id, delivery_id=delivery_id)
+
+        failed = await _delivery(container, org_id, delivery_id)  # settled, not left SENDING
+        assert (failed.status, failed.attempts, failed.last_error_code) == (
+            FAILED,
+            1,
+            "unexpected_error",
+        )
+        assert failed.next_attempt_at is not None
+        [retry] = [
+            m
+            for m in bus.published(TaskName.DELIVER_NOTIFICATION, org_id)
+            if m.available_at > m.created_at
+        ]
+        assert retry.available_at == failed.next_attempt_at
+        delivery_clock.set(failed.next_attempt_at)
+        assert await container.notifications.deliver(org_id=org_id, delivery_id=delivery_id) is SENT
+
     async def test_a_blocked_destination_settles_the_delivery(
         self,
         api: httpx2.AsyncClient,

@@ -297,6 +297,22 @@ class TestWebhookIngestion:
             415,
         )
 
+    async def test_a_timestamp_of_other_digits_is_a_malformed_signature(
+        self, api: httpx2.AsyncClient
+    ) -> None:
+        owner = await signup(api)
+        path, _, _, _ = await self._endpoint(owner)
+        unknown_path = f"/api/v1/webhooks/{path.split('/')[4]}/{uuid4()}"
+        for target in (path, unknown_path):
+            for digit in (b"\xb2", b"\xb9"):  # "²", "¹": str.isdigit() says yes, int() no
+                headers = [
+                    (b"content-type", b"application/json"),
+                    (b"x-nexusflow-delivery", b"dlv-00000001"),
+                    (b"x-nexusflow-signature", b"t=" + digit + b",v1=" + b"0" * 64),
+                ]
+                rejected = await api.post(target, content=b"{}", headers=headers)
+                expect_error(rejected, 401, "invalid_signature")
+
     async def test_a_failed_delivery_stays_retryable_under_the_same_id(
         self, api: httpx2.AsyncClient
     ) -> None:
