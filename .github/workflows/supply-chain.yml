@@ -6,9 +6,12 @@ name: Supply chain
 # every push to main. Both need a public repository (or GitHub Advanced
 # Security); on a private one they are skipped rather than failing.
 #
-# Every week, Trivy also scans every third-party image the stack runs or
-# builds from (CI scans the two images built here on every change): a fixable
-# HIGH or CRITICAL finding means "update that pin" (make pin-images).
+# Every week, Trivy also scans every third-party image the stack runs as it
+# is (the images built here - and the bases they are built from - are scanned
+# by CI on every change and every week): a fixable HIGH or CRITICAL finding
+# means "update that pin" (make pin-images). A finding the newest upstream
+# release still carries is triaged in .trivyignore.yaml, with its reason and
+# an expiry date.
 
 on:
   pull_request:
@@ -53,6 +56,8 @@ jobs:
       matrix:
         image: ${{ fromJSON(needs.third-party-images.outputs.images) }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with: {persist-credentials: false}   # .trivyignore.yaml
       - name: Trivy - fixable HIGH/CRITICAL
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         with:
@@ -60,6 +65,12 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "1"
+          trivyignores: .trivyignore.yaml
+          # gosu (postgres, redis, rabbitmq) only steps down from root, and the
+          # stack starts those containers as their own users, so it never runs;
+          # its maintainers do not rebuild it for Go library code it does not
+          # call (github.com/tianon/gosu, SECURITY.md).
+          skip-files: usr/local/bin/gosu
 
   dependency-review:
     name: Dependency review

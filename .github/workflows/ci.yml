@@ -4,12 +4,18 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Weekly: rebuild the images from their pinned bases, scan them, run the
+  # whole stack again - new vulnerabilities and upstream drift surface without
+  # waiting for a change.
+  schedule:
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -141,6 +147,10 @@ jobs:
     needs: [images]
     env:
       COMPOSE: docker compose -f docker-compose.yml -f docker-compose.demo.yml
+      # n8n is opt-in in production; start it here so every change still proves
+      # it comes up healthy (ClamAV, the other profile, needs 4 GiB and
+      # downloads its signatures at start - covered by tests with a fake clamd).
+      COMPOSE_PROFILES: n8n
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with: {persist-credentials: false}

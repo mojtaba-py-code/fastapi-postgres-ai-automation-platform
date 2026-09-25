@@ -62,6 +62,21 @@ def test_dockerfiles_use_literal_pinned_from_lines(name: str) -> None:
     assert froms and all("@sha256:" in image for image in froms)
 
 
+def test_the_weekly_scan_covers_every_image_that_runs_as_it_is(pins: ModuleType) -> None:
+    images = pins.runtime_images()
+    repos = {image.split("@")[0].rsplit(":", 1)[0] for image in images}
+    assert all(re.fullmatch(r"[^@\s]+:[^@\s]+@sha256:[0-9a-f]{64}", image) for image in images)
+    compose = {
+        match[1]
+        for name in COMPOSE_FILES
+        for match in re.finditer(r"\$\{\w+_IMAGE:-([^:}]+):", (ROOT / name).read_text("utf-8"))
+    }
+    assert compose - pins.LOCAL_IMAGES <= repos
+    # Base images are scanned as part of the images built from them (CI).
+    assert not repos & {"python", "ghcr.io/astral-sh/uv", "mcr.microsoft.com/playwright/python"}
+    assert not any(repo.endswith("/dockerfile") for repo in repos)
+
+
 def test_scan_and_pin_cover_every_form_and_skip_the_images_built_here(pins: ModuleType) -> None:
     text = "\n".join(
         [

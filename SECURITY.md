@@ -126,6 +126,17 @@ Details are in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) and
 * Containers run non-root with read-only filesystems, no capabilities and
   no-new-privileges. Networks are segmented and only the edge proxy is exposed.
 
+## Third-party images
+
+Every image is pinned by digest and kept current with Dependabot and
+`make pin-images`. CI scans the two images built here on every change and every
+week, and a weekly job scans every third-party image the stack runs as it is
+(Trivy; a fixable HIGH or CRITICAL finding fails). A finding is fixed by upgrading
+the image. Only when the newest upstream release still carries it *and* it cannot
+be reached in this deployment is it accepted, in
+[`.trivyignore.yaml`](.trivyignore.yaml), with its reason and the date by which it
+is checked again.
+
 ## Review status
 
 The code has been reviewed with AI assistance (adversarial code review,

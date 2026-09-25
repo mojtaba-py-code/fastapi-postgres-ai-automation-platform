@@ -1,0 +1,17 @@
+# Accepted scanner findings, each with its reason and the date by which it is
+# checked again (Trivy reports it once more after `expired_at`). Policy
+# (SECURITY.md, "Third-party images"): upgrade the image first
+# (make pin-images); an entry is only for a finding that the newest upstream
+# release still carries AND that cannot be reached in this deployment.
+vulnerabilities:
+  - id: CVE-2026-84445
+    paths:
+      - bin/alertmanager
+      - bin/amtool
+    statement: >-
+      prom/alertmanager v0.34.1, the newest release, links gRPC-Go 1.83.1 only
+      for its optional OTLP trace exporter - a client (tracing/tracing.go). It
+      serves no gRPC, so a malformed-request denial of service against a gRPC
+      server cannot reach it, and tracing is not configured here. Drop this
+      entry once a release ships gRPC-Go 1.83.2 or later.
+    expired_at: 2026-11-30

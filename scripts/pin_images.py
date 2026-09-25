@@ -9,7 +9,7 @@ pinned), and writes it next to the tag, which stays for readability:
 
     python scripts/pin_images.py            # resolve and write the digests
     python scripts/pin_images.py --check    # exit 1 if a reference has no digest (CI)
-    python scripts/pin_images.py --list     # every third-party image, one per line
+    python scripts/pin_images.py --list     # the third-party images that run, one per line
 
 Those are the forms Dependabot reads - it proposes tag updates (run this
 script again afterwards, ``make pin-images``). A deployment overrides one
@@ -169,19 +169,31 @@ def _files() -> Iterable[Path]:
     return (ROOT / name for name in FILES if (ROOT / name).exists())
 
 
+def runtime_images() -> list[str]:
+    """The pinned third-party images the stack runs as they are (Compose files,
+    CI services), for the weekly scan. Base images are left out: what runs is
+    the image built from them - which CI scans on every change and every week -
+    after the build removed what it does not need."""
+    return sorted(
+        {
+            f"{ref.repo}:{ref.tag}@{ref.digest}"
+            for path in _files()
+            if not path.name.startswith("Dockerfile")
+            for ref in scan(path.read_text(encoding="utf-8"), path.name)
+            if ref.digest is not None
+        }
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--check", action="store_true", help="exit 1 if a reference has no digest")
-    parser.add_argument("--list", action="store_true", help="print every pinned image once")
+    parser.add_argument(
+        "--list", action="store_true", help="print the third-party images that run, once each"
+    )
     args = parser.parse_args(argv)
     if args.list:
-        images = {
-            f"{ref.repo}:{ref.tag}@{ref.digest}"
-            for path in _files()
-            for ref in scan(path.read_text(encoding="utf-8"), path.relative_to(ROOT).as_posix())
-            if ref.digest is not None and not ref.repo.endswith("/dockerfile")
-        }
-        print("\n".join(sorted(images)))
+        print("\n".join(runtime_images()))
         return 0
     if args.check:
         unpinned = [

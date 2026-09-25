@@ -362,8 +362,11 @@ NEXUSFLOW_BROWSER_IMAGE=ghcr.io/<owner>/nexusflow-browser:0.1.0@sha256:<digest>
 Base images (literal `FROM` lines), the BuildKit frontend and third-party images
 (Compose files, CI) are pinned to digests in forms Dependabot reads; CI fails if a
 reference loses its digest. After Dependabot proposes a new tag, `make pin-images`
-resolves the digests it points at. A weekly job scans every third-party image with
-Trivy. Override one on purpose with its variable, digest included, e.g.
+resolves the digests it points at. Every week CI rebuilds and scans the platform's
+images and Trivy scans every third-party image the stack runs; the few findings
+that no upstream release fixes yet, and that cannot be reached here, are listed
+with their reasons in `.trivyignore.yaml` (see SECURITY.md). Override an image on
+purpose with its variable, digest included, e.g.
 `NGINX_IMAGE=nginxinc/nginx-unprivileged:1.30-alpine@sha256:<digest>`.
 
 ## 11. Upgrades
@@ -377,7 +380,9 @@ Trivy. Override one on purpose with its variable, digest included, e.g.
 A stack set up before internal TLS existed (its `secrets/redis_app_url` still
 begins with `redis://`) also needs `python scripts/generate_secrets.py --tls-urls`
 before step 4: it rewrites the Redis and broker URLs for TLS and keeps their
-credentials.
+credentials. Grafana now runs from `grafana/grafana` (the maintained image;
+`grafana/grafana-oss` stopped receiving releases) and Prometheus from its current
+long-term-support line, 3.13: both keep their data volumes.
 
 Migrations run automatically and are forward-only in production. They are
 additive (new nullable columns, columns with constant defaults, new functions and

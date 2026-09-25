@@ -92,7 +92,7 @@ services:
   # ------------------------------------------------------------------ edge
   nginx:
     <<: *hardened
-    image: ${NGINX_IMAGE:-nginxinc/nginx-unprivileged:1.29-alpine@sha256:0c79d56aee561a1d81c63f00eee5fb5fe29279560cdc55e91425133104c7fbe6}
+    image: ${NGINX_IMAGE:-nginxinc/nginx-unprivileged:1.30-alpine@sha256:4714e0b1b2577eaa1a6131d07c958b67f0eb68e6d0521e90c6e5287db8cf0bc5}
     tmpfs: ["/tmp:size=32m,noexec,nosuid,nodev"]
     ports:
       # IPv4 only: an IPv6 client would reach nginx through Docker's userland
@@ -292,7 +292,7 @@ services:
     # its owner set-up first. Set the owner up as soon as you enable it.
     profiles: ["n8n"]
     init: false                   # the image runs its own init (tini)
-    image: ${N8N_IMAGE:-n8nio/n8n:2.40.6@sha256:9c7871d5cc4fc2565bb905e4df5bf7d6a5a4bf2f4313fb99a2b3fa380f331d7c}   # keep current: n8n ships frequent security fixes
+    image: ${N8N_IMAGE:-n8nio/n8n:2.40.7@sha256:ffeb52485f78b1b06c9a832205853cf75da72a07a514c9a27724df85979d6c34}   # keep current: n8n ships frequent security fixes
     read_only: false              # n8n writes its settings/cache under /home/node
     tmpfs: ["/tmp:size=64m,noexec,nosuid,nodev"]
     environment:
@@ -462,7 +462,7 @@ services:
   # ---------------------------------------------------------- monitoring
   prometheus:
     <<: *hardened
-    image: ${PROMETHEUS_IMAGE:-prom/prometheus:v3.5.0@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996}
+    image: ${PROMETHEUS_IMAGE:-prom/prometheus:v3.13.3@sha256:6976aa8a60fec930796ce5772b8d12da7a318a5daa8d40d69c5c7819a05eeed7}
     command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=15d"]
     volumes:
       - ./deploy/prometheus:/etc/prometheus:ro
@@ -484,7 +484,7 @@ services:
 
   grafana:
     <<: *hardened
-    image: ${GRAFANA_IMAGE:-grafana/grafana-oss:12.1.0@sha256:6ac590e7cabc2fbe8d7b8fc1ce9c9f0582177b334e0df9c927ebd9670469440f}
+    image: ${GRAFANA_IMAGE:-grafana/grafana:12.4.11@sha256:3ea272e5cab64a4a62240c682e2c62433b25614d956d44c299a10cb6994f6f2e}
     tmpfs: ["/tmp:size=32m"]
     environment:
       GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_password
