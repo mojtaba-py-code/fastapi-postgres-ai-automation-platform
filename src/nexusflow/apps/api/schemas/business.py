@@ -284,6 +284,7 @@ class WebhookStatusChange(RequestModel):
 class WebhookReceiptOut(ResponseModel):
     status: Literal["accepted", "duplicate"]
     run_id: UUID | None
+    truncated: bool = False  # items beyond the source's max_items were not taken
 
 
 # ---------------------------------------------------- intelligence & alerts

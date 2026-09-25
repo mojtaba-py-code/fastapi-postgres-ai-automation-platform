@@ -79,6 +79,7 @@ class CreatedEndpoint:
 class ReceiptResult:
     status: Literal["accepted", "duplicate"]
     run_id: UUID | None
+    truncated: bool = False  # items beyond the source's max_items were not taken
 
 
 def _generic_rejection(reason: str) -> AuthenticationError:
@@ -321,7 +322,9 @@ class WebhookService:
                 "The target source is not a webhook source.", code="not_webhook_source"
             )
         document = loads_limited(body, max_bytes=self._max_body, max_depth=20)
-        raw_items, _ = extract_items(document, config.items_path, max_items=config.max_items)
+        raw_items, truncated = extract_items(
+            document, config.items_path, max_items=config.max_items
+        )
         items: list[JSONValue] = [map_fields(item, config.field_mapping) for item in raw_items]
         event = InboundWebhookEvent(
             id=uuid7(),
@@ -346,9 +349,12 @@ class WebhookService:
             await uow.rollback()
             return ReceiptResult(status="duplicate", run_id=None)
         await uow.data.payloads.put(org_id, run.id, items, now)
+        # Like a sandbox result, the run carries the cut-off: ingestion reports
+        # the run truncated (and the sender learns it from the receipt).
+        run.stats = {"source_truncated": truncated}
         endpoint.last_received_at = now
         await uow.commit()
-        return ReceiptResult(status="accepted", run_id=run.id)
+        return ReceiptResult(status="accepted", run_id=run.id, truncated=truncated)
 
     def _verify(
         self,

@@ -251,7 +251,7 @@ class TestWebhookIngestion:
 
         duplicate = await api.post(path, content=payload, headers=headers)
         assert duplicate.status_code == 200
-        assert duplicate.json() == {"status": "duplicate", "run_id": None}
+        assert duplicate.json() == {"status": "duplicate", "run_id": None, "truncated": False}
 
         outcome = await container.ingestion.ingest(
             org_id=await org_id_of(owner), run_id=run_id, items=None
@@ -275,6 +275,36 @@ class TestWebhookIngestion:
         assert export.headers["cache-control"] == "no-store"
         assert "'=HYPERLINK" in export.text  # formula neutralised for spreadsheet apps
         assert ",=HYPERLINK" not in export.text
+
+    async def test_items_beyond_the_limit_are_reported_not_dropped_silently(
+        self, api: httpx2.AsyncClient, container: Container
+    ) -> None:
+        owner = await signup(api)
+        project_id = await create_project(owner)
+        dataset_id = await create_dataset(owner, project_id)
+        source_id = await create_source(
+            owner, project_id, dataset_id, {**WEBHOOK_CONFIG, "max_items": 2}
+        )
+        created = await owner.post(
+            "/api/v1/webhook-endpoints", json={"source_id": source_id, "name": "shop"}
+        )
+        path = created.json()["url"].removeprefix("https://nexusflow.test.example")
+        payload = json.dumps(
+            {"items": [{"sku": f"A-{n}", "title": "Lamp", "price": "1"} for n in range(3)]}
+        ).encode()
+
+        accepted = await api.post(
+            path, content=payload, headers=signed_headers(created.json()["secret"], payload)
+        )
+
+        assert accepted.status_code == 202, accepted.text
+        assert accepted.json()["truncated"] is True  # the sender learns A-2 was not taken
+        outcome = await container.ingestion.ingest(
+            org_id=await org_id_of(owner), run_id=UUID(accepted.json()["run_id"]), items=None
+        )
+        assert (outcome.stats["received"], outcome.stats["truncated"]) == (2, True)
+        run = await owner.get(f"/api/v1/runs/{accepted.json()['run_id']}")
+        assert run.json()["stats"]["truncated"] is True
 
     async def test_rejections_are_uniform_and_reveal_nothing(self, api: httpx2.AsyncClient) -> None:
         owner = await signup(api)
