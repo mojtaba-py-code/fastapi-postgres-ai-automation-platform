@@ -1,0 +1,96 @@
+# Alert rules: availability, reliability and security signals.
+# Security alerts map to playbooks in docs/INCIDENT_RESPONSE.md.
+groups:
+  - name: availability
+    rules:
+      - alert: ServiceDown
+        expr: up == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.service }} is not being scraped"
+      - alert: HighServerErrorRate
+        expr: |
+          sum(rate(nexusflow_http_requests_total{status=~"5.."}[5m]))
+            / clamp_min(sum(rate(nexusflow_http_requests_total[5m])), 1) > 0.05
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "More than 5% of API requests fail with 5xx"
+      - alert: SlowApi
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(nexusflow_http_request_duration_seconds_bucket[5m]))) > 1.5
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "API p95 latency above 1.5s"
+
+  - name: pipeline
+    rules:
+      - alert: DeadLettersAccumulating
+        expr: sum(increase(nexusflow_dead_letters_total[30m])) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "Jobs moved to the dead-letter store in the last 30 minutes"
+      - alert: QueueBacklog
+        expr: sum(rabbitmq_queue_messages_ready) > 5000
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "More than 5000 tasks are waiting in RabbitMQ"
+      - alert: CircuitBreakerOpen
+        expr: max by (dependency) (nexusflow_circuit_breaker_open) == 1
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Circuit breaker open for {{ $labels.dependency }}"
+      - alert: TaskFailureRate
+        expr: |
+          sum(rate(nexusflow_tasks_total{result="failed"}[15m]))
+            / clamp_min(sum(rate(nexusflow_tasks_total[15m])), 0.001) > 0.1
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "More than 10% of background tasks fail"
+
+  - name: security
+    rules:
+      - alert: CredentialStuffingSuspected
+        expr: sum(rate(nexusflow_auth_events_total{event="login", result="failure"}[5m])) > 2
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "Sustained failed logins (> 2/s) - see INCIDENT_RESPONSE.md#credential-attacks"
+      - alert: SuspiciousSignIns
+        # Successful sign-ins from a new device on a new network, or after repeated
+        # failures: a credential attack that is succeeding looks like this.
+        expr: sum(increase(nexusflow_auth_events_total{event="suspicious_login"}[30m])) >= 5
+        labels: {severity: warning}
+        annotations:
+          summary: "5+ suspicious sign-ins in 30 minutes - see INCIDENT_RESPONSE.md#credential-attacks"
+      - alert: RateLimitingSpike
+        expr: sum by (scope) (rate(nexusflow_rate_limit_rejections_total[5m])) > 5
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "Rate limiting rejects > 5 req/s on {{ $labels.scope }}"
+      - alert: SsrfAttemptsBlocked
+        expr: sum(increase(nexusflow_ssrf_blocked_total[15m])) > 10
+        labels: {severity: critical}
+        annotations:
+          summary: "Outbound requests to forbidden destinations were blocked - possible SSRF probing"
+      - alert: WebhookForgeryAttempts
+        expr: sum(increase(nexusflow_webhook_events_total{result="rejected"}[15m])) > 20
+        labels: {severity: warning}
+        annotations:
+          summary: "Many webhook deliveries failed signature verification"
+      - alert: AuthorizationDenialsSpike
+        expr: sum(increase(nexusflow_authorization_denials_total[15m])) > 50
+        labels: {severity: warning}
+        annotations:
+          summary: "Unusual number of permission denials - possible privilege probing"
+      - alert: AiToolCallsDenied
+        expr: sum(increase(nexusflow_ai_tool_calls_total{decision!="allowed"}[30m])) > 5
+        labels: {severity: warning}
+        annotations:
+          summary: "The AI model requested disallowed tools - possible prompt injection in collected data"

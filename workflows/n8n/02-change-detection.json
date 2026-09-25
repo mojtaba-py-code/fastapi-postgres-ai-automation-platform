@@ -1,0 +1,305 @@
+{
+  "name": "NexusFlow 2 - Change Detection",
+  "nodes": [
+    {
+      "id": "d748a362-a9e3-53b6-85c3-4d0ed1314b46",
+      "name": "Collection completed",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "73dac44f-4e3c-5369-9e65-1ecb2ae34909",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "nexusflow/collection-completed",
+        "authentication": "jwtAuth",
+        "responseMode": "onReceived",
+        "responseCode": 202,
+        "options": {}
+      },
+      "credentials": {
+        "jwtAuth": {
+          "id": "nexusflow-events-jwt",
+          "name": "NexusFlow events JWT"
+        }
+      }
+    },
+    {
+      "id": "c0361717-8b7c-54e3-aff7-e03dfbf2ddc2",
+      "name": "Succeeded?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        260,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "8ddffe6b-689a-5f56-ae83-dfd33a84b5b9",
+              "leftValue": "={{ $json.body.status }}",
+              "rightValue": "succeeded",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "e64349bc-97b1-524c-b423-66f84c9991af",
+      "name": "Detect changes",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        520,
+        -100
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://api-internal:8001/internal/v1/automation/detect",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          }
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ org_id: $('Collection completed').item.json.body.org_id, dataset_id: $('Collection completed').item.json.body.dataset_id }) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "nexusflow-token---change-detection",
+          "name": "NexusFlow token - change detection"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "c69f2a03-24b5-59cf-ad58-a45d58482c90",
+      "name": "Part of a workflow run?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        780,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "93547723-1e5f-5db9-b26f-f9389cc29d51",
+              "leftValue": "={{ $('Collection completed').item.json.body.workflow_run_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "b09195e2-944c-5b64-b1fc-6476336eaf84",
+      "name": "Advance workflow run",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1040,
+        -100
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'http://api-internal:8001/internal/v1/automation/organizations/' + $('Collection completed').item.json.body.org_id + '/workflow-runs/' + $('Collection completed').item.json.body.workflow_run_id + '/advance' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "nexusflow-token---change-detection",
+          "name": "NexusFlow token - change detection"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "622e0066-2076-5676-9e89-82faa9068c48",
+      "name": "Every 5 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "013aaf2b-f802-5275-882e-27cd36efdd1a",
+      "name": "Sweep pending versions",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        260,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://api-internal:8001/internal/v1/automation/detect/sweep",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          }
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ limit: 200 }) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "nexusflow-token---change-detection",
+          "name": "NexusFlow token - change detection"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    }
+  ],
+  "connections": {
+    "Collection completed": {
+      "main": [
+        [
+          {
+            "node": "Succeeded?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Succeeded?": {
+      "main": [
+        [
+          {
+            "node": "Detect changes",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Part of a workflow run?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Detect changes": {
+      "main": [
+        [
+          {
+            "node": "Part of a workflow run?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Part of a workflow run?": {
+      "main": [
+        [
+          {
+            "node": "Advance workflow run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Every 5 minutes": {
+      "main": [
+        [
+          {
+            "node": "Sweep pending versions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": false,
+    "saveExecutionProgress": false,
+    "executionTimeout": 300,
+    "timezone": "UTC",
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "REPLACE_WITH_FAILURE_RECOVERY_WORKFLOW_ID"
+  },
+  "active": false,
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": [
+    {
+      "name": "nexusflow"
+    }
+  ]
+}

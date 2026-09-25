@@ -1,0 +1,497 @@
+# NexusFlow AI - production-like single-host deployment.
+#
+#   python scripts/generate_secrets.py        # once: ./secrets (dir 0700)
+#   cp .env.example .env && $EDITOR .env      # domain, image tags, TLS paths
+#   docker compose up -d --build
+#
+# Security layout (see docs/DEPLOYMENT.md and docs/THREAT_MODEL.md):
+# * nginx is the ONLY container with published ports; the n8n editor and
+#   Grafana are published on 127.0.0.1 only (reach them through an SSH tunnel);
+# * every other network is `internal` (no route to the internet) except
+#   `egress`, joined only by the integrations worker, the sandbox and the
+#   headless browser; the pipeline worker and both APIs have no egress;
+# * all secrets are files under /run/secrets, never environment values;
+# * every container has no-new-privileges and a memory limit, and drops all
+#   capabilities; the platform's own containers (API, workers, sandbox,
+#   browser) and nginx, Redis, Prometheus, Alertmanager and Grafana also run
+#   read-only and as non-root. The exceptions are the upstream images that need
+#   them: PostgreSQL and ClamAV start as root with the few capabilities their
+#   entrypoints use to drop privileges; RabbitMQ, n8n and ClamAV keep a
+#   writable root filesystem.
+
+name: nexusflow
+
+x-hardened: &hardened
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  init: true
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options: {max-size: "10m", max-file: "5"}
+
+x-app: &app
+  <<: *hardened
+  image: ${NEXUSFLOW_IMAGE:-nexusflow-ai:latest}
+  build: {context: ., dockerfile: docker/Dockerfile}
+  tmpfs: ["/tmp:size=64m,mode=1777,noexec,nosuid,nodev"]
+  pids_limit: 256
+
+x-app-env: &app-env
+  NEXUSFLOW_APP__ENVIRONMENT: production
+  NEXUSFLOW_APP__PUBLIC_BASE_URL: https://${NEXUSFLOW_DOMAIN:?set NEXUSFLOW_DOMAIN in .env}
+  NEXUSFLOW_APP__ALLOWED_HOSTS: '["${NEXUSFLOW_DOMAIN}","localhost","api","api-internal"]'
+  NEXUSFLOW_APP__TRUSTED_PROXIES: '["${NEXUSFLOW_EDGE_SUBNET:-172.28.1.0/24}"]'
+  NEXUSFLOW_APP__CORS_ALLOWED_ORIGINS: ${NEXUSFLOW_CORS_ORIGINS:-[]}
+  NEXUSFLOW_APP__SIGNUP_ENABLED: ${NEXUSFLOW_SIGNUP_ENABLED:-}   # unset: sign-up open
+  NEXUSFLOW_DATABASE__URL_FILE: /run/secrets/db_app_url
+  NEXUSFLOW_REDIS__URL_FILE: /run/secrets/redis_app_url
+  NEXUSFLOW_BROKER__URL_FILE: /run/secrets/broker_platform_url
+  NEXUSFLOW_SECURITY__JWT_PRIVATE_KEY_FILE: /run/secrets/jwt_private_key
+  NEXUSFLOW_SECURITY__ENCRYPTION_KEYS_FILE: /run/secrets/encryption_keys
+  NEXUSFLOW_SECURITY__HMAC_PEPPER_FILE: /run/secrets/hmac_pepper
+  NEXUSFLOW_N8N__WEBHOOK_JWT_SECRET_FILE: /run/secrets/n8n_webhook_jwt_secret
+  # internal: the platform orchestrates itself (works out of the box). Switch to
+  # n8n after provisioning the workflows (workflows/n8n/README.md).
+  NEXUSFLOW_N8N__ORCHESTRATION: ${NEXUSFLOW_ORCHESTRATION:-internal}
+  # Only the integrations worker calls an AI provider (and holds its key).
+  NEXUSFLOW_AI__PROVIDER: offline
+  NEXUSFLOW_NOTIFICATIONS__SMTP_HOST: ${NEXUSFLOW_SMTP_HOST:-}
+  NEXUSFLOW_NOTIFICATIONS__SMTP_PORT: ${NEXUSFLOW_SMTP_PORT:-587}
+  NEXUSFLOW_NOTIFICATIONS__SMTP_TLS_MODE: ${NEXUSFLOW_SMTP_TLS_MODE:-starttls}
+  NEXUSFLOW_NOTIFICATIONS__SMTP_USERNAME: ${NEXUSFLOW_SMTP_USERNAME:-}
+  NEXUSFLOW_NOTIFICATIONS__SMTP_FROM: ${NEXUSFLOW_SMTP_FROM:-alerts@nexusflow.example.com}
+  NEXUSFLOW_NOTIFICATIONS__OPERATOR_EMAILS: ${NEXUSFLOW_OPERATOR_EMAILS:-[]}
+  NEXUSFLOW_OBSERVABILITY__LOG_FORMAT: json
+  NEXUSFLOW_OBSERVABILITY__OTLP_ENDPOINT: ${NEXUSFLOW_OTLP_ENDPOINT:-}
+  # Only the sandbox calls the renderer; the API needs to know that one exists.
+  NEXUSFLOW_SCRAPING__BROWSER_SERVICE_URL: http://renderer:8090
+
+x-app-secrets: &app-secrets
+  - db_app_url
+  - redis_app_url
+  - broker_platform_url
+  - jwt_private_key
+  - encryption_keys
+  - hmac_pepper
+  - n8n_webhook_jwt_secret
+
+services:
+  # ------------------------------------------------------------------ edge
+  nginx:
+    <<: *hardened
+    image: nginxinc/nginx-unprivileged:${NGINX_VERSION:-1.29-alpine@sha256:0c79d56aee561a1d81c63f00eee5fb5fe29279560cdc55e91425133104c7fbe6}
+    tmpfs: ["/tmp:size=32m,noexec,nosuid,nodev"]
+    ports:
+      - "80:8080"
+      - "443:8443"
+      - "127.0.0.1:5678:5678"   # n8n editor - SSH tunnel only
+      - "127.0.0.1:3000:3000"   # Grafana - SSH tunnel only
+    volumes:
+      - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./deploy/nginx/snippets:/etc/nginx/snippets:ro
+      - ${NEXUSFLOW_TLS_DIR:-./deploy/certs}:/etc/nginx/tls:ro
+    environment:
+      NEXUSFLOW_DOMAIN: ${NEXUSFLOW_DOMAIN}
+    depends_on:
+      api: {condition: service_healthy}
+    networks: [public, edge, admin]
+    mem_limit: 256m
+    pids_limit: 128
+
+  # ------------------------------------------------------------ platform
+  migrate:
+    <<: *app
+    command: ["nexusflow", "migrate"]
+    restart: "no"
+    environment:
+      <<: *app-env
+      NEXUSFLOW_DATABASE__MIGRATOR_URL_FILE: /run/secrets/db_migrator_url
+    secrets: [db_migrator_url, db_app_url, redis_app_url, broker_platform_url, jwt_private_key, encryption_keys, hmac_pepper, n8n_webhook_jwt_secret]
+    depends_on:
+      postgres: {condition: service_healthy}
+    networks: [backend]
+    mem_limit: 256m
+
+  api:
+    <<: *app
+    environment:
+      <<: *app-env
+      # Multipart uploads spool to disk, not to the small in-memory /tmp.
+      TMPDIR: /var/tmp/nexusflow
+      # clamav:3310 with `--profile av`; unset: uploads are not malware-scanned.
+      NEXUSFLOW_STORAGE__CLAMAV_ADDRESS: ${NEXUSFLOW_CLAMAV_ADDRESS:-}
+    secrets: *app-secrets
+    volumes:
+      - nexusflow-data:/var/lib/nexusflow
+      - api-tmp:/var/tmp/nexusflow
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      rabbitmq: {condition: service_healthy}
+    networks: [edge, backend, av]
+    mem_limit: 768m
+    cpus: 2
+
+  api-internal:
+    <<: *app
+    command: ["uvicorn", "nexusflow.apps.api.main:create_internal_app", "--factory",
+              "--host", "0.0.0.0", "--port", "8001", "--no-proxy-headers", "--no-server-header"]
+    environment:
+      <<: *app-env
+      NEXUSFLOW_HEALTHCHECK_PORT: "8001"
+      # Operators run the CLI here (it reaches n8n): the kill switch unpublishes
+      # n8n workflows with this key. Empty until created in n8n.
+      NEXUSFLOW_N8N__API_KEY_FILE: /run/secrets/n8n_api_key
+    secrets: [db_app_url, redis_app_url, broker_platform_url, jwt_private_key, encryption_keys,
+              hmac_pepper, n8n_webhook_jwt_secret, n8n_api_key]
+    volumes: ["nexusflow-data:/var/lib/nexusflow:ro"]   # streams upload input to the sandbox
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    networks: [backend, automation, sandbox_net]
+    mem_limit: 1g                                        # parses (bounded) sandbox results
+
+  worker-pipeline:
+    <<: *app
+    command: ["celery", "-A", "nexusflow.apps.workers.app:celery_app", "worker", "-Q", "pipeline",
+              "--concurrency", "4", "--without-gossip", "--without-mingle", "--loglevel", "INFO"]
+    environment:
+      <<: *app-env
+      NEXUSFLOW_HEALTHCHECK: heartbeat                 # see docker/healthcheck.py
+      NEXUSFLOW_HEARTBEAT_PATH: /tmp/nexusflow-heartbeat
+      NEXUSFLOW_OBSERVABILITY__WORKER_METRICS_PORT: "9101"
+      PROMETHEUS_MULTIPROC_DIR: /tmp
+    secrets: *app-secrets
+    volumes: ["nexusflow-data:/var/lib/nexusflow"]      # reports, purges
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    networks: [backend]                                 # no internet egress
+    mem_limit: 1g
+
+  worker-integrations:
+    <<: *app
+    command: ["celery", "-A", "nexusflow.apps.workers.app:celery_app", "worker", "-Q", "integrations",
+              "--concurrency", "4", "--without-gossip", "--without-mingle", "--loglevel", "INFO"]
+    environment:
+      <<: *app-env
+      NEXUSFLOW_HEALTHCHECK: heartbeat                 # see docker/healthcheck.py
+      NEXUSFLOW_HEARTBEAT_PATH: /tmp/nexusflow-heartbeat
+      NEXUSFLOW_OBSERVABILITY__WORKER_METRICS_PORT: "9101"
+      PROMETHEUS_MULTIPROC_DIR: /tmp
+      # The only process that calls an AI provider or an SMTP relay holds their
+      # credentials (empty secret files mean "not configured").
+      NEXUSFLOW_AI__PROVIDER: ${NEXUSFLOW_AI_PROVIDER:-offline}
+      NEXUSFLOW_AI__API_KEY_FILE: /run/secrets/ai_api_key
+      NEXUSFLOW_NOTIFICATIONS__SMTP_PASSWORD_FILE: /run/secrets/smtp_password
+    secrets: [db_app_url, redis_app_url, broker_platform_url, jwt_private_key, encryption_keys,
+              hmac_pepper, n8n_webhook_jwt_secret, ai_api_key, smtp_password]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    networks: [backend, automation, egress]             # APIs, AI, SMTP, Slack, n8n events
+    mem_limit: 1g
+
+  beat:
+    <<: *app
+    command: ["celery", "-A", "nexusflow.apps.workers.app:celery_app", "beat",
+              "--schedule", "/tmp/celerybeat-schedule", "--pidfile", "/tmp/celerybeat.pid",
+              "--loglevel", "INFO"]
+    environment:
+      <<: *app-env
+      NEXUSFLOW_HEALTHCHECK: heartbeat                 # see docker/healthcheck.py
+      NEXUSFLOW_HEARTBEAT_PATH: /tmp/nexusflow-heartbeat
+    secrets: *app-secrets
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    networks: [backend]
+    mem_limit: 256m
+
+  # ------------------------------------------------------------- sandbox
+  sandbox:
+    <<: *app
+    command: ["celery", "-A", "nexusflow.apps.workers.sandbox:celery_app", "worker", "-Q", "sandbox",
+              "--concurrency", "2", "--without-gossip", "--without-mingle", "--without-heartbeat",
+              "--loglevel", "INFO"]
+    tmpfs: ["/tmp:size=256m,mode=1777,noexec,nosuid,nodev"]
+    environment:
+      # Deliberately NO database, key material or provider credentials.
+      NEXUSFLOW_APP__ENVIRONMENT: production
+      NEXUSFLOW_HEALTHCHECK: heartbeat                 # see docker/healthcheck.py
+      NEXUSFLOW_HEARTBEAT_PATH: /tmp/nexusflow-heartbeat
+      NEXUSFLOW_BROKER__URL_FILE: /run/secrets/broker_sandbox_url
+      NEXUSFLOW_SANDBOX__REDIS_URL_FILE: /run/secrets/redis_sandbox_url
+      NEXUSFLOW_SANDBOX__GATEWAY_URL: http://api-internal:8001
+      NEXUSFLOW_SCRAPING__BROWSER_SERVICE_URL: http://renderer:8090   # render network only
+      NEXUSFLOW_SCRAPING__BROWSER_SERVICE_TOKEN_FILE: /run/secrets/browser_token
+      NEXUSFLOW_OBSERVABILITY__LOG_FORMAT: json
+    secrets: [broker_sandbox_url, redis_sandbox_url, browser_token]
+    depends_on:
+      api-internal: {condition: service_healthy}
+      redis-sandbox: {condition: service_healthy}
+    networks: [sandbox_net, render, egress]
+    mem_limit: 768m
+    cpus: 1.5
+    pids_limit: 128
+
+  browser:
+    <<: *hardened
+    image: ${NEXUSFLOW_BROWSER_IMAGE:-nexusflow-browser:latest}
+    build: {context: ., dockerfile: docker/Dockerfile.browser}
+    tmpfs:
+      - "/tmp:size=256m,mode=1777,nosuid,nodev"
+      - "/home/renderer:size=64m,uid=10002,gid=10002,mode=0700,nosuid,nodev"
+    shm_size: 512m
+    environment:
+      NEXUSFLOW_APP__ENVIRONMENT: production
+      NEXUSFLOW_BROWSER__TOKEN_FILE: /run/secrets/browser_token
+      NEXUSFLOW_OBSERVABILITY__LOG_FORMAT: json
+    secrets: [browser_token]
+    networks:
+      # "renderer" exists on the render network only, so the sandbox never
+      # resolves the browser's egress address (egress drops container traffic).
+      render: {aliases: [renderer]}
+      egress: {}
+    mem_limit: 1536m
+    cpus: 2
+    pids_limit: 512
+
+  # ---------------------------------------------------------- automation
+  n8n:
+    <<: *hardened
+    init: false                   # the image runs its own init (tini)
+    image: n8nio/n8n:${N8N_VERSION:-2.40.6@sha256:9c7871d5cc4fc2565bb905e4df5bf7d6a5a4bf2f4313fb99a2b3fa380f331d7c}   # keep current: n8n ships frequent security fixes
+    read_only: false              # n8n writes its settings/cache under /home/node
+    tmpfs: ["/tmp:size=64m,noexec,nosuid,nodev"]
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_DATABASE: n8n
+      DB_POSTGRESDB_USER: n8n
+      DB_POSTGRESDB_PASSWORD_FILE: /run/secrets/n8n_db_password
+      N8N_ENCRYPTION_KEY_FILE: /run/secrets/n8n_encryption_key
+      N8N_HOST: localhost
+      N8N_PROTOCOL: http
+      WEBHOOK_URL: http://n8n:5678/
+      N8N_SECURE_COOKIE: "true"
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "true"
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+      NODES_EXCLUDE: '["n8n-nodes-base.executeCommand","n8n-nodes-base.code","n8n-nodes-base.function","n8n-nodes-base.functionItem","n8n-nodes-base.ssh","n8n-nodes-base.ftp","n8n-nodes-base.readWriteFile","n8n-nodes-base.readBinaryFile","n8n-nodes-base.readBinaryFiles","n8n-nodes-base.writeBinaryFile","n8n-nodes-base.localFileTrigger"]'
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_TEMPLATES_ENABLED: "false"
+      N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
+      N8N_PERSONALIZATION_ENABLED: "false"
+      N8N_HIRING_BANNER_ENABLED: "false"
+      EXECUTIONS_DATA_PRUNE: "true"
+      EXECUTIONS_DATA_MAX_AGE: "168"
+      EXECUTIONS_DATA_SAVE_ON_SUCCESS: none
+      GENERIC_TIMEZONE: UTC
+    secrets: [n8n_db_password, n8n_encryption_key]
+    volumes: ["n8n-data:/home/node/.n8n"]
+    depends_on:
+      postgres: {condition: service_healthy}
+    networks: [automation, n8n_data, admin]   # no internet egress
+    mem_limit: 1g
+
+  # ------------------------------------------------------------- data
+  postgres:
+    <<: *hardened
+    image: postgres:${POSTGRES_VERSION:-17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24}
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]   # entrypoint drops to "postgres"
+    tmpfs: ["/tmp:size=64m", "/var/run/postgresql:size=8m"]
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=scram-sha-256"
+    command: ["postgres",
+              "-c", "password_encryption=scram-sha-256",
+              "-c", "log_connections=on", "-c", "log_disconnections=on",
+              "-c", "log_min_duration_statement=1000",
+              "-c", "shared_preload_libraries=pg_stat_statements",
+              "-c", "max_connections=200"]
+    secrets: [postgres_password, db_app_password, db_migrator_password, n8n_db_password]
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ./deploy/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # TCP, not the socket: during initdb the temporary server listens on the
+      # socket only, and must not be reported healthy to the migrate job.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [backend, n8n_data]
+    mem_limit: 1g
+    shm_size: 256m
+
+  redis:
+    <<: *hardened
+    image: redis:${REDIS_VERSION:-7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499}
+    user: "999:1000"
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    volumes:
+      - ./deploy/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+      - redis-data:/data
+    secrets: [redis_users_acl]
+    healthcheck:
+      # Unauthenticated PING answers NOAUTH: proves liveness without a password.
+      test: ["CMD-SHELL", "redis-cli -h 127.0.0.1 ping 2>&1 | grep -Eq 'PONG|NOAUTH'"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    networks: [backend]                 # the sandbox has its own instance below
+    mem_limit: 384m
+
+  redis-sandbox:
+    # Disposable robots.txt / host-throttle cache for the sandbox pool only:
+    # no persistence, LRU eviction, nothing the platform depends on.
+    <<: *hardened
+    image: redis:${REDIS_VERSION:-7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499}
+    user: "999:1000"
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    volumes:
+      - ./deploy/redis/redis-sandbox.conf:/usr/local/etc/redis/redis.conf:ro
+    secrets: [redis_sandbox_acl]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -h 127.0.0.1 ping 2>&1 | grep -Eq 'PONG|NOAUTH'"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    networks: [sandbox_net]
+    mem_limit: 128m
+
+  rabbitmq:
+    <<: *hardened
+    image: rabbitmq:${RABBITMQ_VERSION:-4.1-alpine@sha256:8146e69328150e9162c7ca5bfc4b29de4df2d92179ad84d0cc29e55eb27953b5}
+    # Start as the image's own user: its entrypoint only switches users when it
+    # runs as root, which would need SETUID/SETGID (all capabilities are dropped).
+    user: rabbitmq
+    # RabbitMQ keeps its data under rabbit@<hostname>: a fixed name, or every
+    # recreated container would start empty and strand the queued jobs.
+    hostname: rabbitmq
+    read_only: false              # Erlang cookie / mnesia live in the volume
+    environment:
+      RABBITMQ_CONFIG_FILES: /etc/rabbitmq/conf.d
+    volumes:
+      - ./deploy/rabbitmq/rabbitmq.conf:/etc/rabbitmq/conf.d/10-nexusflow.conf:ro
+      - ./deploy/rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+      - rabbitmq-data:/var/lib/rabbitmq
+    secrets: [rabbitmq_definitions]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+    networks: [backend, sandbox_net]
+    mem_limit: 768m
+
+  clamav:
+    <<: *hardened
+    profiles: ["av"]              # enable: docker compose --profile av up -d
+    image: clamav/clamav:${CLAMAV_VERSION:-1.4@sha256:a5f03c12a79dbe9f6d8a527b6bb1ea053fa8dd061d3738a26897f055ee2d9303}
+    read_only: false
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]   # clamd/freshclam drop to "clamav"
+    # Scans hostile uploads: reachable only from the API (av), never from the
+    # database/broker network; egress only for signature updates.
+    networks: [av, egress]
+    mem_limit: 2g
+
+  # ---------------------------------------------------------- monitoring
+  prometheus:
+    <<: *hardened
+    image: prom/prometheus:${PROMETHEUS_VERSION:-v3.5.0@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996}
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=15d"]
+    volumes:
+      - ./deploy/prometheus:/etc/prometheus:ro
+      - prometheus-data:/prometheus
+    networks: [backend, monitoring]
+    mem_limit: 768m
+
+  alertmanager:
+    <<: *hardened
+    image: prom/alertmanager:${ALERTMANAGER_VERSION:-v0.34.1@sha256:e9733bafb1bdef9b00e25a21f8f99dc26a22224bf16641ad754d1649f4c3357a}
+    command: ["--config.file=/etc/alertmanager/alertmanager.yml", "--storage.path=/alertmanager"]
+    volumes:
+      - ./deploy/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    # Delivers directly to the on-call receivers (SMTP/PagerDuty/Slack), hence egress.
+    networks: [monitoring, egress]
+    mem_limit: 128m
+
+  grafana:
+    <<: *hardened
+    image: grafana/grafana-oss:${GRAFANA_VERSION:-12.1.0@sha256:6ac590e7cabc2fbe8d7b8fc1ce9c9f0582177b334e0df9c927ebd9670469440f}
+    tmpfs: ["/tmp:size=32m"]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_password
+      GF_SECURITY_DISABLE_GRAVATAR: "true"
+      GF_SECURITY_COOKIE_SECURE: "true"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_SERVER_ROOT_URL: http://localhost:3000/
+      GF_LOG_MODE: console                      # read-only filesystem: no log file
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"    # no internet access to fetch plugins
+    secrets: [grafana_admin_password]
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    networks: [monitoring, admin]
+    mem_limit: 512m
+
+networks:
+  public: {}
+  edge:
+    internal: true
+    # The only network the API trusts forwarded headers from. Move it with
+    # NEXUSFLOW_EDGE_SUBNET if it overlaps a network on the host.
+    ipam: {config: [{subnet: "${NEXUSFLOW_EDGE_SUBNET:-172.28.1.0/24}"}]}
+  admin: {internal: true}
+  backend: {internal: true}
+  automation: {internal: true}
+  n8n_data: {internal: true}
+  sandbox_net: {internal: true}
+  render: {internal: true}
+  monitoring: {internal: true}
+  av: {internal: true}
+  egress:
+    # Internet access only - containers on it cannot talk to each other
+    # (sandbox, browser, integrations worker and ClamAV stay isolated).
+    driver_opts:
+      com.docker.network.bridge.enable_icc: "false"
+
+volumes:
+  nexusflow-data:
+  api-tmp:
+  pg-data:
+  redis-data:
+  rabbitmq-data:
+  n8n-data:
+  prometheus-data:
+  alertmanager-data:
+  grafana-data:
+
+secrets:
+  postgres_password: {file: ./secrets/postgres_password}
+  db_app_password: {file: ./secrets/db_app_password}
+  db_migrator_password: {file: ./secrets/db_migrator_password}
+  n8n_db_password: {file: ./secrets/n8n_db_password}
+  db_app_url: {file: ./secrets/db_app_url}
+  db_migrator_url: {file: ./secrets/db_migrator_url}
+  redis_users_acl: {file: ./secrets/redis_users_acl}
+  redis_app_url: {file: ./secrets/redis_app_url}
+  redis_sandbox_url: {file: ./secrets/redis_sandbox_url}
+  redis_sandbox_acl: {file: ./secrets/redis_sandbox_acl}
+  rabbitmq_definitions: {file: ./secrets/rabbitmq_definitions}
+  broker_platform_url: {file: ./secrets/broker_platform_url}
+  broker_sandbox_url: {file: ./secrets/broker_sandbox_url}
+  jwt_private_key: {file: ./secrets/jwt_private_key}
+  encryption_keys: {file: ./secrets/encryption_keys}
+  hmac_pepper: {file: ./secrets/hmac_pepper}
+  n8n_webhook_jwt_secret: {file: ./secrets/n8n_webhook_jwt_secret}
+  n8n_encryption_key: {file: ./secrets/n8n_encryption_key}
+  browser_token: {file: ./secrets/browser_token}
+  grafana_admin_password: {file: ./secrets/grafana_admin_password}
+  # Optional, created empty by generate_secrets.py and filled in when needed:
+  n8n_api_key: {file: ./secrets/n8n_api_key}
+  smtp_password: {file: ./secrets/smtp_password}
+  ai_api_key: {file: ./secrets/ai_api_key}

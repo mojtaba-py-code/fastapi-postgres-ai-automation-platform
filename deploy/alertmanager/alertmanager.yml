@@ -1,0 +1,38 @@
+# Alert routing for the Prometheus rules in deploy/prometheus/alerts.yml.
+#
+# EDIT THE RECEIVER BEFORE PRODUCTION (see docs/DEPLOYMENT.md, "Monitoring"):
+# point it at your SMTP relay, PagerDuty, Opsgenie or Slack. Alerts are delivered
+# by Alertmanager directly - never through the platform being monitored, which
+# may be the thing that is down.
+# Reference: https://prometheus.io/docs/alerting/latest/configuration/
+
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: operators
+  group_by: [alertname, service]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - matchers: ['severity="critical"']
+      receiver: operators
+      repeat_interval: 1h
+
+receivers:
+  - name: operators
+    email_configs:
+      - to: ops@nexusflow.example.com
+        from: alerts@nexusflow.example.com
+        smarthost: smtp.example.com:587
+        require_tls: true
+        # auth_username: alerts@nexusflow.example.com
+        # auth_password_file: /etc/alertmanager/secrets/smtp_password
+        send_resolved: true
+
+# A critical alert silences the warnings it explains (same alert and service).
+inhibit_rules:
+  - source_matchers: ['severity="critical"']
+    target_matchers: ['severity="warning"']
+    equal: [alertname, service]

@@ -1,0 +1,102 @@
+"""Repository and service ports for the identity context."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Protocol
+from uuid import UUID
+
+from nexusflow.core.pagination import Page, PageRequest
+from nexusflow.domain.identity.model import (
+    ApiKey,
+    MfaRecoveryCode,
+    PasswordResetToken,
+    RefreshToken,
+    ServiceAccount,
+    User,
+    UserSession,
+)
+
+
+class UserRepository(Protocol):
+    async def get(self, user_id: UUID) -> User | None: ...
+
+    async def get_for_update(self, user_id: UUID) -> User | None: ...
+
+    async def get_by_email(self, email: str, *, for_update: bool = False) -> User | None: ...
+
+    async def add(self, user: User) -> None: ...
+
+
+class SessionRepository(Protocol):
+    async def get(self, session_id: UUID) -> UserSession | None: ...
+
+    async def get_for_update(self, session_id: UUID) -> UserSession | None: ...
+
+    async def add(self, session: UserSession) -> None: ...
+
+    async def list_recent_for_user(
+        self, user_id: UUID, *, since: datetime
+    ) -> list[UserSession]: ...
+
+    async def revoke_all_for_user(
+        self, user_id: UUID, *, now: datetime, reason: str, except_session: UUID | None = None
+    ) -> int: ...
+
+
+class RefreshTokenRepository(Protocol):
+    async def add(self, token: RefreshToken) -> None: ...
+
+    async def get_by_hash_for_update(self, token_hash: str) -> RefreshToken | None: ...
+
+
+class PasswordResetRepository(Protocol):
+    async def add(self, token: PasswordResetToken) -> None: ...
+
+    async def get(self, token_id: UUID) -> PasswordResetToken | None: ...
+
+    async def get_by_hash_for_update(self, token_hash: str) -> PasswordResetToken | None: ...
+
+    async def invalidate_for_user(self, user_id: UUID, *, now: datetime) -> None: ...
+
+
+class RecoveryCodeRepository(Protocol):
+    async def replace_for_user(self, user_id: UUID, codes: list[MfaRecoveryCode]) -> None: ...
+
+    async def find_unused(self, user_id: UUID, code_hash: str) -> MfaRecoveryCode | None: ...
+
+    async def delete_for_user(self, user_id: UUID) -> None: ...
+
+
+class ApiKeyRepository(Protocol):
+    async def add(self, key: ApiKey) -> None: ...
+
+    async def get(self, org_id: UUID, key_id: UUID) -> ApiKey | None: ...
+
+    async def find_by_prefix(self, prefix: str) -> ApiKey | None: ...
+
+    async def list_page(self, org_id: UUID, page: PageRequest) -> Page[ApiKey]: ...
+
+    async def revoke_created_by(self, org_id: UUID, user_id: UUID, *, now: datetime) -> int:
+        """Revoke every live key a member created in this org; returns the count."""
+        ...
+
+
+class ServiceAccountRepository(Protocol):
+    async def add(self, account: ServiceAccount) -> None: ...
+
+    async def find_by_prefix(self, prefix: str) -> ServiceAccount | None: ...
+
+    async def get_by_workflow_key(self, workflow_key: str) -> ServiceAccount | None: ...
+
+    async def list_all(self) -> list[ServiceAccount]: ...
+
+
+class TotpVerifier(Protocol):
+    def generate_secret(self) -> str: ...
+
+    def provisioning_uri(self, secret: str, *, account_name: str, issuer: str) -> str: ...
+
+    def verify(
+        self, secret: str, code: str, *, now: datetime, last_used_step: int | None
+    ) -> int | None: ...

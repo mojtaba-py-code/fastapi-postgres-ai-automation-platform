@@ -1,0 +1,100 @@
+{
+  "name": "NexusFlow 4 - Alerting",
+  "nodes": [
+    {
+      "id": "131b2072-8a1a-5e2d-8ba8-70907c5e1e69",
+      "name": "Changes detected",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "2049c809-1cee-5dd9-a1aa-75147956ea23",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "nexusflow/changes-detected/alerting",
+        "authentication": "jwtAuth",
+        "responseMode": "onReceived",
+        "responseCode": 202,
+        "options": {}
+      },
+      "credentials": {
+        "jwtAuth": {
+          "id": "nexusflow-events-jwt",
+          "name": "NexusFlow events JWT"
+        }
+      }
+    },
+    {
+      "id": "f1271287-1209-54bd-9297-0d3e604443d2",
+      "name": "Evaluate alert rules",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        260,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://api-internal:8001/internal/v1/automation/alerts/evaluate",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          }
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ org_id: $json.body.org_id }) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "nexusflow-token---alerting",
+          "name": "NexusFlow token - alerting"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    }
+  ],
+  "connections": {
+    "Changes detected": {
+      "main": [
+        [
+          {
+            "node": "Evaluate alert rules",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": false,
+    "saveExecutionProgress": false,
+    "executionTimeout": 300,
+    "timezone": "UTC",
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "REPLACE_WITH_FAILURE_RECOVERY_WORKFLOW_ID"
+  },
+  "active": false,
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": [
+    {
+      "name": "nexusflow"
+    }
+  ]
+}

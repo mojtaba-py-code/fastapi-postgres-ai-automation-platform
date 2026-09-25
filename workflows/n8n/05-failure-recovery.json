@@ -1,0 +1,362 @@
+{
+  "name": "NexusFlow 5 - Failure Recovery",
+  "nodes": [
+    {
+      "id": "00440186-3f3b-5035-b7dd-b42510768e8e",
+      "name": "A workflow failed",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "ee3ff658-6c39-5d24-ac01-87d17b3d7eeb",
+      "name": "Record failure",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        260,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://api-internal:8001/internal/v1/automation/failures",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          }
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ workflow: String($json.workflow.name || 'unknown').replace(/[^A-Za-z0-9 ._:()-]/g, '').slice(0, 80), node: String($json.execution.lastNodeExecuted || 'unknown').replace(/[^A-Za-z0-9 ._:()-]/g, '').slice(0, 80), execution_id: String($json.execution.id || 'unknown').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64), retry_of: $json.execution.retryOf ? String($json.execution.retryOf).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64) : null, error_message: String(($json.execution.error || {}).message || '').slice(0, 4000), idempotent: true }) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "nexusflow-token---failure-recovery",
+          "name": "NexusFlow token - failure recovery"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "46158d96-9f9e-59c6-91d3-e205f519d36b",
+      "name": "Retry allowed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        520,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c9d5b38a-1cf9-528a-a341-8d3b3e829742",
+              "leftValue": "={{ $json.retry }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "44ca62bd-036e-5af1-b038-8103644fcf0c",
+      "name": "Exponential backoff",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        780,
+        -100
+      ],
+      "webhookId": "13232fbc-bb78-5bbc-936a-4e63b51e5528",
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": "={{ $('Record failure').item.json.delay_seconds }}",
+        "unit": "seconds"
+      }
+    },
+    {
+      "id": "e0bf54bf-3ec6-5ddb-a723-015a09508815",
+      "name": "Retry the execution",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1040,
+        -100
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'http://127.0.0.1:5678/api/v1/executions/' + String($('A workflow failed').item.json.execution.id).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64) + '/retry' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          }
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ loadWorkflow: true }) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "nexusflow-n8n-api-key",
+          "name": "NexusFlow n8n API key"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "6723dd5b-03e5-5d42-89b6-76da9b34425d",
+      "name": "Page operators (n8n)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        780,
+        100
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://api-internal:8001/internal/v1/automation/operator-alerts",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          }
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ severity: 'warning', summary: ('n8n workflow ' + String($('A workflow failed').item.json.workflow.name) + ' failed; dead letter ' + String($('Record failure').item.json.dead_letter_id)).slice(0, 500) }) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "nexusflow-token---failure-recovery",
+          "name": "NexusFlow token - failure recovery"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "96cd92e5-e1d9-5dde-8d75-80f37de6f1d2",
+      "name": "Platform job failed",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "88f32bf3-48e3-5c5e-976e-98277aae3fc3",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "nexusflow/job-failed",
+        "authentication": "jwtAuth",
+        "responseMode": "onReceived",
+        "responseCode": 202,
+        "options": {}
+      },
+      "credentials": {
+        "jwtAuth": {
+          "id": "nexusflow-events-jwt",
+          "name": "NexusFlow events JWT"
+        }
+      }
+    },
+    {
+      "id": "f3ba7511-053b-5b58-855e-f9da5c595d25",
+      "name": "Not a paging failure?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        260,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "299d1117-c5eb-5241-b296-7050da3681fe",
+              "leftValue": "={{ !['nexusflow.operators.alert', 'nexusflow.events.route', 'nexusflow.events.forward'].includes(String($json.body.task)) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "206e7233-c518-5638-aa27-78959c128100",
+      "name": "Page operators (platform)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        520,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://api-internal:8001/internal/v1/automation/operator-alerts",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          }
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ severity: 'warning', summary: ('Platform job ' + String($('Platform job failed').item.json.body.task) + ' failed: ' + String($('Platform job failed').item.json.body.error_code) + ' (dead letter ' + String($('Platform job failed').item.json.body.dead_letter_id) + ')').slice(0, 500) }) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "nexusflow-token---failure-recovery",
+          "name": "NexusFlow token - failure recovery"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    }
+  ],
+  "connections": {
+    "A workflow failed": {
+      "main": [
+        [
+          {
+            "node": "Record failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record failure": {
+      "main": [
+        [
+          {
+            "node": "Retry allowed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Retry allowed?": {
+      "main": [
+        [
+          {
+            "node": "Exponential backoff",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Page operators (n8n)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Exponential backoff": {
+      "main": [
+        [
+          {
+            "node": "Retry the execution",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Platform job failed": {
+      "main": [
+        [
+          {
+            "node": "Not a paging failure?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Not a paging failure?": {
+      "main": [
+        [
+          {
+            "node": "Page operators (platform)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": false,
+    "saveExecutionProgress": false,
+    "executionTimeout": 300,
+    "timezone": "UTC",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "active": false,
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": [
+    {
+      "name": "nexusflow"
+    }
+  ]
+}

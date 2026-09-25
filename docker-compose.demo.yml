@@ -1,0 +1,56 @@
+# Demo / evaluation overlay - NOT for production.
+#
+#   make secrets dev-certs     # once: ./secrets and a local development CA + certificate
+#   make demo-up               # this file on top of docker-compose.yml
+#   make demo                  # scripted walkthrough (scripts/demo.py)
+#
+# Adds Mailpit, a local mail catcher, so invitations, password resets, alert
+# e-mails and operator pages are visible at http://127.0.0.1:8025 instead of
+# failing for lack of an SMTP relay. The platform still speaks STARTTLS with
+# certificate validation: Mailpit presents the development certificate and only
+# the demo stack trusts the development CA.
+
+services:
+  mailpit:
+    user: "65534:65534"                 # the image would run as root
+    image: axllent/mailpit:${MAILPIT_VERSION:-v1.31.2@sha256:74d609a42ec279aa63c6b4622a6fa9b5408d1ad5b1d76a1c4be40a265ce0863d}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    tmpfs: ["/tmp:size=64m,noexec,nosuid,nodev"]
+    environment:
+      MP_SMTP_TLS_CERT: /certs/fullchain.pem
+      MP_SMTP_TLS_KEY: /certs/privkey.pem
+      MP_SMTP_REQUIRE_STARTTLS: "true"
+      MP_SMTP_AUTH_ACCEPT_ANY: "true"
+      MP_MAX_MESSAGES: "500"
+    volumes: ["${NEXUSFLOW_TLS_DIR:-./deploy/certs}:/certs:ro"]
+    ports: ["127.0.0.1:8025:8025"]      # web UI on the presenter's machine only
+    networks: [backend, public]         # SMTP for the workers; "public" only to publish the UI port
+    mem_limit: 128m
+    pids_limit: 64
+
+  api:
+    environment:
+      # Rehearsals register a new organization on every run (make demo, make
+      # e2e) from the same address; the production limit is 10 an hour.
+      NEXUSFLOW_RATE_LIMITS__RULES: '{"auth.register": {"limit": 200, "period_seconds": 3600, "fail_closed": true}}'
+
+  worker-integrations:
+    environment:
+      NEXUSFLOW_NOTIFICATIONS__SMTP_HOST: mailpit
+      NEXUSFLOW_NOTIFICATIONS__SMTP_PORT: "1025"
+      NEXUSFLOW_NOTIFICATIONS__SMTP_TLS_MODE: starttls
+      NEXUSFLOW_NOTIFICATIONS__SMTP_CA_BUNDLE: /etc/nexusflow/dev-ca.pem
+      NEXUSFLOW_NOTIFICATIONS__SMTP_FROM: alerts@nexusflow.example.com
+      NEXUSFLOW_NOTIFICATIONS__OPERATOR_EMAILS: '["ops@nexusflow.example.com"]'
+    volumes: ["${NEXUSFLOW_TLS_DIR:-./deploy/certs}/dev-ca.pem:/etc/nexusflow/dev-ca.pem:ro"]
+    depends_on:
+      mailpit: {condition: service_started}
+
+  alertmanager:
+    volumes:
+      - ./deploy/alertmanager/alertmanager.demo.yml:/etc/alertmanager/alertmanager.yml:ro
+      - ${NEXUSFLOW_TLS_DIR:-./deploy/certs}/dev-ca.pem:/certs/dev-ca.pem:ro
+    networks: [monitoring, egress, backend]   # backend: reaches Mailpit

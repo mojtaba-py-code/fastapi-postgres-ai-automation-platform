@@ -1,0 +1,144 @@
+{
+  "name": "NexusFlow 3 - AI Analysis",
+  "nodes": [
+    {
+      "id": "3f3092da-ac73-53c0-a1eb-903a86c265b6",
+      "name": "Changes detected",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "c5e643c8-d2fc-5121-ba0c-899c3a673f61",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "nexusflow/changes-detected/analysis",
+        "authentication": "jwtAuth",
+        "responseMode": "onReceived",
+        "responseCode": 202,
+        "options": {}
+      },
+      "credentials": {
+        "jwtAuth": {
+          "id": "nexusflow-events-jwt",
+          "name": "NexusFlow events JWT"
+        }
+      }
+    },
+    {
+      "id": "93c21320-c5cb-52a0-a996-d7df0778b827",
+      "name": "Analysis requested?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        260,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "3294f041-7ad7-56f7-b918-89520f4cc115",
+              "leftValue": "={{ $json.body.analyze }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "24c27133-1057-5dc0-acee-d60ae8e70349",
+      "name": "Queue analysis",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        520,
+        -100
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://api-internal:8001/internal/v1/automation/analyze",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          }
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ org_id: $('Changes detected').item.json.body.org_id, dataset_id: $('Changes detected').item.json.body.dataset_id }) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "nexusflow-token---ai-analysis",
+          "name": "NexusFlow token - ai analysis"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    }
+  ],
+  "connections": {
+    "Changes detected": {
+      "main": [
+        [
+          {
+            "node": "Analysis requested?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analysis requested?": {
+      "main": [
+        [
+          {
+            "node": "Queue analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": false,
+    "saveExecutionProgress": false,
+    "executionTimeout": 300,
+    "timezone": "UTC",
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "REPLACE_WITH_FAILURE_RECOVERY_WORKFLOW_ID"
+  },
+  "active": false,
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": [
+    {
+      "name": "nexusflow"
+    }
+  ]
+}

@@ -1,0 +1,204 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_FROZEN: "1"
+  PYTHON_VERSION: "3.12"
+
+# Third-party actions are pinned to full commit SHAs (a moved tag cannot change
+# what runs here); Dependabot proposes updates, keeping the version comments.
+jobs:
+  lint:
+    name: Lint, types, architecture
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with: {persist-credentials: false}
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with: {python-version: "${{ env.PYTHON_VERSION }}", enable-cache: true}
+      - run: uv sync --group dev
+      - run: uv run ruff check src tests scripts migrations
+      - run: uv run ruff format --check src tests scripts migrations
+      - run: uv run mypy src
+      - run: uv run lint-imports
+      - name: Configuration reference is current
+        run: uv run python scripts/gen_config_reference.py --check
+      - name: Every container image is pinned to a digest
+        run: uv run python scripts/pin_images.py --check
+
+  security:
+    name: Security scanning
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with: {persist-credentials: false, fetch-depth: 0}
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with: {python-version: "${{ env.PYTHON_VERSION }}", enable-cache: true}
+      - run: uv sync --group dev
+      - name: Bandit (SAST)
+        run: uv run bandit -c pyproject.toml -r src scripts -q
+      - name: pip-audit (known vulnerabilities, hash-pinned)
+        run: |
+          uv export --no-dev --all-extras --no-emit-project --format requirements-txt -o requirements.lock
+          uv run pip-audit -r requirements.lock --require-hashes --disable-pip
+      - name: n8n workflow security lint
+        run: uv run python scripts/validate_n8n_workflows.py
+      - name: Semgrep
+        run: |
+          pipx run --spec semgrep==1.178.0 semgrep scan --error --metrics=off \
+            --config p/python --config p/fastapi --config p/secrets --config p/dockerfile src docker
+      - name: Gitleaks (full history)
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e  # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+          GITLEAKS_ENABLE_COMMENTS: "false"  # the token is read-only by design
+
+  test:
+    name: Tests (unit, integration, security)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+        env:
+          POSTGRES_PASSWORD: ci-only-password
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      NEXUSFLOW_TEST_DATABASE_URL: postgresql://postgres:ci-only-password@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with: {persist-credentials: false}
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with: {python-version: "${{ env.PYTHON_VERSION }}", enable-cache: true}
+      - run: uv sync --group dev
+      - run: uv run pytest --cov=nexusflow --cov-report=xml --cov-report=term
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with: {name: coverage, path: coverage.xml, retention-days: 7}
+
+  images:
+    name: Container images (build, scan, SBOM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    needs: [lint, security, test]
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - {name: nexusflow-ai, dockerfile: docker/Dockerfile}
+          - {name: nexusflow-browser, dockerfile: docker/Dockerfile.browser}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with: {persist-credentials: false}
+      - name: Build ${{ matrix.image.name }}
+        run: docker build -f ${{ matrix.image.dockerfile }} -t ${{ matrix.image.name }}:ci .
+      - name: Trivy - fail on fixable HIGH/CRITICAL
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          image-ref: ${{ matrix.image.name }}:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: SBOM (CycloneDX)
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26  # v0.24.2
+        with:
+          image: ${{ matrix.image.name }}:ci
+          format: cyclonedx-json
+          output-file: ${{ matrix.image.name }}.cdx.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sbom-${{ matrix.image.name }}
+          path: ${{ matrix.image.name }}.cdx.json
+          retention-days: 30
+
+  e2e:
+    name: End-to-end (full stack behind the TLS edge)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: [images]
+    env:
+      COMPOSE: docker compose -f docker-compose.yml -f docker-compose.demo.yml
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with: {persist-credentials: false}
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with: {python-version: "${{ env.PYTHON_VERSION }}", enable-cache: true}
+      - run: uv sync --group dev
+      - name: Secrets, development TLS certificate and environment (CI only)
+        run: |
+          uv run python scripts/generate_secrets.py
+          uv run python scripts/dev_certs.py --domain localhost
+          sed 's/^NEXUSFLOW_DOMAIN=.*/NEXUSFLOW_DOMAIN=localhost/' .env.example > .env
+      - name: Compose file is valid
+        run: $COMPOSE config --quiet
+      - name: Start the stack
+        run: $COMPOSE up -d --build
+      - name: Wait until the platform is ready behind the edge
+        run: |
+          for attempt in $(seq 1 90); do
+            if curl -fsS --cacert deploy/certs/dev-ca.pem https://localhost/health/ready; then exit 0; fi
+            sleep 5
+          done
+          echo "the platform did not become ready" >&2
+          exit 1
+      - name: End-to-end tests
+        env:
+          NEXUSFLOW_E2E_BASE_URL: https://localhost
+          NEXUSFLOW_E2E_CA_BUNDLE: deploy/certs/dev-ca.pem
+          NEXUSFLOW_E2E_MAILPIT_URL: http://127.0.0.1:8025
+        run: uv run pytest tests/e2e -m e2e
+      - name: Back up, change the data, restore, verify
+        env:
+          BACKUP_AGE_IDENTITY: ${{ runner.temp }}/backup-age.key
+          BACKUPS: ${{ runner.temp }}/backups
+        run: |
+          sudo apt-get install -y --no-install-recommends age > /dev/null
+          age-keygen -o "$BACKUP_AGE_IDENTITY" 2> /dev/null
+          BACKUP_AGE_RECIPIENT="$(age-keygen -y "$BACKUP_AGE_IDENTITY")"
+          export BACKUP_AGE_RECIPIENT
+          sql() {
+            docker compose exec -T postgres sh -c \
+              'PGPASSWORD="$(cat /run/secrets/postgres_password)" exec psql -U postgres -d nexusflow -Atc "$1"' sh "$1"
+          }
+          state() { echo "$(sql 'SELECT count(*) FROM organizations')/$(sql 'SELECT count(*) FROM audit_logs')"; }
+          before="$(state)"
+          scripts/backup.sh "$BACKUPS"
+          # A change after the backup, which the restore must undo.
+          curl -fsS --cacert deploy/certs/dev-ca.pem -H 'Content-Type: application/json' \
+            -d '{"email": "after-backup@example.com", "password": "Str0ng-and-unique-passphrase!",
+                 "full_name": "After Backup", "organization_name": "After Backup Ltd"}' \
+            https://localhost/api/v1/auth/register > /dev/null
+          test "$(state)" != "$before"
+          echo RESTORE | scripts/restore.sh "$(ls -d "$BACKUPS"/*/)"
+          test "$(state)" = "$before"
+          $COMPOSE up -d
+          for attempt in $(seq 1 60); do
+            if curl -fsS --cacert deploy/certs/dev-ca.pem https://localhost/health/ready; then break; fi
+            sleep 5
+          done
+          curl -fsS --cacert deploy/certs/dev-ca.pem https://localhost/health/ready
+          $COMPOSE run --rm --no-deps api nexusflow audit verify
+      - name: Service status and logs
+        if: failure()
+        run: |
+          $COMPOSE ps --all
+          $COMPOSE logs --no-color --tail=200
+      - name: Stop the stack
+        if: always()
+        run: $COMPOSE down -v

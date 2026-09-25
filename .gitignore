@@ -1,0 +1,51 @@
+# --- secrets & local configuration (never commit) ---
+.env
+.env.*
+!.env.example
+secrets/
+deploy/certs/*.pem
+deploy/certs/*.key
+*.pem
+*.key
+*.p12
+*.pfx
+
+# --- python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.import_linter_cache/
+.hypothesis/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# --- runtime data ---
+var/
+var-test/
+*.log
+celerybeat-schedule*
+demo-output/
+backups/
+requirements.lock
+
+# --- local tool settings ---
+.claude/
+
+# --- editors / os ---
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# --- private working notes ---
+prompt.txt

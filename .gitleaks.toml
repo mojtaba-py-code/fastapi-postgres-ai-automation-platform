@@ -1,0 +1,23 @@
+title = "NexusFlow AI secret scanning"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "nexusflow-api-key"
+description = "NexusFlow tenant API key or n8n service token"
+regex = '''\bnx[fs]_[a-z2-7]{12}_[A-Za-z0-9_-]{43}[A-Za-z0-9_-]{6}\b'''
+keywords = ["nxf_", "nxs_"]
+
+[[rules]]
+id = "nexusflow-webhook-secret"
+description = "NexusFlow inbound webhook signing secret"
+regex = '''\bwhsec_[A-Za-z0-9_-]{40,}\b'''
+keywords = ["whsec_"]
+
+[allowlist]
+description = "Test fixtures with deliberately fake or short values"
+paths = [
+  '''tests/.*''',
+  '''uv\.lock''',
+]

@@ -1,0 +1,26 @@
+# Build context is an allowlist in spirit: secrets, VCS data, caches and tests
+# never enter an image.
+.git
+.github
+.env
+.env.*
+secrets
+deploy/certs
+**/__pycache__
+**/*.pyc
+.venv
+venv
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.import_linter_cache
+.hypothesis
+htmlcov
+coverage.xml
+var
+var-test
+tests
+docs
+workflows
+prompt.txt
+*.log

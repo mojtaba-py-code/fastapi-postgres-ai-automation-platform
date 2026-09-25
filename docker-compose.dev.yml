@@ -1,0 +1,74 @@
+# Local development infrastructure only - the application runs on the host:
+#
+#   python scripts/generate_secrets.py
+#   docker compose -f docker-compose.dev.yml up -d
+#   source .env.dev  (see .env.example, "local development")
+#   uv run nexusflow migrate
+#   uv run uvicorn nexusflow.apps.api.main:create_public_app --factory --reload
+#
+# Every port is bound to 127.0.0.1. Never use this file for a server.
+
+name: nexusflow-dev
+
+services:
+  postgres:
+    image: postgres:${POSTGRES_VERSION:-17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24}
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=scram-sha-256"
+    secrets: [postgres_password, db_app_password, db_migrator_password, n8n_db_password]
+    volumes:
+      - dev-pg:/var/lib/postgresql/data
+      - ./deploy/postgres/init:/docker-entrypoint-initdb.d:ro
+    ports: ["127.0.0.1:5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      retries: 20
+
+  redis:
+    image: redis:${REDIS_VERSION:-7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499}
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    volumes: ["./deploy/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro"]
+    secrets: [redis_users_acl]
+    ports: ["127.0.0.1:6379:6379"]
+
+  rabbitmq:
+    image: rabbitmq:${RABBITMQ_VERSION:-4.1-alpine@sha256:8146e69328150e9162c7ca5bfc4b29de4df2d92179ad84d0cc29e55eb27953b5}
+    environment:
+      RABBITMQ_CONFIG_FILES: /etc/rabbitmq/conf.d
+    volumes:
+      - ./deploy/rabbitmq/rabbitmq.conf:/etc/rabbitmq/conf.d/10-nexusflow.conf:ro
+      - ./deploy/rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+    secrets: [rabbitmq_definitions]
+    ports: ["127.0.0.1:5672:5672"]
+
+  n8n:
+    image: n8nio/n8n:${N8N_VERSION:-2.40.6@sha256:9c7871d5cc4fc2565bb905e4df5bf7d6a5a4bf2f4313fb99a2b3fa380f331d7c}   # the version the workflows are built for
+    profiles: ["n8n"]
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_DATABASE: n8n
+      DB_POSTGRESDB_USER: n8n
+      DB_POSTGRESDB_PASSWORD_FILE: /run/secrets/n8n_db_password
+      N8N_ENCRYPTION_KEY_FILE: /run/secrets/n8n_encryption_key
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "true"
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_SECURE_COOKIE: "false"   # plain http on localhost during development only
+    secrets: [n8n_db_password, n8n_encryption_key]
+    depends_on:
+      postgres: {condition: service_healthy}
+    ports: ["127.0.0.1:5678:5678"]
+
+volumes:
+  dev-pg:
+
+secrets:
+  postgres_password: {file: ./secrets/postgres_password}
+  db_app_password: {file: ./secrets/db_app_password}
+  db_migrator_password: {file: ./secrets/db_migrator_password}
+  n8n_db_password: {file: ./secrets/n8n_db_password}
+  redis_users_acl: {file: ./secrets/redis_users_acl}
+  rabbitmq_definitions: {file: ./secrets/rabbitmq_definitions}
+  n8n_encryption_key: {file: ./secrets/n8n_encryption_key}
