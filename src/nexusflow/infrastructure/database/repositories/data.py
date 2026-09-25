@@ -927,8 +927,17 @@ class SqlAlertRepository(TenantRepository[Alert]):
         return (await self._s.execute(statement)).scalar_one_or_none() is not None
 
     async def in_period(
-        self, org_id: UUID, *, start: datetime, end: datetime, limit: int
+        self,
+        org_id: UUID,
+        *,
+        start: datetime,
+        end: datetime,
+        limit: int,
+        project_id: UUID | None = None,
+        dataset_id: UUID | None = None,
     ) -> list[Alert]:
+        """Alerts triggered in ``[start, end)``, newest first - of one project's
+        rules, and about one of its datasets, when those are given."""
         a = d.alerts
         statement = (
             select(Alert)
@@ -936,10 +945,40 @@ class SqlAlertRepository(TenantRepository[Alert]):
             .order_by(a.c.triggered_at.desc())
             .limit(limit)
         )
+        if project_id is not None:
+            statement = statement.where(_alerts_about(org_id, project_id, dataset_id))
         return list((await self._s.execute(statement)).scalars().all())
 
     def _sort_key(self, page: PageRequest) -> Any:
         return lambda alert: (alert.triggered_at, alert.id)
+
+
+def _alerts_about(org_id: UUID, project_id: UUID, dataset_id: UUID | None) -> ColumnElement[bool]:
+    """The alerts of a project's rules - or, for one of its datasets, those of the
+    rules scoped to that dataset and those of the project-wide rules whose subject
+    (a change, a collection run or an insight) belongs to it."""
+    a, r = d.alerts, d.alert_rules
+    rules = select(r.c.id).where(r.c.org_id == org_id, r.c.project_id == project_id)
+    if dataset_id is None:
+        return a.c.rule_id.in_(rules)
+    c, i, runs, s = d.changes, d.insights, d.collection_runs, d.sources
+    about_dataset = or_(
+        a.c.subject_id.in_(
+            select(c.c.id).where(c.c.org_id == org_id, c.c.dataset_id == dataset_id)
+        ),
+        a.c.subject_id.in_(
+            select(i.c.id).where(i.c.org_id == org_id, i.c.dataset_id == dataset_id)
+        ),
+        a.c.subject_id.in_(
+            select(runs.c.id)
+            .join(s, s.c.id == runs.c.source_id)
+            .where(runs.c.org_id == org_id, s.c.dataset_id == dataset_id)
+        ),
+    )
+    return or_(
+        a.c.rule_id.in_(rules.where(r.c.dataset_id == dataset_id)),
+        and_(a.c.rule_id.in_(rules.where(r.c.dataset_id.is_(None))), about_dataset),
+    )
 
 
 class SqlChannelRepository(TenantRepository[NotificationChannel]):

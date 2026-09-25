@@ -201,7 +201,13 @@ class BodySizeLimitMiddleware:
             return
         limit = self._limit_for(str(scope.get("path", "")))
         declared = _header(scope, b"content-length")
-        if declared is not None and (not declared.isdigit() or int(declared) > limit):
+        # ASCII digits only ("²".isdigit() is true, int("²") raises), and never
+        # more than int() converts cheaply: such a length is too large anyway.
+        if declared is not None and (
+            not (declared.isascii() and declared.isdigit())
+            or len(declared) > 18
+            or int(declared) > limit
+        ):
             await _send_413(send)
             return
         received = 0

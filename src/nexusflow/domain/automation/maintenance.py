@@ -24,6 +24,7 @@ from nexusflow.domain.audit.model import AuditAction
 from nexusflow.domain.audit.recorder import AuditRecorder
 from nexusflow.domain.authorization.principal import Principal
 from nexusflow.domain.automation.dead_letters import stage_dead_letter
+from nexusflow.domain.automation.events import EventType, event_message
 from nexusflow.domain.catalog.service import tenant_datasets
 from nexusflow.domain.intelligence.model import InsightStatus
 from nexusflow.domain.notifications.model import MAX_DELIVERY_ATTEMPTS, DeliveryState
@@ -35,6 +36,7 @@ from nexusflow.domain.shared.files import file_deletions
 from nexusflow.domain.shared.outbox import TaskName, new_message
 from nexusflow.domain.shared.ports import FileStorage
 from nexusflow.domain.shared.unit_of_work import TenantScope, UnitOfWork, UnitOfWorkFactory
+from nexusflow.domain.sources.model import CollectionRun
 
 STUCK_RUN_AFTER = timedelta(minutes=30)
 STUCK_DELIVERY_AFTER = timedelta(minutes=15)
@@ -252,8 +254,7 @@ class MaintenanceService:
                 org_id, started_before=now - STUCK_RUN_AFTER, limit=100
             ):
                 if run.attempt >= MAX_RUN_ATTEMPTS:
-                    run.fail(now, code="worker_lost", detail="exceeded retry attempts")
-                    await release_upload(uow, run, now, reason="worker_lost")
+                    await _fail_lost_run(uow, run, now)
                     report.failed_runs += 1
                     continue
                 run.requeue()
@@ -513,3 +514,30 @@ def _keys_batch(
         )
 
     return step
+
+
+async def _fail_lost_run(uow: UnitOfWork, run: CollectionRun, now: datetime) -> None:
+    """Every attempt of ``run`` died with its worker: fail it as any failed run is
+    failed (``IngestionService.fail_run``), in the reaper's transaction - the
+    source counts the failure, and ``collection.completed`` lets ``run_failed``
+    alert rules fire and the run's workflow run finish."""
+    run.fail(now, code="worker_lost", detail="exceeded retry attempts")
+    await release_upload(uow, run, now, reason="worker_lost")
+    source = await uow.data.sources.get_for_update(run.org_id, run.source_id)
+    if source is None:
+        return
+    source.record_failure(now)
+    await uow.outbox.add(
+        event_message(
+            EventType.COLLECTION_COMPLETED,
+            org_id=run.org_id,
+            payload={
+                "run_id": str(run.id),
+                "source_id": str(source.id),
+                "dataset_id": str(source.dataset_id),
+                "status": run.status.value,
+                "workflow_run_id": str(run.workflow_run_id) if run.workflow_run_id else None,
+            },
+            now=now,
+        )
+    )

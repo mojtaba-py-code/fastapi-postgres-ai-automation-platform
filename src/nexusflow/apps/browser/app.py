@@ -20,8 +20,9 @@ shared bearer token. Defences, from outside in:
   aborted before Chromium even asks the proxy; the final URL is re-checked;
 * page: fresh incognito context per render, destroyed afterwards; downloads,
   service workers, WebSockets, permissions and dialogs are disabled;
-* limits: bounded concurrency with a queue timeout, navigation timeout and a
-  cap on the returned HTML.
+* limits: bounded concurrency with a queue timeout, a deadline on the whole
+  visit (navigation timeout plus a margin to read the page) and a cap on the
+  returned HTML.
 """
 
 from __future__ import annotations
@@ -45,6 +46,8 @@ from nexusflow.infrastructure.observability.logging import configure_logging, ge
 
 _log = get_logger("nexusflow.browser")
 _ABORT_REASON = "blockedbyclient"
+_CONTENT_MARGIN_SECONDS = 10.0  # after the navigation timeout, to read the loaded page
+_CLOSE_TIMEOUT_SECONDS = 10.0
 
 
 class RenderRequest(BaseModel):
@@ -150,22 +153,38 @@ class Renderer:
             page = await context.new_page()
             page.on("dialog", lambda dialog: asyncio.ensure_future(dialog.dismiss()))
             page.on("popup", lambda popup: asyncio.ensure_future(popup.close()))
-            await page.goto(
-                target.url,
-                wait_until="load",
-                timeout=browser_settings.navigation_timeout_seconds * 1000,
-            )
-            final = self._policy.validate(page.url)
-            if not await resolves_publicly(final.host):
-                raise PolicyViolationError(code="blocked_redirect")
-            html = await page.content()
+            # A page can keep its renderer busy once loaded (an endless script):
+            # content() would then never return and the slot be lost for good.
+            # The whole visit has a deadline; the context is closed either way.
+            deadline = browser_settings.navigation_timeout_seconds + _CONTENT_MARGIN_SECONDS
+            async with asyncio.timeout(deadline):
+                await page.goto(
+                    target.url,
+                    wait_until="load",
+                    timeout=browser_settings.navigation_timeout_seconds * 1000,
+                )
+                final = self._policy.validate(page.url)
+                if not await resolves_publicly(final.host):
+                    raise PolicyViolationError(code="blocked_redirect")
+                html = await page.content()
             if len(html.encode("utf-8")) > browser_settings.max_html_bytes:
                 raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "Page too large.")
             return RenderResponse(html=html, final_url=final.url)
         finally:
-            if context is not None:
-                await context.close()
-            self._slots.release()
+            try:
+                if context is not None:
+                    await _close(context)
+            finally:
+                self._slots.release()
+
+
+async def _close(context: Any) -> None:
+    """Destroy a render's context; one that will not close cannot keep the slot."""
+    try:
+        async with asyncio.timeout(_CLOSE_TIMEOUT_SECONDS):
+            await context.close()
+    except Exception as exc:  # noqa: BLE001 - logged; the render's own outcome stands
+        _log.warning("render_close_failed", error=type(exc).__name__)
 
 
 def create_browser_app(settings: BrowserServiceSettings | None = None) -> FastAPI:

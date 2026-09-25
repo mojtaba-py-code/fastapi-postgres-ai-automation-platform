@@ -215,7 +215,6 @@ class SafeHttpClient:
                     json_body=json_body,
                     content=content,
                     policy=effective_policy,
-                    accept_content_types=accept_content_types,
                     max_bytes=limit,
                     follow_redirects=follow_redirects,
                     sensitive_headers=sensitive_headers,
@@ -255,6 +254,14 @@ class SafeHttpClient:
         )
         if raise_for_status:
             _raise_for_status(final)
+        # Only a success has to be of the expected type: an outage answered with an
+        # HTML error page (proxies, load balancers) stays a retryable outage.
+        if (
+            accept_content_types is not None
+            and 200 <= final.status_code < 300
+            and final.content_type not in accept_content_types
+        ):
+            raise UnexpectedContentTypeError(internal_detail=f"got {final.content_type!r}")
         return final
 
     async def _send_following_redirects(
@@ -267,7 +274,6 @@ class SafeHttpClient:
         json_body: JSONValue | None,
         content: bytes | None,
         policy: UrlPolicy,
-        accept_content_types: frozenset[str] | None,
         max_bytes: int,
         follow_redirects: bool,
         sensitive_headers: frozenset[str],
@@ -314,8 +320,6 @@ class SafeHttpClient:
             finally:
                 await response.aclose()
             content_type, charset = _parse_content_type(response.headers.get("content-type"))
-            if accept_content_types is not None and content_type not in accept_content_types:
-                raise UnexpectedContentTypeError(internal_detail=f"got {content_type!r}")
             kept = {
                 k: v for k, v in response.headers.items() if k.lower() in _KEPT_RESPONSE_HEADERS
             }
@@ -337,8 +341,8 @@ async def _read_bounded(response: httpx2.Response, max_bytes: int, *, truncate: 
     Past the cap the response is rejected - or, with ``truncate``, cut at the
     cap and the rest of the stream left unread.
     """
-    declared = response.headers.get("content-length")
-    if not truncate and declared and declared.isdigit() and int(declared) > max_bytes:
+    declared = _header_int(response.headers.get("content-length"))
+    if not truncate and declared is not None and declared > max_bytes:
         raise ResponseTooLargeError(internal_detail=f"declared {declared} bytes")
     decoder = _BoundedDecoder(
         response.headers.get("content-encoding", ""), max_bytes, truncate=truncate
@@ -444,5 +448,19 @@ def _raise_for_status(response: HttpResponse) -> None:
 
 
 def _retry_after(headers: Mapping[str, str]) -> int | None:
-    raw = headers.get("retry-after", "")
-    return min(int(raw), 3600) if raw.isdigit() else None
+    seconds = _header_int(headers.get("retry-after"))
+    return min(seconds, 3600) if seconds is not None else None
+
+
+def _header_int(raw: str | None) -> int | None:
+    """A header's non-negative decimal value, or None if it is not one.
+
+    ``str.isdigit`` alone accepts digits ``int()`` refuses (``"²"``) or reads
+    although HTTP does not (``"٣"``), and ``int()`` refuses - or takes quadratic
+    time over - thousands of digits: only ASCII digits count, and a value too long
+    for any real size or delay is clamped instead of converted.
+    """
+    if not raw or not (raw.isascii() and raw.isdigit()):
+        return None
+    digits = raw.lstrip("0") or "0"
+    return int(digits) if len(digits) <= 18 else 10**18

@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -341,6 +342,22 @@ class TestWebhookIngestion:
             415,
         )
 
+    async def test_a_timestamp_of_other_digits_is_a_malformed_signature(
+        self, api: httpx2.AsyncClient
+    ) -> None:
+        owner = await signup(api)
+        path, _, _, _ = await self._endpoint(owner)
+        unknown_path = f"/api/v1/webhooks/{path.split('/')[4]}/{uuid4()}"
+        for target in (path, unknown_path):
+            for digit in (b"\xb2", b"\xb9"):  # "²", "¹": str.isdigit() says yes, int() no
+                headers = [
+                    (b"content-type", b"application/json"),
+                    (b"x-nexusflow-delivery", b"dlv-00000001"),
+                    (b"x-nexusflow-signature", b"t=" + digit + b",v1=" + b"0" * 64),
+                ]
+                rejected = await api.post(target, content=b"{}", headers=headers)
+                expect_error(rejected, 401, "invalid_signature")
+
     async def test_a_failed_delivery_stays_retryable_under_the_same_id(
         self, api: httpx2.AsyncClient
     ) -> None:
@@ -650,6 +667,70 @@ class TestReports:
         assert download.headers["content-disposition"].startswith("attachment;")
         digest = base64.b64encode(hashlib.sha256(download.content).digest()).decode()
         assert download.headers["repr-digest"] == f"sha-256=:{digest}:"
+
+    async def test_a_report_lists_only_the_alerts_of_its_scope(
+        self, api: httpx2.AsyncClient, container: Container
+    ) -> None:
+        owner = await signup(api)
+        org_id = await org_id_of(owner)
+        other_project = await create_project(owner, "Project A")
+        await create_dataset(owner, other_project)
+        project = await create_project(owner, "Secret acquisition target")
+        phones = await create_dataset(owner, project)
+        laptops = await create_dataset(owner, project)
+        for name, scope in (("Any source down", {}), ("Laptops down", {"dataset_id": laptops})):
+            rule = await owner.post(
+                "/api/v1/alert-rules",
+                json={
+                    "project_id": project,
+                    "name": name,
+                    "condition": {"type": "run_failed"},
+                    **scope,
+                },
+            )
+            assert rule.status_code == 201, rule.text
+        for dataset_id in (phones, laptops):  # one failed collection each
+            website = {"kind": "website", "url": "https://shop.example.com/", "item_selector": "li"}
+            source_id = await create_source(
+                owner, project, dataset_id, {**website, "fields": {"sku": {"selector": "b"}}}
+            )
+            run_id = UUID((await owner.post(f"/api/v1/sources/{source_id}/runs")).json()["id"])
+            await container.ingestion.fail_run(
+                org_id=org_id, run_id=run_id, code="http_503", detail=None
+            )
+            await container.alerts.evaluate_failed_run(org_id=org_id, run_id=run_id)
+
+        async def alerts_in_report(project_id: str, dataset_id: str | None = None) -> list[str]:
+            now = datetime.now(UTC)
+            requested = await owner.post(
+                "/api/v1/reports",
+                json={
+                    "project_id": project_id,
+                    "dataset_id": dataset_id,
+                    "format": "json",
+                    "period_start": (now - timedelta(days=1)).isoformat(),
+                    "period_end": (now + timedelta(minutes=5)).isoformat(),
+                },
+            )
+            assert requested.status_code == 202, requested.text
+            report_id = UUID(requested.json()["id"])
+            await container.reports.generate(org_id=org_id, report_id=report_id)
+            content = (await owner.get(f"/api/v1/reports/{report_id}/download")).content
+            return sorted(alert["title"].split(":")[0] for alert in json.loads(content)["alerts"])
+
+        assert await alerts_in_report(other_project) == []  # never another project's alerts
+        assert await alerts_in_report(project) == [
+            "[WARNING] Any source down",
+            "[WARNING] Any source down",
+            "[WARNING] Laptops down",
+        ]
+        # A dataset's report: its own rules' alerts, and the project-wide rules'
+        # alerts about that dataset - not about its sibling.
+        assert await alerts_in_report(project, phones) == ["[WARNING] Any source down"]
+        assert await alerts_in_report(project, laptops) == [
+            "[WARNING] Any source down",
+            "[WARNING] Laptops down",
+        ]
 
     async def test_naive_datetimes_are_rejected(self, api: httpx2.AsyncClient) -> None:
         owner = await signup(api)

@@ -72,6 +72,14 @@ class TestTrendNote:
             ((0, 0, 0, 0), "No changes were detected in the period."),
             ((0, 0, 3, 4), "All detected changes fall in the second half of the period."),
             ((7,), "Not enough days in the period to describe a trend."),
+            # An odd number of days: the halves differ in length, so their daily
+            # averages are compared - a flat week is flat, not "rose 33%".
+            ((10,) * 7, "Change volume was stable across the period."),
+            (
+                (10, 10, 10, 20, 20, 20, 20),
+                "Change volume rose 100% from the first to the second half.",
+            ),
+            ((9, 9, 3, 3, 3), "Change volume fell 67% from the first to the second half."),
         ],
     )
     def test_the_sentence_matches_the_numbers(self, counts: tuple[int, ...], expected: str) -> None:

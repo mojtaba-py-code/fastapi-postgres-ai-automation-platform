@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import base64
 import json
+from typing import Any
 from uuid import uuid4
 
 import httpx2
 import pytest
 
+from nexusflow.apps.api.middleware import BodySizeLimitMiddleware
 from nexusflow.bootstrap.container import Container
 from nexusflow.infrastructure.security.jwt_tokens import (
     JwtKeyRing,
@@ -178,6 +180,32 @@ class TestInputHandling:
             headers={"content-type": "application/json"},
         )
         assert response.status_code == 413
+
+    @pytest.mark.parametrize("declared", [b"\xb2", b"9" * 5000], ids=["superscript", "huge"])
+    async def test_a_content_length_that_is_no_size_is_refused(self, declared: bytes) -> None:
+        # The server in front normally refuses these already; the application must
+        # not crash on them either ("²".isdigit() is true, int("²") raises).
+        reached: list[Any] = []
+        sent: list[dict[str, Any]] = []
+
+        async def app(scope: Any, receive: Any, send: Any) -> None:
+            reached.append(scope)
+
+        async def receive() -> dict[str, Any]:
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message: dict[str, Any]) -> None:
+            sent.append(message)
+
+        limited = BodySizeLimitMiddleware(app, default_limit=1024, overrides={})
+        scope = {
+            "type": "http",
+            "path": "/api/v1/auth/login",
+            "headers": [(b"content-length", declared)],
+        }
+        await limited(scope, receive, send)
+        assert reached == []
+        assert sent[0]["status"] == 413
 
     async def test_invalid_host_header_rejected(self, api: httpx2.AsyncClient) -> None:
         response = await api.get("/health/live", headers={"host": "evil.example.com"})

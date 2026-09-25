@@ -109,6 +109,7 @@ PLATFORM_TASKS: tuple[TaskSpec[Any], ...] = (
         TaskName.GENERATE_REPORT,
         retries=2,
         reference=("report", "report_id"),
+        on_give_up=h.fail_report,
     ),
     TaskSpec("nexusflow.security.notify", m.SecurityEmailMessage, h.send_security_email),
     TaskSpec("nexusflow.security.invitation", m.InvitationMessage, h.send_invitation),
@@ -147,6 +148,7 @@ PLATFORM_TASKS: tuple[TaskSpec[Any], ...] = (
         "nexusflow.automation.dispatch", m.Empty, h.dispatch_due_workflows, retries=0, periodic=True
     ),
     TaskSpec("nexusflow.automation.sweep", m.Empty, h.sweep_detection, retries=0, periodic=True),
+    TaskSpec("nexusflow.alerts.sweep", m.Empty, h.sweep_alerts, retries=0, periodic=True),
     TaskSpec("nexusflow.outbox.relay", m.Empty, h.relay_outbox, retries=0, periodic=True),
     TaskSpec(
         "nexusflow.maintenance.retention", m.Empty, h.apply_retention, retries=0, periodic=True

@@ -111,3 +111,10 @@ class Insight:
         self.status = status
         self.error_code = code[:64]
         self.completed_at = now
+
+    def reopen(self) -> None:
+        """FAILED -> PENDING: retried from the dead-letter store."""
+        if self.status is InsightStatus.FAILED:
+            self.status = InsightStatus.PENDING
+            self.error_code = None
+            self.completed_at = None

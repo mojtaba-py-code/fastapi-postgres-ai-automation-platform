@@ -81,6 +81,14 @@ class Upload:
         self.rejection_reason = reason[:64]
         self.processed_at = self.processed_at or now
 
+    def reopen(self) -> None:
+        """FAILED -> ACCEPTED: its run is retried from the dead-letter store. The
+        caller makes sure no live upload of the same file exists meanwhile."""
+        if self.status is UploadStatus.FAILED:
+            self.status = UploadStatus.ACCEPTED
+            self.rejection_reason = None
+            self.processed_at = None
+
 
 def display_filename(name: str | None) -> str:
     """Last path component only, normalized - for display, never for storage."""

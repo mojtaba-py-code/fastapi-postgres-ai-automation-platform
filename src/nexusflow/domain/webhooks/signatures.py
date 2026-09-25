@@ -65,7 +65,13 @@ def parse_signature_header(header: str | None) -> ParsedSignature:
         if not sep:
             raise _reject("signature_malformed")
         if key == "t":
-            if timestamp is not None or not value.isdigit() or len(value) > 12:
+            # ASCII digits only: str.isdigit() alone also accepts "²" (which
+            # int() refuses) and other scripts' digits (which int() reads).
+            if (
+                timestamp is not None
+                or not (value.isascii() and value.isdigit())
+                or len(value) > 12
+            ):
                 raise _reject("signature_malformed")
             timestamp = int(value)
         elif key == "v1":

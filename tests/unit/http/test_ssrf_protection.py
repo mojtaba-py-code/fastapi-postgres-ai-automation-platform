@@ -17,6 +17,7 @@ from nexusflow.infrastructure.http.client import (
     HttpClientLimits,
     RedirectNotFollowedError,
     ResponseTooLargeError,
+    RetryableUpstreamStatusError,
     SafeHttpClient,
     TooManyRedirectsError,
     UnexpectedContentTypeError,
@@ -325,6 +326,72 @@ class TestSafeHttpClient:
             return _resp(404)
 
         with pytest.raises(UpstreamStatusError):
+            await _client(handler).request("GET", "https://example.com/")
+
+    @pytest.mark.parametrize("status", [429, 502, 503, 504])
+    async def test_an_outage_page_in_html_is_still_an_outage(self, status: int) -> None:
+        # Load balancers and proxies answer outages with HTML error pages: the
+        # status decides, the content type only matters for a successful answer.
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            return _resp(status, b"<html>busy</html>", content_type="text/html", retry_after="30")
+
+        with pytest.raises(RetryableUpstreamStatusError) as raised:
+            await _client(handler).request(
+                "GET", "https://example.com/", accept_content_types=frozenset({"application/json"})
+            )
+        assert raised.value.retry_after_seconds == 30
+
+    async def test_a_rejection_in_html_is_reported_by_its_status(self) -> None:
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            return _resp(404, b"<html>not here</html>", content_type="text/html")
+
+        with pytest.raises(UpstreamStatusError):
+            await _client(handler).request(
+                "GET", "https://example.com/", accept_content_types=frozenset({"application/json"})
+            )
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            pytest.param(b"120", 120, id="seconds"),
+            pytest.param(b"0007", 7, id="leading-zeros"),
+            pytest.param(b"86400", 3600, id="capped"),
+            # int() refuses more than 4300 digits (and is quadratic below that).
+            pytest.param(b"9" * 5000, 3600, id="huge"),
+            # "²": str.isdigit() accepts it, int() does not.
+            pytest.param(b"\xb2", None, id="superscript"),
+            # int() accepts Arabic-Indic digits, but they are not HTTP delta-seconds.
+            pytest.param("٣".encode(), None, id="arabic-indic"),
+            pytest.param(b"-1", None, id="negative"),
+            pytest.param(b"Wed, 21 Oct 2026 07:28:00 GMT", None, id="http-date"),
+        ],
+    )
+    async def test_retry_after_is_parsed_defensively(
+        self, value: bytes, expected: int | None
+    ) -> None:
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(503, headers=[(b"retry-after", value)], stream=_Chunked(b""))
+
+        with pytest.raises(RetryableUpstreamStatusError) as raised:
+            await _client(handler).request("GET", "https://example.com/")
+        assert raised.value.retry_after_seconds == expected
+
+    async def test_a_content_length_that_is_no_number_is_ignored(self) -> None:
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(
+                200, headers=[(b"content-length", b"\xb2")], stream=_Chunked(b"{}")
+            )
+
+        response = await _client(handler).request("GET", "https://example.com/")
+        assert response.content == b"{}"  # the body itself is still bounded while read
+
+    async def test_an_absurd_content_length_is_refused_as_too_large(self) -> None:
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(
+                200, headers=[(b"content-length", b"9" * 5000)], stream=_Chunked(b"{}")
+            )
+
+        with pytest.raises(ResponseTooLargeError):
             await _client(handler).request("GET", "https://example.com/")
 
     async def test_environment_proxies_are_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:

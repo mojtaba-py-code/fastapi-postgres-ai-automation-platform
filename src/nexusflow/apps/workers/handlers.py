@@ -175,6 +175,12 @@ async def collect_rest_api(deps: WorkerDeps, msg: RunMessage) -> None:
     except NexusFlowError as exc:  # blocked URL, 4xx, invalid JSON, unusable credential
         await c.ingestion.fail_run(org_id=msg.org_id, run_id=msg.run_id, code=exc.code, detail=None)
         return
+    except Exception:
+        # Unexpected (a bug, a library error): hand the run back like a transient
+        # failure, so the task's retry can start it again instead of finding it
+        # RUNNING and returning; after the last retry it fails (fail_collection).
+        await c.collection.release(org_id=msg.org_id, run_id=msg.run_id)
+        raise
     outcome = await c.ingestion.ingest(
         org_id=msg.org_id,
         run_id=msg.run_id,
@@ -259,6 +265,22 @@ async def evaluate_alerts(deps: WorkerDeps, msg: OrgMessage) -> None:
         await c.alerts.evaluate_changes(org_id=msg.org_id)
 
 
+async def sweep_alerts(deps: WorkerDeps, msg: Empty) -> None:
+    """Safety net: evaluate the changes no evaluation reached - an event that was
+    lost, or whose evaluation failed for good. Evaluation is idempotent, so it
+    runs whatever the orchestration mode; paused tenants wait for their release."""
+    c = deps.container
+    if (reason := await _paused(c, None)) is not None:
+        _log.info("alert_sweep_skipped", reason=reason)
+        return
+
+    async def evaluate(org_id: UUID) -> None:
+        if await _paused(c, org_id) is None:
+            await c.alerts.evaluate_changes(org_id=org_id)
+
+    await _each_tenant(c, evaluate, "alert_sweep")
+
+
 async def deliver_notification(deps: WorkerDeps, msg: DeliveryMessage) -> None:
     # The notification service schedules its own retries (with backoff and a
     # dead letter at the end); this task only has to run one attempt.
@@ -267,6 +289,11 @@ async def deliver_notification(deps: WorkerDeps, msg: DeliveryMessage) -> None:
 
 async def generate_report(deps: WorkerDeps, msg: ReportMessage) -> None:
     await deps.container.reports.generate(org_id=msg.org_id, report_id=msg.report_id)
+
+
+async def fail_report(c: Container, msg: ReportMessage, code: str) -> None:
+    # The dead letter keeps the job's error code; the report says what failed.
+    await c.reports.mark_failed(org_id=msg.org_id, report_id=msg.report_id)
 
 
 # ------------------------------------------------------------ security mail

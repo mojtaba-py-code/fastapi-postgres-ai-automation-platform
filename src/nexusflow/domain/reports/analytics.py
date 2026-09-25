@@ -147,14 +147,19 @@ def volume_spikes(daily: list[tuple[str, int]]) -> list[dict[str, Any]]:
 
 
 def trend_note(daily: list[tuple[str, int]]) -> str:
-    """One sentence on how change volume moved across the period."""
+    """One sentence on how change volume moved across the period.
+
+    The halves are compared by their daily averages: with an odd number of
+    days the second half is a day longer, and comparing totals would call a
+    flat week a rise.
+    """
     if len(daily) < 2:
         return "Not enough days in the period to describe a trend."
     half = len(daily) // 2
-    first = sum(count for _, count in daily[:half])
-    second = sum(count for _, count in daily[half:])
-    total = first + second
-    if total == 0:
+    first_days, second_days = daily[:half], daily[half:]
+    first = sum(count for _, count in first_days) / len(first_days)
+    second = sum(count for _, count in second_days) / len(second_days)
+    if first == second == 0:
         return "No changes were detected in the period."
     if first == 0:
         return "All detected changes fall in the second half of the period."

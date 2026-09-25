@@ -63,6 +63,7 @@ EXTRA_ROUTES: dict[str, str] = {
     "nexusflow.collect.rest_api": INTEGRATIONS,
     "nexusflow.automation.dispatch": PIPELINE,
     "nexusflow.automation.sweep": PIPELINE,
+    "nexusflow.alerts.sweep": PIPELINE,
     "nexusflow.outbox.relay": PIPELINE,
     "nexusflow.maintenance.retention": PIPELINE,
     "nexusflow.maintenance.reap": PIPELINE,
@@ -78,10 +79,12 @@ EXTRA_ROUTES: dict[str, str] = {
 def beat_schedule(*, internal_orchestration: bool) -> dict[str, dict[str, Any]]:
     """Periodic jobs. Scheduled workflow dispatch and the detection sweep run
     here only when the platform orchestrates itself; otherwise n8n triggers
-    them (workflows 1 and 2)."""
+    them (workflows 1 and 2). The alert sweep - a safety net for changes no
+    evaluation reached - runs in both modes."""
     schedule: dict[str, dict[str, Any]] = {
         "outbox-relay": {"task": "nexusflow.outbox.relay", "schedule": 10.0},
         "reap-stuck-work": {"task": "nexusflow.maintenance.reap", "schedule": 300.0},
+        "alert-sweep": {"task": "nexusflow.alerts.sweep", "schedule": 600.0},
         "expire-reports": {"task": "nexusflow.maintenance.expire_reports", "schedule": 3600.0},
         "purge-deleted-organizations": {
             "task": "nexusflow.maintenance.purge_organizations",

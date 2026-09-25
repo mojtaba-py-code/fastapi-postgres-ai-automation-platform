@@ -6,8 +6,9 @@
   The model is told that everything inside the boundary is data.
 * The boundary token is secret per request; if it ever appears in the model's
   output, the output is rejected (echo of prompt/data).
-* Context is budgeted: the highest-scored changes are included first until the
-  character budget is reached - nothing is silently truncated mid-record.
+* Context is budgeted: the highest-scored changes are included first while they
+  fit the character budget - a change too large for what is left is skipped
+  (and left for a later analysis), never truncated mid-record.
 """
 
 from __future__ import annotations
@@ -84,7 +85,7 @@ def build_prompt(
     for change in sorted(changes, key=lambda c: -int(c.get("score", 0))):
         encoded = json.dumps(change, ensure_ascii=False, default=str)
         if used + len(encoded) > budget_chars:
-            break
+            continue  # a smaller one may still fit
         included.append(change)
         used += len(encoded)
     payload = {

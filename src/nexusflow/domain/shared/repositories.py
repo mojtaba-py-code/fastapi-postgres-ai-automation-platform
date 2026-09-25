@@ -265,7 +265,14 @@ class AlertRepository(TenantRepository[Alert], Protocol):
     async def add_if_new(self, alert: Alert) -> bool: ...
 
     async def in_period(
-        self, org_id: UUID, *, start: datetime, end: datetime, limit: int
+        self,
+        org_id: UUID,
+        *,
+        start: datetime,
+        end: datetime,
+        limit: int,
+        project_id: UUID | None = None,
+        dataset_id: UUID | None = None,
     ) -> list[Alert]: ...
 
 

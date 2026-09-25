@@ -20,13 +20,17 @@ from nexusflow.domain.authorization.roles import Permission
 from nexusflow.domain.automation.events import EventType, event_message
 from nexusflow.domain.automation.model import DeadLetter, DeadLetterStatus
 from nexusflow.domain.intelligence.redaction import redact_text
+from nexusflow.domain.reports.model import ReportStatus
 from nexusflow.domain.shared.context import RequestMeta
 from nexusflow.domain.shared.outbox import TaskName, new_message
 from nexusflow.domain.shared.unit_of_work import TenantScope, UnitOfWork, UnitOfWorkFactory
+from nexusflow.domain.sources.model import CollectionRun, RunStatus, RunTrigger
+from nexusflow.domain.uploads.model import UploadStatus
 
 # Jobs that may be re-driven from the dead-letter store. All of them are
 # idempotent (state machines + unique constraints), so a retry cannot duplicate
-# business effects.
+# business effects - which is also why a retry first hands the job's entity back
+# from the terminal state its failure left it in (see ``_reopen``).
 RETRYABLE_TASKS = frozenset(
     {
         TaskName.COLLECT_SOURCE,
@@ -158,6 +162,7 @@ class DeadLetterService:
                     raise InvalidInputError(
                         "This job type cannot be retried.", code="not_retryable"
                     )
+                await _reopen(uow, org_id, letter)
                 payload: JSONObject = {
                     k: v for k, v in letter.payload.items() if isinstance(v, str)
                 }
@@ -183,3 +188,63 @@ class DeadLetterService:
             )
             await uow.commit()
             return letter
+
+
+def _entity_id(letter: DeadLetter, field_name: str) -> UUID | None:
+    """The id the retried job will act on (from the job's own payload)."""
+    try:
+        return UUID(str(letter.payload[field_name]))
+    except (KeyError, ValueError):
+        return None
+
+
+async def _reopen(uow: UnitOfWork, org_id: UUID, letter: DeadLetter) -> None:
+    """Hand the job's entity back from the terminal state its failure left it in.
+
+    Every handler skips finished work - that is what makes redeliveries safe - so
+    re-enqueueing the job alone would do nothing for a failed run or analysis, a
+    dead delivery or a failed report. Entities in any other state are left as
+    they are (the job then does whatever is still to do, possibly nothing);
+    detection and alert evaluation resume from pending data by themselves.
+    """
+    task = TaskName(letter.task_name)
+    if task in (TaskName.COLLECT_SOURCE, TaskName.PROCESS_UPLOAD):
+        run_id = _entity_id(letter, "run_id")
+        run = await uow.data.runs.get_for_update(org_id, run_id) if run_id else None
+        if run is not None and run.status is RunStatus.FAILED:
+            await _reopen_upload(uow, run)
+            run.reopen()
+    elif task is TaskName.ANALYZE_CHANGES:
+        insight_id = _entity_id(letter, "insight_id")
+        insight = await uow.data.insights.get_for_update(org_id, insight_id) if insight_id else None
+        if insight is not None:
+            insight.reopen()
+    elif task is TaskName.DELIVER_NOTIFICATION:
+        delivery_id = _entity_id(letter, "delivery_id")
+        delivery = (
+            await uow.data.deliveries.get_for_update(org_id, delivery_id) if delivery_id else None
+        )
+        if delivery is not None:
+            delivery.reopen()
+    elif task is TaskName.GENERATE_REPORT:
+        report_id = _entity_id(letter, "report_id")
+        report = await uow.data.reports.get_for_update(org_id, report_id) if report_id else None
+        if report is not None and report.status is ReportStatus.FAILED:
+            report.status, report.error_code, report.completed_at = ReportStatus.PENDING, None, None
+
+
+async def _reopen_upload(uow: UnitOfWork, run: CollectionRun) -> None:
+    """An upload run needs its file back: the failure released the upload."""
+    if run.trigger is not RunTrigger.UPLOAD:
+        return
+    upload = await uow.data.uploads.get_by_run(run.org_id, run.id)
+    if upload is None or upload.status is not UploadStatus.FAILED:
+        return
+    live = await uow.data.uploads.find_by_hash(run.org_id, upload.source_id, upload.sha256)
+    if live is not None:
+        # The same file was uploaded again meanwhile: that upload is the one to process.
+        raise ConflictError(
+            "The file was uploaded again since; its newer upload is processed instead.",
+            code="upload_superseded",
+        )
+    upload.reopen()
