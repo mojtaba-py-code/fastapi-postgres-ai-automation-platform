@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import json
 import os
 import time
@@ -207,8 +208,23 @@ def _decode(value: object, *, what: str) -> bytes:
         raise VaultError(internal_detail=f"{what} is not base64") from exc
 
 
+# Unwrapped keyrings of this process, by the digest of their wrapped form. A
+# worker pool unwraps in its parent (create_worker_app) before forking: every
+# child inherits the keys, so children recycled later neither call Vault again
+# nor fail to start while Vault is unavailable.
+_UNWRAPPED: dict[str, dict[str, bytes]] = {}
+
+
 def unwrap_keyring(settings: VaultSettings, keys_json: str) -> dict[str, bytes]:
-    """The keyring's keys, unwrapped by Vault (at start-up)."""
+    """The keyring's keys, unwrapped by Vault - once per process tree."""
+    digest = hashlib.sha256(keys_json.encode("utf-8")).hexdigest()
+    cached = _UNWRAPPED.get(digest)
+    if cached is None:
+        cached = _UNWRAPPED[digest] = _unwrap(settings, keys_json)
+    return dict(cached)
+
+
+def _unwrap(settings: VaultSettings, keys_json: str) -> dict[str, bytes]:
     wrapped = json.loads(keys_json)
     if not isinstance(wrapped, dict) or not all(isinstance(v, str) for v in wrapped.values()):
         raise VaultError(internal_detail="security.encryption_keys must map ids to ciphertexts")

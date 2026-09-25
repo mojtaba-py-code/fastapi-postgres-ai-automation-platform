@@ -181,6 +181,27 @@ def test_the_platform_decrypts_with_the_unwrapped_keyring(
     assert seen and cipher.decrypt(sealed, context="ctx") == "secret"
 
 
+def test_a_keyring_is_unwrapped_once_per_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Worker children inherit their parent's keys: a child recycled while Vault
+    # is down still starts, and Vault is not asked again for every child.
+    from nexusflow.infrastructure.security import vault
+
+    fake = FakeVault()
+    monkeypatch.setattr(vault, "_UNWRAPPED", {})
+    monkeypatch.setattr(
+        vault,
+        "VaultTransit",
+        lambda settings: VaultTransit(
+            settings, client=httpx2.Client(transport=httpx2.MockTransport(fake.handler))
+        ),
+    )
+    keyring = json.dumps({"kek-1": _wrapped()})
+    first = vault.unwrap_keyring(_settings(), keyring)
+    fake.failures = [503] * 100  # Vault gone
+    assert vault.unwrap_keyring(_settings(), keyring) == first == {"kek-1": KEK}
+    assert len(fake.requests) == 1
+
+
 def _run_cli(
     monkeypatch: pytest.MonkeyPatch, fake: FakeVault, settings: Any, *argv: str
 ) -> dict[str, Any]:
