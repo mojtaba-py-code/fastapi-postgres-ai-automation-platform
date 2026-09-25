@@ -1,0 +1,39 @@
+# Key-encryption keys wrapped by HashiCorp Vault's transit engine - an
+# overlay on docker-compose.yml (docs/DEPLOYMENT.md, "Keys wrapped by Vault"):
+#
+#   docker compose -f docker-compose.yml -f docker-compose.vault.yml up -d
+#
+# In .env: NEXUSFLOW_VAULT_ADDRESS (https) and NEXUSFLOW_VAULT_ROLE_ID (an
+# AppRole whose policy may only decrypt with the transit key). In ./secrets:
+# vault_secret_id (the AppRole secret ID) and vault_ca.pem (Vault's CA, or the
+# public CA bundle). secrets/encryption_keys then holds Vault ciphertexts
+# (nexusflow keys vault-wrap).
+#
+# The services that load the keyring reach Vault over the "vault" network, the
+# only route they have off the internal networks: restrict it at the host
+# firewall to the Vault address and port (DEPLOYMENT.md, section 1).
+
+x-vault: &vault
+  environment:
+    NEXUSFLOW_SECURITY__KEK_PROVIDER: vault-transit
+    NEXUSFLOW_VAULT__ADDRESS: ${NEXUSFLOW_VAULT_ADDRESS:?set NEXUSFLOW_VAULT_ADDRESS in .env}
+    NEXUSFLOW_VAULT__ROLE_ID: ${NEXUSFLOW_VAULT_ROLE_ID:?set NEXUSFLOW_VAULT_ROLE_ID in .env}
+    NEXUSFLOW_VAULT__NAMESPACE: ${NEXUSFLOW_VAULT_NAMESPACE:-}
+    NEXUSFLOW_VAULT__SECRET_ID_FILE: /run/secrets/vault_secret_id
+    NEXUSFLOW_VAULT__CA_CERT: /run/secrets/vault_ca
+  secrets: [vault_secret_id, vault_ca]
+  networks: [vault]
+
+services:
+  api: *vault
+  api-internal: *vault
+  worker-pipeline: *vault
+  worker-integrations: *vault
+  beat: *vault
+
+networks:
+  vault: {}
+
+secrets:
+  vault_secret_id: {file: ./secrets/vault_secret_id}
+  vault_ca: {file: ./secrets/vault_ca.pem}

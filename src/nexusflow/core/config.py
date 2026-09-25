@@ -134,6 +134,9 @@ class SecuritySettings(_Section):
     lockout_max_seconds: int = Field(default=86_400, ge=900)
     # --- Application-level encryption (AES-256-GCM envelope; base64 32-byte KEKs)
     encryption_keys: SecretStr | None = None  # JSON object {"key-id": "<base64>"}
+    # "vault-transit": the keyring holds Vault ciphertexts, unwrapped at start-up
+    # (see the vault section and infrastructure/security/vault.py).
+    kek_provider: Literal["local", "vault-transit"] = "local"
     encryption_active_key_id: str = Field(default="kek-1", pattern=r"^[A-Za-z0-9._-]{1,32}$")
     # --- Keyed hashing of opaque tokens (API keys, refresh tokens, reset tokens)
     hmac_pepper: SecretStr | None = None
@@ -143,6 +146,26 @@ class SecuritySettings(_Section):
     invitation_ttl_seconds: int = Field(default=72 * 3600, ge=3600, le=14 * 86_400)
     webhook_timestamp_tolerance_seconds: int = Field(default=300, ge=30, le=900)
     mfa_issuer: str = "NexusFlow AI"
+
+
+_VAULT_PATH = r"^[A-Za-z0-9_-]{1,64}(/[A-Za-z0-9_-]{1,64}){0,3}$"
+
+
+class VaultSettings(_Section):
+    """HashiCorp Vault's transit engine, with security.kek_provider=vault-transit."""
+
+    address: str | None = None  # https://vault.example.com:8200
+    token: SecretStr | None = None  # or an AppRole:
+    role_id: str | None = Field(default=None, max_length=128)
+    secret_id: SecretStr | None = None
+    approle_mount: str = Field(default="approle", pattern=_VAULT_PATH)
+    transit_mount: str = Field(default="transit", pattern=_VAULT_PATH)
+    transit_key: str = Field(default="nexusflow", pattern=r"^[A-Za-z0-9_-]{1,128}$")
+    namespace: str | None = Field(default=None, pattern=_VAULT_PATH)
+    ca_cert: Path | None = None  # a private CA; else the system trust store
+    timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+    retries: int = Field(default=5, ge=0, le=20)
+    allow_insecure_http: bool = False  # development only; refused in production
 
 
 class ScrapingSettings(_Section):
@@ -358,6 +381,7 @@ class Settings(BaseSettings):
     redis: RedisSettings = Field(default_factory=RedisSettings)
     broker: BrokerSettings = Field(default_factory=BrokerSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
+    vault: VaultSettings = Field(default_factory=VaultSettings)
     scraping: ScrapingSettings = Field(default_factory=ScrapingSettings)
     ai: AISettings = Field(default_factory=AISettings)
     notifications: NotificationSettings = Field(default_factory=NotificationSettings)
@@ -398,6 +422,12 @@ class Settings(BaseSettings):
             problems.append("security.hmac_pepper must be at least 32 bytes")
         if sec.encryption_keys is None:
             problems.append("security.encryption_keys is required")
+        if sec.kek_provider == "vault-transit":
+            vault = self.vault
+            if not vault.address:
+                problems.append("vault.address is required with kek_provider=vault-transit")
+            if vault.token is None and (vault.role_id is None or vault.secret_id is None):
+                problems.append("vault.token or vault.role_id and vault.secret_id are required")
         if self.ai.provider == "anthropic" and self.ai.api_key is None:
             problems.append("ai.api_key is required when ai.provider=anthropic")
         return problems
@@ -417,6 +447,10 @@ class Settings(BaseSettings):
         )
         if self.scraping.allow_http:
             problems.append("scraping.allow_http must be false")
+        if self.security.kek_provider == "vault-transit" and (
+            self.vault.allow_insecure_http or urlsplit(self.vault.address or "").scheme != "https"
+        ):
+            problems.append("vault.address must use https")
         if self.n8n.webhook_jwt_secret is None:
             problems.append("n8n.webhook_jwt_secret is required")
         return problems

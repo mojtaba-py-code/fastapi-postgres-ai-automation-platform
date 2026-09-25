@@ -71,6 +71,7 @@ from nexusflow.infrastructure.security.hashing import HmacTokenHasher, SecureTok
 from nexusflow.infrastructure.security.jwt_tokens import JwtKeyRing, JwtTokenCodec
 from nexusflow.infrastructure.security.passwords import Argon2idPasswordHasher
 from nexusflow.infrastructure.security.totp import TotpService
+from nexusflow.infrastructure.security.vault import unwrap_keyring
 from nexusflow.infrastructure.storage.local import LocalFileStorage
 from nexusflow.infrastructure.storage.scanning import ClamdScanner, NoopScanner
 
@@ -133,9 +134,14 @@ def build_security(settings: Settings) -> tuple[EnvelopeCipher, HmacTokenHasher,
     sec = settings.security
     if sec.encryption_keys is None or sec.hmac_pepper is None or sec.jwt_private_key is None:
         raise ValueError("key material missing (validated at settings load)")
-    cipher = EnvelopeCipher.from_config(
-        sec.encryption_keys.get_secret_value(), sec.encryption_active_key_id
-    )
+    if sec.kek_provider == "vault-transit":
+        # The keyring holds Vault ciphertexts: unwrapped once, kept in memory.
+        keys = unwrap_keyring(settings.vault, sec.encryption_keys.get_secret_value())
+        cipher = EnvelopeCipher(keys, sec.encryption_active_key_id)
+    else:
+        cipher = EnvelopeCipher.from_config(
+            sec.encryption_keys.get_secret_value(), sec.encryption_active_key_id
+        )
     hasher = HmacTokenHasher(decode_key_bytes(sec.hmac_pepper.get_secret_value()))
     keyring = JwtKeyRing.from_pem(
         sec.jwt_private_key.get_secret_value(), sec.jwt_key_id, sec.jwt_previous_public_keys

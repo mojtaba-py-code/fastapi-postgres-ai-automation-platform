@@ -115,6 +115,7 @@ Key material, token lifetimes, password hashing and brute-force protection.
 | `NEXUSFLOW_SECURITY__LOCKOUT_BASE_SECONDS` | int | `900` | >= 60 |
 | `NEXUSFLOW_SECURITY__LOCKOUT_MAX_SECONDS` | int | `86400` | >= 900 |
 | `NEXUSFLOW_SECURITY__ENCRYPTION_KEYS` | secret (optional) | *(none)* | secret: prefer `…_FILE` |
+| `NEXUSFLOW_SECURITY__KEK_PROVIDER` | one of: `local`, `vault-transit` | `local` |  |
 | `NEXUSFLOW_SECURITY__ENCRYPTION_ACTIVE_KEY_ID` | str | `kek-1` | pattern `^[A-Za-z0-9._-]{1,32}$` |
 | `NEXUSFLOW_SECURITY__HMAC_PEPPER` | secret (optional) | *(none)* | secret: prefer `…_FILE` |
 | `NEXUSFLOW_SECURITY__PASSWORD_RESET_TTL_SECONDS` | int | `1800` | >= 300; <= 86400 |
@@ -122,6 +123,25 @@ Key material, token lifetimes, password hashing and brute-force protection.
 | `NEXUSFLOW_SECURITY__INVITATION_TTL_SECONDS` | int | `259200` | >= 3600; <= 1209600 |
 | `NEXUSFLOW_SECURITY__WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS` | int | `300` | >= 30; <= 900 |
 | `NEXUSFLOW_SECURITY__MFA_ISSUER` | str | `NexusFlow AI` |  |
+
+### `vault`
+
+
+
+| Variable | Type | Default | Constraints |
+|---|---|---|---|
+| `NEXUSFLOW_VAULT__ADDRESS` | str (optional) | *(unset)* |  |
+| `NEXUSFLOW_VAULT__TOKEN` | secret (optional) | *(none)* | secret: prefer `…_FILE` |
+| `NEXUSFLOW_VAULT__ROLE_ID` | str (optional) | *(unset)* |  |
+| `NEXUSFLOW_VAULT__SECRET_ID` | secret (optional) | *(none)* | secret: prefer `…_FILE` |
+| `NEXUSFLOW_VAULT__APPROLE_MOUNT` | str | `approle` | pattern `^[A-Za-z0-9_-]{1,64}(/[A-Za-z0-9_-]{1,64}){0,3}$` |
+| `NEXUSFLOW_VAULT__TRANSIT_MOUNT` | str | `transit` | pattern `^[A-Za-z0-9_-]{1,64}(/[A-Za-z0-9_-]{1,64}){0,3}$` |
+| `NEXUSFLOW_VAULT__TRANSIT_KEY` | str | `nexusflow` | pattern `^[A-Za-z0-9_-]{1,128}$` |
+| `NEXUSFLOW_VAULT__NAMESPACE` | str (optional) | *(unset)* | pattern `^[A-Za-z0-9_-]{1,64}(/[A-Za-z0-9_-]{1,64}){0,3}$` |
+| `NEXUSFLOW_VAULT__CA_CERT` | path (optional) | *(unset)* |  |
+| `NEXUSFLOW_VAULT__TIMEOUT_SECONDS` | float | `10.0` | > 0; <= 60 |
+| `NEXUSFLOW_VAULT__RETRIES` | int | `5` | >= 0; <= 20 |
+| `NEXUSFLOW_VAULT__ALLOW_INSECURE_HTTP` | bool | `false` |  |
 
 ### `scraping`
 

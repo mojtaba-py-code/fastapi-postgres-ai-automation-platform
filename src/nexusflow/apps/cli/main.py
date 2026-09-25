@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import sys
 import time
 from collections.abc import Awaitable, Callable, Sequence
@@ -29,7 +30,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from nexusflow.bootstrap.container import Container, build_container
-from nexusflow.core.config import Settings
+from nexusflow.core.config import Settings, decode_key_bytes
 from nexusflow.core.correlation import correlation
 from nexusflow.core.errors import InvalidInputError, NexusFlowError
 from nexusflow.core.ids import uuid7
@@ -41,6 +42,7 @@ from nexusflow.domain.shared.unit_of_work import TenantScope
 from nexusflow.infrastructure.database.engine import ssl_connect_args
 from nexusflow.infrastructure.observability.logging import configure_logging
 from nexusflow.infrastructure.redis.client import FeatureFlags
+from nexusflow.infrastructure.security.vault import VaultTransit, new_key
 
 CLI_META = RequestMeta(request_id="cli", ip=None, user_agent="nexusflow-cli")
 
@@ -211,6 +213,47 @@ async def user_erase(c: Container, args: argparse.Namespace) -> dict[str, Any]:
 # -------------------------------------------------------- keys and audit
 
 
+def keys_vault_wrap(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
+    """Move a local keyring into Vault: wrap each key (the keys themselves stay
+    the same, so no stored data changes). Prints ciphertexts only."""
+    if settings.security.kek_provider != "local" or settings.security.encryption_keys is None:
+        raise InvalidInputError(
+            "The keyring is not a local one: use vault-new or vault-rewrap.",
+            code="keyring_not_local",
+        )
+    keys = json.loads(settings.security.encryption_keys.get_secret_value())
+    transit = VaultTransit(settings.vault)
+    try:
+        wrapped = {key_id: transit.encrypt_key(decode_key_bytes(v)) for key_id, v in keys.items()}
+    finally:
+        transit.close()
+    return {"encryption_keys": wrapped}
+
+
+def keys_vault_new(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
+    """A new key-encryption key, generated here and printed only wrapped by
+    Vault: add it to the keyring, make it active, then run keys rewrap."""
+    transit = VaultTransit(settings.vault)
+    try:
+        return {"key_id": args.key_id, "wrapped": transit.encrypt_key(new_key())}
+    finally:
+        transit.close()
+
+
+def keys_vault_rewrap(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
+    """After rotating the transit key in Vault: the keyring re-wrapped under
+    its newest version (the keys, and so the stored data, do not change)."""
+    sec = settings.security
+    if sec.kek_provider != "vault-transit" or sec.encryption_keys is None:
+        raise InvalidInputError("The keyring is not wrapped by Vault.", code="keyring_not_vault")
+    wrapped = json.loads(sec.encryption_keys.get_secret_value())
+    transit = VaultTransit(settings.vault)
+    try:
+        return {"encryption_keys": transit.rewrap(wrapped)}
+    finally:
+        transit.close()
+
+
 async def keys_rewrap(c: Container, args: argparse.Namespace) -> dict[str, Any]:
     """Re-wrap everything under the active key, then count - without locks -
     what is still under an older one. Batches skip rows other transactions
@@ -377,6 +420,12 @@ async def _probe_database(url: str, connect_args: dict[str, Any]) -> None:
 # ------------------------------------------------------------------ parser
 
 
+def _key_id(value: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,32}", value):
+        raise argparse.ArgumentTypeError("1-32 characters: letters, digits, '.', '_' or '-'")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="nexusflow", description="NexusFlow AI operator CLI")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -430,17 +479,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     _people_commands(sub)
 
-    keys = sub.add_parser("keys", help="encryption key maintenance").add_subparsers(
-        dest="action", required=True
-    )
-    rewrap = keys.add_parser("rewrap", help="re-encrypt secrets under the active KEK")
-    rewrap.add_argument(
-        "--passes", type=int, default=3, help="re-wrap passes per tenant while data remains"
-    )
-    rewrap.add_argument(
-        "--wait-seconds", type=float, default=5.0, help="pause between passes (held rows)"
-    )
-    rewrap.set_defaults(handler=keys_rewrap)
+    _key_commands(sub)
 
     audit = sub.add_parser("audit", help="audit trail").add_subparsers(dest="action", required=True)
     purge = audit.add_parser(
@@ -457,6 +496,30 @@ def build_parser() -> argparse.ArgumentParser:
     deactivate.add_argument("--workflow-id", required=True)
     deactivate.set_defaults(handler=n8n_deactivate)
     return parser
+
+
+def _key_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    """Encryption key maintenance, including the keyring wrapped by Vault."""
+    keys = sub.add_parser("keys", help="encryption key maintenance").add_subparsers(
+        dest="action", required=True
+    )
+    rewrap = keys.add_parser("rewrap", help="re-encrypt secrets under the active KEK")
+    rewrap.add_argument(
+        "--passes", type=int, default=3, help="re-wrap passes per tenant while data remains"
+    )
+    rewrap.add_argument(
+        "--wait-seconds", type=float, default=5.0, help="pause between passes (held rows)"
+    )
+    rewrap.set_defaults(handler=keys_rewrap)
+    keys.add_parser(
+        "vault-wrap", help="wrap the local keyring with Vault transit (prints ciphertexts)"
+    ).set_defaults(sync_handler=keys_vault_wrap)
+    vault_new = keys.add_parser("vault-new", help="a new KEK, printed wrapped by Vault")
+    vault_new.add_argument("--key-id", required=True, type=_key_id)
+    vault_new.set_defaults(sync_handler=keys_vault_new)
+    keys.add_parser(
+        "vault-rewrap", help="re-wrap the keyring under the newest transit key version"
+    ).set_defaults(sync_handler=keys_vault_rewrap)
 
 
 def _people_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -506,6 +569,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = check_config(settings)
         elif args.command == "migrate":
             result = migrate(settings, args.config)
+        elif getattr(args, "sync_handler", None) is not None:
+            result = args.sync_handler(settings, args)  # no database needed
         else:
             result = asyncio.run(_run(settings, args.handler, args))
     except NexusFlowError as exc:

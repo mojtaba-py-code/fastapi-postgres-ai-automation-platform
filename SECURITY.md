@@ -108,7 +108,9 @@ Details are in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) and
 **Integrity, audit and operations**
 * Secrets are sealed with AES-256-GCM envelope encryption, bound to their context
   (AAD) and protected by rotatable KEKs, then re-encrypted in the background after
-  rotation.
+  rotation. The KEKs can be kept wrapped by HashiCorp Vault's transit engine, so
+  the secrets file alone decrypts nothing and access to the keys is granted and
+  audited in Vault.
 * Tenant data at rest: the values of fields marked `sensitive` (in records, their
   history and change diffs), staged raw payloads, uploaded files and reports are
   encrypted by the application under the same KEKs, each bound to its tenant and
