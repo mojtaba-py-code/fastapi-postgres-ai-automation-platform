@@ -26,6 +26,7 @@ from nexusflow.apps.workers.handlers import (
     dispatch_due_workflows,
     evaluate_alerts,
     route_event,
+    sweep_alerts,
     sweep_detection,
 )
 from nexusflow.apps.workers.messages import (
@@ -554,6 +555,7 @@ class TestAutomationPauses:
         deps, _ = _deps(container)
         await dispatch_due_workflows(deps, Empty())
         await sweep_detection(deps, Empty())
+        await sweep_alerts(deps, Empty())
         await detect_changes(deps, DatasetMessage(org_id=org_id, dataset_id=uuid4()))
         await evaluate_alerts(deps, OrgMessage(org_id=org_id))
         await analyze_changes(deps, InsightMessage(org_id=org_id, insight_id=uuid4()))

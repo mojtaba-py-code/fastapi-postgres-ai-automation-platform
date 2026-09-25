@@ -263,6 +263,22 @@ async def evaluate_alerts(deps: WorkerDeps, msg: OrgMessage) -> None:
         await c.alerts.evaluate_changes(org_id=msg.org_id)
 
 
+async def sweep_alerts(deps: WorkerDeps, msg: Empty) -> None:
+    """Safety net: evaluate the changes no evaluation reached - an event that was
+    lost, or whose evaluation failed for good. Evaluation is idempotent, so it
+    runs whatever the orchestration mode; paused tenants wait for their release."""
+    c = deps.container
+    if (reason := await _paused(c, None)) is not None:
+        _log.info("alert_sweep_skipped", reason=reason)
+        return
+
+    async def evaluate(org_id: UUID) -> None:
+        if await _paused(c, org_id) is None:
+            await c.alerts.evaluate_changes(org_id=org_id)
+
+    await _each_tenant(c, evaluate, "alert_sweep")
+
+
 async def deliver_notification(deps: WorkerDeps, msg: DeliveryMessage) -> None:
     # The notification service schedules its own retries (with backoff and a
     # dead letter at the end); this task only has to run one attempt.

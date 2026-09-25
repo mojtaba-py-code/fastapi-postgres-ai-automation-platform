@@ -25,13 +25,17 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from uuid import UUID, uuid4
 
+import asyncpg
 import httpx2
 import pytest
 
+from nexusflow.apps.workers.handlers import WorkerDeps, sweep_alerts
+from nexusflow.apps.workers.messages import Empty
 from nexusflow.bootstrap.container import Container
 from nexusflow.core.clock import FrozenClock
 from nexusflow.core.config import RateLimitRule
 from nexusflow.core.errors import PermanentError, PolicyViolationError, TransientError
+from nexusflow.domain.alerts import service as alert_service
 from nexusflow.domain.automation.maintenance import (
     MAX_ANALYSIS_ATTEMPTS,
     MAX_RUN_ATTEMPTS,
@@ -1231,6 +1235,100 @@ class TestAlertRulesOnSensitiveFields:
         for alert in alerts:  # the rule saw the numbers; the alert still does not show them
             assert "150" not in alert["body"]
             assert "%" not in alert["body"]
+
+
+# --------------------------------------------------------------------------
+# Alert evaluation of large backlogs
+# --------------------------------------------------------------------------
+
+
+async def _new_listings(api: httpx2.AsyncClient, container: Container, count: int) -> Tenant:
+    """A tenant whose rule alerts on every new record, and one run of ``count`` new ones."""
+    tenant = await _tenant(api)
+    dataset_id = await _dataset(tenant)
+    await _rule(
+        tenant,
+        dataset_id=dataset_id,
+        name="New listings",
+        condition={"type": "change_type", "change_types": ["created"]},
+    )
+    source_id = await create_source(
+        tenant.owner, tenant.project_id, dataset_id, {**_website(), "max_items": 1000}
+    )
+    await _collect(tenant, container, source_id, [{"sku": f"S-{n:04d}"} for n in range(count)])
+    return tenant
+
+
+async def _run_the_chain(bus: InProcessBus, org_id: UUID) -> list[str]:
+    """Handle the tenant's messages, and what they emit, to the end - except the
+    alert.triggered events of every new alert, which only forward to n8n."""
+    handled: list[str] = []
+    while bus._next < len(bus.messages):
+        message = bus.messages[bus._next]
+        bus._next += 1
+        if message.org_id == org_id and message.payload.get("event") != "alert.triggered":
+            handled.append(await bus.run(message))
+    return handled
+
+
+async def _evaluation_state(admin_conn: asyncpg.Connection, org_id: UUID) -> tuple[int, int]:
+    alerts = await admin_conn.fetchval("SELECT count(*) FROM alerts WHERE org_id = $1", org_id)
+    pending = await admin_conn.fetchval(
+        "SELECT count(*) FROM changes WHERE org_id = $1 AND NOT alerts_evaluated", org_id
+    )
+    return alerts, pending
+
+
+class TestAlertBacklog:
+    async def test_every_change_of_a_large_detection_batch_is_evaluated(
+        self,
+        api: httpx2.AsyncClient,
+        container: Container,
+        bus: InProcessBus,
+        admin_conn: asyncpg.Connection,
+    ) -> None:
+        # One run, one detection batch - and more changes than one evaluation batch.
+        tenant = await _new_listings(api, container, 600)
+        handled = await _run_the_chain(bus, tenant.org_id)
+        assert_in_order(
+            handled,
+            "nexusflow.events.route:collection.completed",
+            "nexusflow.events.route:changes.detected",
+        )
+        assert await _evaluation_state(admin_conn, tenant.org_id) == (600, 0)
+
+    async def test_a_backlog_beyond_one_evaluation_is_handed_on_until_it_is_done(
+        self,
+        api: httpx2.AsyncClient,
+        container: Container,
+        bus: InProcessBus,
+        admin_conn: asyncpg.Connection,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(alert_service, "_EVALUATION_BATCH", 20)
+        monkeypatch.setattr(alert_service, "_BATCHES_PER_EVALUATION", 2)
+        tenant = await _new_listings(api, container, 130)
+        handled = await _run_the_chain(bus, tenant.org_id)
+        # 40 changes per evaluation: three follow-up jobs, the last finding the end.
+        assert handled.count("nexusflow.alerts.evaluate") == 3
+        assert await _evaluation_state(admin_conn, tenant.org_id) == (130, 0)
+
+    async def test_the_sweep_evaluates_changes_no_event_reached(
+        self,
+        api: httpx2.AsyncClient,
+        container: Container,
+        admin_conn: asyncpg.Connection,
+    ) -> None:
+        tenant = await _new_listings(api, container, 30)
+        [dataset] = (await tenant.owner.get("/api/v1/datasets")).json()["items"]
+        # Detected, but its changes.detected event was lost (or failed for good).
+        await container.detection.detect(org_id=tenant.org_id, dataset_id=UUID(dataset["id"]))
+        assert await _evaluation_state(admin_conn, tenant.org_id) == (0, 30)
+
+        deps = WorkerDeps(container=container, dispatcher=cast(Any, None))
+        await sweep_alerts(deps, Empty())
+
+        assert await _evaluation_state(admin_conn, tenant.org_id) == (30, 0)
 
 
 # --------------------------------------------------------------------------

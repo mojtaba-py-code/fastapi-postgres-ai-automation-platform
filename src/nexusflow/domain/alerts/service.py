@@ -34,6 +34,9 @@ from nexusflow.domain.shared.unit_of_work import TenantScope, UnitOfWork, UnitOf
 from nexusflow.domain.sources.model import RunStatus
 
 _EVALUATION_BATCH = 500
+# Batches one evaluation works through before it hands the rest of a backlog on
+# to a follow-up job (one detection batch alone can create 1,000 changes).
+_BATCHES_PER_EVALUATION = 4
 
 
 class AlertService:
@@ -228,12 +231,28 @@ class AlertService:
     # ------------------------------------------------------------ evaluation
 
     async def evaluate_changes(self, *, org_id: UUID) -> int:
-        """Evaluate rules for not-yet-evaluated changes; returns alerts created."""
+        """Evaluate rules for not-yet-evaluated changes; returns alerts created.
+
+        Batch by batch, each in a transaction of its own. A backlog larger than
+        one evaluation works through is handed on to a follow-up
+        ``EVALUATE_ALERTS`` job (queued with the last batch), so no change waits
+        for the next event - or for ever.
+        """
+        created = 0
+        for left in reversed(range(_BATCHES_PER_EVALUATION)):
+            alerts, more = await self._evaluate_batch(org_id, hand_on=left == 0)
+            created += alerts
+            if not more:
+                break
+        return created
+
+    async def _evaluate_batch(self, org_id: UUID, *, hand_on: bool) -> tuple[int, bool]:
+        """One batch: returns the alerts created and whether more may be pending."""
         created = 0
         async with self._uow_factory(TenantScope.system(org_id)) as uow:
             changes = await uow.data.changes.pending_alerts(org_id, limit=_EVALUATION_BATCH)
             if not changes:
-                return 0
+                return 0, False
             rules_cache: dict[UUID, list[AlertRule]] = {}
             sensitive_cache: dict[UUID, tuple[frozenset[str], bool]] = {}
             for change in changes:
@@ -251,8 +270,18 @@ class AlertService:
                 for rule in rules_cache[change.dataset_id]:
                     created += await self._fire(uow, rule, subject)
             await uow.data.changes.mark_alerts_evaluated([c.id for c in changes])
+            more = len(changes) == _EVALUATION_BATCH
+            if more and hand_on:
+                await uow.outbox.add(
+                    new_message(
+                        TaskName.EVALUATE_ALERTS,
+                        {"org_id": str(org_id)},
+                        org_id=org_id,
+                        now=self._clock.now(),
+                    )
+                )
             await uow.commit()
-        return created
+        return created, more
 
     async def evaluate_insight(self, *, org_id: UUID, insight_id: UUID) -> int:
         """Evaluate ``insight_risk_at_least`` rules for a completed AI insight."""

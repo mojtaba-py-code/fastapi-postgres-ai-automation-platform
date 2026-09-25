@@ -138,6 +138,7 @@ PLATFORM_TASKS: tuple[TaskSpec[Any], ...] = (
         "nexusflow.automation.dispatch", m.Empty, h.dispatch_due_workflows, retries=0, periodic=True
     ),
     TaskSpec("nexusflow.automation.sweep", m.Empty, h.sweep_detection, retries=0, periodic=True),
+    TaskSpec("nexusflow.alerts.sweep", m.Empty, h.sweep_alerts, retries=0, periodic=True),
     TaskSpec("nexusflow.outbox.relay", m.Empty, h.relay_outbox, retries=0, periodic=True),
     TaskSpec(
         "nexusflow.maintenance.retention", m.Empty, h.apply_retention, retries=0, periodic=True
