@@ -108,6 +108,7 @@ for the developer workflow.
 | [SECURITY.md](SECURITY.md) | Security model summary and vulnerability disclosure |
 | [THREAT_MODEL.md](docs/THREAT_MODEL.md) | STRIDE analysis per component, with mitigations and residual risks |
 | [SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md) | How the code was reviewed, every finding and its fix |
+| [ASVS.md](docs/ASVS.md) | Self-assessed mapping to OWASP ASVS 5.0 (target Level 2), with evidence and gaps |
 | [API.md](docs/API.md) | REST API: authentication, conventions, endpoints, errors |
 | [CONFIGURATION.md](docs/CONFIGURATION.md) | Every setting, generated from the code |
 | [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Production deployment, secrets, rotation, backups, upgrades |

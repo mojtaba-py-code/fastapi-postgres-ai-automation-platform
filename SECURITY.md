@@ -130,5 +130,7 @@ Details are in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) and
 
 The code has been reviewed with AI assistance (adversarial code review,
 due-diligence and traceability audits, test-driven reviews); every finding and
-its fix is recorded in [docs/SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md). It has
-**not** been penetration-tested by an independent third party.
+its fix is recorded in [docs/SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md). A
+self-assessed mapping to OWASP ASVS 5.0, with evidence and the remaining gaps, is in
+[docs/ASVS.md](docs/ASVS.md). It has **not** been penetration-tested or assessed by
+an independent third party.

@@ -37,7 +37,9 @@ with regression tests (or, for configuration, in the file named as evidence),
 except one accepted risk (sign-up reveals registered e-mails; it is
 rate-limited). The full record, including the specification's security
 checklist, is in [SECURITY_REVIEW.md](SECURITY_REVIEW.md); residual risks are in
-the [threat model](THREAT_MODEL.md).
+the [threat model](THREAT_MODEL.md). A self-assessed mapping to the seventeen
+chapters of OWASP ASVS 5.0 (target Level 2, with selected Level 3 controls),
+with evidence and the remaining gaps, is in [ASVS.md](ASVS.md).
 
 ## 3. Dependency and supply-chain audit
 
@@ -120,8 +122,9 @@ below.
 3. Publish the first signed release (tag `v0.1.0`) and deploy it by digest.
 
 **Enterprise features**
-4. SSO (OIDC, SAML) and SCIM provisioning; today: local passwords with TOTP, and
-   API keys that follow their creator's membership.
+4. SSO (OIDC, SAML), SCIM provisioning and phishing-resistant MFA (WebAuthn,
+   passkeys); today: local passwords with TOTP, per-organization network
+   allowlists, and API keys that follow their creator's membership.
 5. An admin web UI; today the product is API-first (Swagger is disabled in
    production).
 6. High availability and disaster recovery: managed PostgreSQL with

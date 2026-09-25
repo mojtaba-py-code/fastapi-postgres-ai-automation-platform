@@ -203,6 +203,35 @@ jobs:
           done
           curl -fsS --cacert deploy/certs/dev-ca.pem https://localhost/health/ready
           $COMPOSE run --rm --no-deps api nexusflow audit verify
+      - name: DAST - OWASP ZAP passive scan of every API operation
+        env:
+          ZAP_IMAGE: ghcr.io/zaproxy/zaproxy:2.17.0@sha256:781a2bdaea47324e7bab583e2263f21d257b0aee61ed51521a5be45f5f5081ef
+          ZAP_DIR: ${{ runner.temp }}/zap
+        run: |
+          mkdir -p "$ZAP_DIR" && chmod 777 "$ZAP_DIR"
+          # The edge does not publish the API description; take it from the image.
+          $COMPOSE run --rm --no-deps -T --entrypoint python api -c \
+            'import json; from nexusflow.apps.api.main import create_app; print(json.dumps(create_app(configure_logs=False).openapi()))' \
+            > "$ZAP_DIR/openapi.json"
+          token="$(curl -fsS --cacert deploy/certs/dev-ca.pem -H 'Content-Type: application/json' \
+            -d '{"email": "dast@example.com", "password": "Passive-scan-of-every-operation",
+                 "full_name": "DAST Scanner", "organization_name": "DAST Scan Ltd"}' \
+            https://localhost/api/v1/auth/register | python3 -c 'import json, sys; print(json.load(sys.stdin)["access_token"])')"
+          # Safe mode (-S): every operation is requested as a signed-in owner and the
+          # responses are scanned passively - no attack payloads. The gate fails on
+          # any alert of Medium risk or higher that is not accepted with a reason.
+          docker run --rm --network host -v "$ZAP_DIR:/zap/wrk:rw" \
+            -e ZAP_AUTH_HEADER_VALUE="Bearer $token" -e ZAP_AUTH_HEADER_SITE=localhost \
+            "$ZAP_IMAGE" zap-api-scan.py -t openapi.json -f openapi -O https://localhost -S -I \
+            -r zap-report.html -J zap-report.json
+          python3 scripts/zap_gate.py "$ZAP_DIR/zap-report.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: zap-report
+          path: ${{ runner.temp }}/zap/zap-report.*
+          retention-days: 14
+          if-no-files-found: ignore
       - name: Service status and logs
         if: failure()
         run: |
