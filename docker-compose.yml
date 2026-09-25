@@ -92,7 +92,7 @@ services:
   # ------------------------------------------------------------------ edge
   nginx:
     <<: *hardened
-    image: nginxinc/nginx-unprivileged:${NGINX_VERSION:-1.29-alpine@sha256:0c79d56aee561a1d81c63f00eee5fb5fe29279560cdc55e91425133104c7fbe6}
+    image: ${NGINX_IMAGE:-nginxinc/nginx-unprivileged:1.29-alpine@sha256:0c79d56aee561a1d81c63f00eee5fb5fe29279560cdc55e91425133104c7fbe6}
     tmpfs: ["/tmp:size=32m,noexec,nosuid,nodev"]
     ports:
       # IPv4 only: an IPv6 client would reach nginx through Docker's userland
@@ -292,7 +292,7 @@ services:
     # its owner set-up first. Set the owner up as soon as you enable it.
     profiles: ["n8n"]
     init: false                   # the image runs its own init (tini)
-    image: n8nio/n8n:${N8N_VERSION:-2.40.6@sha256:9c7871d5cc4fc2565bb905e4df5bf7d6a5a4bf2f4313fb99a2b3fa380f331d7c}   # keep current: n8n ships frequent security fixes
+    image: ${N8N_IMAGE:-n8nio/n8n:2.40.6@sha256:9c7871d5cc4fc2565bb905e4df5bf7d6a5a4bf2f4313fb99a2b3fa380f331d7c}   # keep current: n8n ships frequent security fixes
     read_only: false              # n8n writes its settings/cache under /home/node
     tmpfs: ["/tmp:size=64m,noexec,nosuid,nodev"]
     environment:
@@ -332,7 +332,7 @@ services:
   # ------------------------------------------------------------- data
   postgres:
     <<: *hardened
-    image: postgres:${POSTGRES_VERSION:-17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24}
+    image: ${POSTGRES_IMAGE:-postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24}
     # The image's own "postgres" user from the start: no root, no capabilities
     # (the entrypoint supports it; the data volume belongs to that user).
     user: postgres
@@ -381,7 +381,7 @@ services:
 
   redis:
     <<: *hardened
-    image: redis:${REDIS_VERSION:-7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499}
+    image: ${REDIS_IMAGE:-redis:7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499}
     user: "999:1000"
     command: ["redis-server", "/usr/local/etc/redis/redis-tls.conf"]
     volumes:
@@ -402,7 +402,7 @@ services:
     # Disposable robots.txt / host-throttle cache for the sandbox pool only:
     # no persistence, LRU eviction, nothing the platform depends on.
     <<: *hardened
-    image: redis:${REDIS_VERSION:-7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499}
+    image: ${REDIS_IMAGE:-redis:7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499}
     user: "999:1000"
     command: ["redis-server", "/usr/local/etc/redis/redis-tls.conf"]
     volumes:
@@ -419,7 +419,7 @@ services:
 
   rabbitmq:
     <<: *hardened
-    image: rabbitmq:${RABBITMQ_VERSION:-4.1-alpine@sha256:8146e69328150e9162c7ca5bfc4b29de4df2d92179ad84d0cc29e55eb27953b5}
+    image: ${RABBITMQ_IMAGE:-rabbitmq:4.1-alpine@sha256:8146e69328150e9162c7ca5bfc4b29de4df2d92179ad84d0cc29e55eb27953b5}
     # Start as the image's own user: its entrypoint only switches users when it
     # runs as root, which would need SETUID/SETGID (all capabilities are dropped).
     user: rabbitmq
@@ -446,7 +446,7 @@ services:
   clamav:
     <<: *hardened
     profiles: ["av"]              # enable: docker compose --profile av up -d
-    image: clamav/clamav:${CLAMAV_VERSION:-1.4@sha256:a5f03c12a79dbe9f6d8a527b6bb1ea053fa8dd061d3738a26897f055ee2d9303}
+    image: ${CLAMAV_IMAGE:-clamav/clamav:1.4@sha256:a5f03c12a79dbe9f6d8a527b6bb1ea053fa8dd061d3738a26897f055ee2d9303}
     read_only: false
     # Upstream's unprivileged mode: no root, no capabilities.
     user: clamav
@@ -462,7 +462,7 @@ services:
   # ---------------------------------------------------------- monitoring
   prometheus:
     <<: *hardened
-    image: prom/prometheus:${PROMETHEUS_VERSION:-v3.5.0@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996}
+    image: ${PROMETHEUS_IMAGE:-prom/prometheus:v3.5.0@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996}
     command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=15d"]
     volumes:
       - ./deploy/prometheus:/etc/prometheus:ro
@@ -472,7 +472,7 @@ services:
 
   alertmanager:
     <<: *hardened
-    image: prom/alertmanager:${ALERTMANAGER_VERSION:-v0.34.1@sha256:e9733bafb1bdef9b00e25a21f8f99dc26a22224bf16641ad754d1649f4c3357a}
+    image: ${ALERTMANAGER_IMAGE:-prom/alertmanager:v0.34.1@sha256:e9733bafb1bdef9b00e25a21f8f99dc26a22224bf16641ad754d1649f4c3357a}
     command: ["--config.file=/etc/alertmanager/alertmanager.yml", "--storage.path=/alertmanager"]
     volumes:
       - ./deploy/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
@@ -483,7 +483,7 @@ services:
 
   grafana:
     <<: *hardened
-    image: grafana/grafana-oss:${GRAFANA_VERSION:-12.1.0@sha256:6ac590e7cabc2fbe8d7b8fc1ce9c9f0582177b334e0df9c927ebd9670469440f}
+    image: ${GRAFANA_IMAGE:-grafana/grafana-oss:12.1.0@sha256:6ac590e7cabc2fbe8d7b8fc1ce9c9f0582177b334e0df9c927ebd9670469440f}
     tmpfs: ["/tmp:size=32m"]
     environment:
       GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_password

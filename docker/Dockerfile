@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 #
 # NexusFlow AI platform image: one image, several roles (api, internal api,
 # pipeline / integrations / sandbox workers, beat, migrations) selected by the
@@ -7,15 +7,13 @@
 # * dependencies come from uv.lock (hash-verified), no build tools at runtime;
 # * runs as an unprivileged user with a read-only root filesystem;
 # * pip / setuptools are removed from the runtime virtualenv.
-# Pin base images by digest in production (Dependabot keeps them fresh).
+# Base images are pinned by digest in literal FROM lines - the form Dependabot
+# reads, so it proposes their updates (scripts/pin_images.py re-pins them).
 
-ARG PYTHON_IMAGE=python:3.12-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e
-ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.12.18@sha256:3adc3706091ce7c2fe595e669628caedd6d951551b92b258b7e7dbe06d9440bc
-
-FROM ${UV_IMAGE} AS uv
+FROM ghcr.io/astral-sh/uv:0.12.18@sha256:3adc3706091ce7c2fe595e669628caedd6d951551b92b258b7e7dbe06d9440bc AS uv
 
 # ---------------------------------------------------------------- builder
-FROM ${PYTHON_IMAGE} AS builder
+FROM python:3.12-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e AS builder
 COPY --from=uv /uv /usr/local/bin/uv
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
@@ -34,7 +32,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
  && { /opt/venv/bin/python -m pip uninstall -y pip setuptools wheel 2>/dev/null || true; }
 
 # ---------------------------------------------------------------- runtime
-FROM ${PYTHON_IMAGE} AS runtime
+FROM python:3.12-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e AS runtime
 LABEL org.opencontainers.image.title="nexusflow-ai" \
       org.opencontainers.image.description="NexusFlow AI - automation & intelligence platform" \
       org.opencontainers.image.licenses="MIT"

@@ -5,6 +5,10 @@ name: Supply chain
 # Scorecard grades the repository's supply-chain practices every week and on
 # every push to main. Both need a public repository (or GitHub Advanced
 # Security); on a private one they are skipped rather than failing.
+#
+# Every week, Trivy also scans every third-party image the stack runs or
+# builds from (CI scans the two images built here on every change): a fixable
+# HIGH or CRITICAL finding means "update that pin" (make pin-images).
 
 on:
   pull_request:
@@ -12,6 +16,7 @@ on:
     branches: [main]
   schedule:
     - cron: "37 5 * * 2"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -21,6 +26,41 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  third-party-images:
+    name: Third-party images (list)
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      images: ${{ steps.list.outputs.images }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with: {persist-credentials: false}
+      - id: list
+        # Standard library only: the runner's own Python.
+        run: |
+          images="$(python3 scripts/pin_images.py --list \
+            | python3 -c 'import json, sys; print(json.dumps(sys.stdin.read().split()))')"
+          echo "images=${images}" >> "$GITHUB_OUTPUT"
+
+  third-party-image-scan:
+    name: Trivy
+    needs: third-party-images
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.third-party-images.outputs.images) }}
+    steps:
+      - name: Trivy - fixable HIGH/CRITICAL
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          image-ref: ${{ matrix.image }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
   dependency-review:
     name: Dependency review
     if: ${{ github.event_name == 'pull_request' && !github.event.repository.private }}
