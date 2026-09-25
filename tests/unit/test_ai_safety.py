@@ -76,6 +76,21 @@ class TestPromptSpotlighting:
         assert top in first.included_change_ids
         assert len(first.included_change_ids) < len(changes)  # budget respected
 
+    def test_a_change_too_large_for_the_budget_does_not_crowd_out_the_others(self) -> None:
+        huge = {"id": str(uuid4()), "score": 99, "diff": {"notes": "x" * 5000}}
+        small = [{"id": str(uuid4()), "score": score, "diff": {"t": "y"}} for score in (50, 10)]
+        package = build_prompt(
+            dataset_name="d",
+            period="p",
+            changes=[huge, *small],
+            statistics={},
+            hosts=frozenset(),
+            budget_chars=1000,
+        )
+        # The most significant change is skipped, not a reason to stop.
+        assert package.included_change_ids == frozenset(change["id"] for change in small)
+        assert huge["id"] not in package.user_prompt
+
 
 def _output(**overrides: Any) -> str:
     document: dict[str, Any] = {

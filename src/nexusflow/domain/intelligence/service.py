@@ -11,7 +11,7 @@ otherwise the deterministic offline analyser is used.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
@@ -180,11 +180,19 @@ class IntelligenceService:
             return await self._load(org_id, insight_id)
         usage: dict[str, Any] = {}
         provider_name, model = "offline", "heuristic-v1"
+        analysed = claim.change_ids
+        provider = self._provider if claim.external_allowed and claim.changes else None
         try:
-            if claim.external_allowed and self._provider is not None and claim.changes:
-                output, usage = await self._run_model(claim)
-                provider_name, model = self._provider.name, self._provider.model
+            package = self._package(claim) if provider is not None else None
+            if provider is not None and package is not None and package.included_change_ids:
+                output, usage = await self._run_model(claim, provider, package)
+                provider_name, model = provider.name, provider.model
+                # Only the changes the model saw are analysed; the others - over the
+                # context budget - are left for the next analysis.
+                analysed = [i for i in claim.change_ids if str(i) in package.included_change_ids]
             else:
+                # No consent, no provider, or not one change small enough for the
+                # model's context: the offline analyser covers them all.
                 output = offline_analysis(claim.changes, dataset_name=claim.dataset_name)
         except (OutputRejectedError, AIRefusalError) as rejection:
             return await self._finish_rejected(claim.insight, rejection)
@@ -193,7 +201,7 @@ class IntelligenceService:
         except Exception:
             await self._release(claim.insight)  # transient: back to PENDING, the job retries
             raise
-        return await self._finish(claim, output, provider_name, model, usage)
+        return await self._finish(claim, output, provider_name, model, usage, analysed)
 
     async def _claim(self, org_id: UUID, insight_id: UUID) -> _Claim | None:
         async with self._uow_factory(TenantScope.system(org_id)) as uow:
@@ -225,10 +233,8 @@ class IntelligenceService:
             external_allowed=external,
         )
 
-    async def _run_model(self, claim: _Claim) -> tuple[AnalysisOutput, dict[str, Any]]:
-        if self._provider is None:  # pragma: no cover - guarded by caller
-            raise PermanentError(code="ai_not_configured")
-        package: PromptPackage = build_prompt(
+    def _package(self, claim: _Claim) -> PromptPackage:
+        return build_prompt(
             dataset_name=claim.dataset_name,
             period="since last analysis",
             changes=claim.changes,
@@ -236,13 +242,17 @@ class IntelligenceService:
             hosts=claim.hosts,
             budget_chars=self._max_input_chars,
         )
+
+    async def _run_model(
+        self, claim: _Claim, provider: AIProvider, package: PromptPackage
+    ) -> tuple[AnalysisOutput, dict[str, Any]]:
         gateway = self._gateway_factory()
         context = ToolContext(
             org_id=claim.insight.org_id,
             dataset_id=claim.insight.dataset_id,
             principal=claim.principal,
         )
-        conversation = self._provider.start(
+        conversation = provider.start(
             AnalysisRequest(
                 system_prompt=package.system_prompt,
                 user_prompt=package.user_prompt,
@@ -290,6 +300,7 @@ class IntelligenceService:
         provider: str,
         model: str,
         usage: dict[str, Any],
+        analysed: Sequence[UUID],  # the changes the output is about
     ) -> Insight:
         now = self._clock.now()
         org_id = claim.insight.org_id
@@ -301,8 +312,8 @@ class IntelligenceService:
                 return insight  # reaped and re-run meanwhile: the newer run owns the insight
             insight.complete(output, provider=provider, model=model, usage=usage, now=now)
             insight.prompt_version = PROMPT_VERSION
-            insight.change_count = len(claim.change_ids)
-            await uow.data.changes.assign_insight(claim.change_ids, insight.id)
+            insight.change_count = len(analysed)
+            await uow.data.changes.assign_insight(analysed, insight.id)
             await uow.outbox.add(
                 event_message(
                     EventType.INSIGHT_CREATED,

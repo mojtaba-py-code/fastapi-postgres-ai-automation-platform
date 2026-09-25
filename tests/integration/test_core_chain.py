@@ -1024,6 +1024,57 @@ class TestAiAnalysis:
         )
         assert len(provider.requests) == 2
 
+    async def test_only_the_changes_the_model_saw_are_marked_analysed(
+        self, api: httpx2.AsyncClient, container: Container, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        tenant = await _tenant(api, external_ai=True)
+        schema = {
+            "fields": [
+                {"name": "sku", "type": "string", "required": True},
+                {"name": "notes", "type": "text"},
+            ],
+            "key_field": "sku",
+        }
+        dataset_id = await _dataset(tenant, schema)
+        source_id = await create_source(tenant.owner, tenant.project_id, dataset_id, _website())
+        items = [{"sku": "B-1", "notes": "x" * 3000}, {"sku": "B-2", "notes": "Short."}]
+        await _collect(tenant, container, source_id, items)
+        await container.detection.detect(org_id=tenant.org_id, dataset_id=UUID(dataset_id))
+        ids = {c["record_key"]: c["id"] for c in await _changes(tenant, dataset_id)}
+        # The context budget holds B-2, but B-1 alone is larger than all of it.
+        monkeypatch.setattr(container.intelligence, "_max_input_chars", 1000)
+        provider = ScriptedProvider(reply(answer(ids["B-2"])))
+        _use(container, monkeypatch, provider)
+        analysed = Analysed(tenant, dataset_id, ids)
+
+        first = await _request_analysis(analysed)
+        await container.intelligence.analyze(org_id=tenant.org_id, insight_id=first)
+
+        _, data = untrusted(provider.requests[0])
+        assert (data["changes_total"], data["changes_included"]) == (2, 1)
+        stored = await _insight(analysed, first)
+        assert (stored["status"], stored["provider"], stored["change_count"]) == (
+            "completed",
+            "scripted",
+            1,
+        )
+        linked = {c["record_key"]: c["insight_id"] for c in await _changes(tenant, dataset_id)}
+        assert linked == {"B-1": None, "B-2": str(first)}  # B-1 waits for the next analysis
+
+        # Nothing that is left fits the model's context: it is analysed offline
+        # (nothing is sent), so it cannot hold up the analyses after it.
+        second = await _request_analysis(analysed)
+        await container.intelligence.analyze(org_id=tenant.org_id, insight_id=second)
+        assert len(provider.requests) == 1
+        stored = await _insight(analysed, second)
+        assert (stored["status"], stored["provider"], stored["change_count"]) == (
+            "completed",
+            "offline",
+            1,
+        )
+        linked = {c["record_key"]: c["insight_id"] for c in await _changes(tenant, dataset_id)}
+        assert linked == {"B-1": str(second), "B-2": str(first)}
+
     async def test_a_stored_insight_feeds_insight_risk_rules(
         self, api: httpx2.AsyncClient, container: Container
     ) -> None:
