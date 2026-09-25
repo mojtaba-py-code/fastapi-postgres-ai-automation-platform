@@ -8,8 +8,10 @@ limits).
 
 ## 1. Host prerequisites
 
-* A recent Linux kernel, Docker Engine ≥ 25 with Compose v2, and automatic security
-  updates.
+* A recent Linux kernel, Docker Engine 28.0 or later with Compose v2, and automatic
+  security updates. Earlier engines let hosts on the same network segment reach
+  ports published on 127.0.0.1 (the n8n editor, Grafana) and route to container
+  ports directly.
 * A host firewall that allows inbound 22 (SSH, preferably from a VPN or bastion) and
   443/80 only.
 * Full-disk encryption or an encrypted volume for Docker data. The application
@@ -25,6 +27,12 @@ limits).
 * The `edge` network uses `172.28.1.0/24`, the only range the API accepts
   forwarded headers from. If that range is taken on the host, set another one in
   `NEXUSFLOW_EDGE_SUBNET` (`.env`).
+* IPv4 at the edge: ports 80 and 443 are published on IPv4 only. An IPv6 client
+  would reach nginx through Docker's userland proxy and appear as the bridge
+  gateway - one address for every IPv6 user, in rate limits, sign-in risk and
+  network allowlists. Do not publish an AAAA record for the platform's domain;
+  serve IPv6 through a dual-stack load balancer in front of the edge (next
+  section).
 
 ### Client addresses behind another proxy
 
@@ -39,27 +47,51 @@ network allowlists all see one address - the balancer's.
 ### Egress firewall (required)
 
 The `egress` network is the only one with internet access. It is shared by the
-integrations worker, the sandbox, the browser and ClamAV (signature updates), with
-inter-container traffic disabled (`enable_icc: false`), so they cannot reach each
-other over it. The application already pins every outbound connection to a
-validated public address (the browser through its pinning egress proxy). Also block
-private ranges at the network layer, as defence in depth against a compromised
-container that no longer runs the application's guards:
+integrations worker, the sandbox, the browser, ClamAV (signature updates) and
+Alertmanager (paging), with inter-container traffic disabled (`enable_icc: false`),
+so they cannot reach each other over it. The application already pins every
+outbound connection to a validated public address (the browser through its pinning
+egress proxy). Also block private ranges at the network layer, as defence in depth
+against a compromised container that no longer runs the application's guards:
 
 ```bash
-docker network inspect nexusflow_egress --format '{{(index .IPAM.Config 0).Subnet}}'
-```
-
-```bash
-EGRESS=172.18.0.0/16  # the subnet printed above
-for net in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10 127.0.0.0/8; do
+EGRESS=$(docker network inspect nexusflow_egress --format '{{(index .IPAM.Config 0).Subnet}}')
+for net in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10; do
   sudo iptables -I DOCKER-USER -s "$EGRESS" -d "$net" -j DROP
 done
 ```
 
-Persist the rules (for example with `iptables-persistent`) and re-apply them if the
-network is recreated. For stricter setups, send `egress` through an allowlisting
-forward proxy.
+Then let name resolution through - **before** the rules above, which is where `-I`
+puts them. Docker's embedded DNS forwards the containers' queries from inside their
+own network to the host's upstream resolvers, which are often in a private range (a
+cloud VPC's resolver, `169.254.169.254` on Google Cloud, a corporate DNS server):
+without this, nothing on `egress` resolves - no collection, no rendering, no e-mail
+or paging:
+
+```bash
+RESOLV=/run/systemd/resolve/resolv.conf; [ -f "$RESOLV" ] || RESOLV=/etc/resolv.conf
+for dns in $(awk '/^nameserver/ {print $2}' "$RESOLV"); do
+  for proto in udp tcp; do
+    sudo iptables -I DOCKER-USER -s "$EGRESS" -d "$dns" -p "$proto" --dport 53 -j RETURN
+  done
+done
+```
+
+Add a `RETURN` rule the same way for any private destination the platform must
+reach: an internal SMTP relay (port 587 or 465) or an on-call endpoint for
+Alertmanager. Traffic from a container to the host itself goes through `INPUT`, not
+`DOCKER-USER`: keep host services closed to the Docker bridge networks in the host
+firewall. nginx needs no outbound connections at all:
+
+```bash
+PUBLIC=$(docker network inspect nexusflow_public --format '{{(index .IPAM.Config 0).Subnet}}')
+sudo iptables -I DOCKER-USER -s "$PUBLIC" -m conntrack --ctstate NEW -j DROP
+```
+
+Check that names still resolve (`docker compose exec worker-integrations python -c
+"import socket; print(socket.getaddrinfo('example.com', 443)[0][4])"`), persist the
+rules (for example with `iptables-persistent`) and re-apply them if a network is
+recreated. For stricter setups, send `egress` through an allowlisting forward proxy.
 
 ### Sandbox isolation (what Compose already does)
 
@@ -71,7 +103,8 @@ forward proxy.
 * Its RabbitMQ user cannot declare anything, reads only the `sandbox` queue and
   publishes only to the `nexusflow.sandbox` exchange. The queue is bounded
   (10,000 messages, 64 MiB) with `reject-publish`.
-* Optionally cap its connections and channels as well:
+* Optionally cap its connections and channels as well (the limit survives the
+  definitions import at every start):
 
 ```bash
 docker compose exec rabbitmq rabbitmqctl set_user_limits -p nexusflow sandbox '{"max-connections": 16, "max-channels": 64}'
@@ -80,23 +113,49 @@ docker compose exec rabbitmq rabbitmqctl set_user_limits -p nexusflow sandbox '{
 ## 2. Configuration and secrets
 
 ```bash
-make secrets    # python scripts/generate_secrets.py
+make secrets    # scripts/generate_secrets.py, then scripts/internal_pki.py
 ```
 
 This writes `./secrets` (directory mode 0700) containing database, Redis and
 RabbitMQ credentials with their hashed ACLs, the Ed25519 JWT key, the KEK keyring,
-the HMAC pepper, the n8n secrets and the browser token. Compose mounts them as
-`/run/secrets/*`, and the application reads them through `NEXUSFLOW_*_FILE`
-variables. **Back up `./secrets` offline**: losing the KEKs makes stored integration
-secrets unrecoverable.
+the HMAC pepper, the n8n secrets, the browser token, and the internal PKI (below).
+Compose mounts them as `/run/secrets/*`, and the application reads them through
+`NEXUSFLOW_*_FILE` variables. **Back up `./secrets` offline**: losing the KEKs makes
+stored integration secrets and every sealed value unrecoverable.
+
+Running `make secrets` again creates only what is missing - an upgrade that
+introduces a secret adds it - and never touches an existing file. A group of
+values generated together (a password and the URL or hash that embeds it) that is
+only partly present is refused: restore the rest from your backup. `--force`
+regenerates *every* secret and is for fresh installs only; on a running stack it
+locks the database roles out and makes encrypted data unreadable.
+
+**Internal TLS.** PostgreSQL, both Redis instances and RabbitMQ accept TLS
+connections only, and every client verifies the server's certificate and host name
+against the stack's private CA. `scripts/internal_pki.py` issues it: the CA
+(`internal_ca.pem`, mounted into every client; its key `internal_ca.key` never
+leaves the host and is mode 0600) and one server certificate per service, valid
+for two years. Check them monthly - the command exits 1 within 30 days of an
+expiry - and renew before they expire:
+
+```bash
+python scripts/internal_pki.py --check
+```
+
+```bash
+python scripts/internal_pki.py --renew && docker compose up -d --force-recreate
+```
+
+`--rotate-ca` replaces the CA as well (every service restarts with the new one).
+`docker-compose.dev.yml` keeps plain connections on 127.0.0.1 for local development.
 
 Three optional secrets are created **empty** (an empty secret file means "not
 configured") and are never overwritten once filled in. Each is mounted only into
-the one container that uses it:
+the containers that use it:
 
 | File | Fill in | Used by |
 |---|---|---|
-| `secrets/smtp_password` | when the SMTP relay requires authentication | `worker-integrations` |
+| `secrets/smtp_password` | when the SMTP relay requires authentication | `worker-integrations`; `alertmanager` (its `auth_password_file`) |
 | `secrets/ai_api_key` | with `NEXUSFLOW_AI_PROVIDER=anthropic` | `worker-integrations` |
 | `secrets/n8n_api_key` | after n8n's first start (*Settings > n8n API*) | `api-internal` (operator CLI) |
 
@@ -109,9 +168,19 @@ are already pinned to digests in the Compose files (see section 10). Every
 application setting, its default and its constraints are listed in
 [CONFIGURATION.md](CONFIGURATION.md) (generated from the settings classes).
 
-**TLS**: put `fullchain.pem` and `privkey.pem` in `deploy/certs/` (see its README).
-For a local evaluation, `make dev-certs` creates a development CA and a
-certificate for `localhost` there; never use it in production.
+**TLS**: nginx runs as uid 101 and reads `fullchain.pem` and `privkey.pem` from
+`deploy/certs/` (or `NEXUSFLOW_TLS_DIR`). Install them with
+`sudo scripts/install_edge_cert.sh <directory>`, which copies them for uid 101 -
+Let's Encrypt's `live/` entries are symlinks that would dangle in the container -
+and reloads nginx. With Let's Encrypt, the edge serves the HTTP-01 challenges from
+`deploy/acme`, so certificates are issued and renewed without stopping anything:
+
+```bash
+sudo certbot certonly --webroot -w ./deploy/acme -d example.com --deploy-hook "$PWD/scripts/install_edge_cert.sh"
+```
+
+For a local evaluation, `make dev-certs` creates a development CA and a certificate
+for `localhost` in `deploy/certs/`; never use it in production.
 
 **E-mail**: set `NEXUSFLOW_SMTP_HOST`, `NEXUSFLOW_SMTP_PORT`,
 `NEXUSFLOW_SMTP_TLS_MODE` (`starttls` or `tls`; TLS and certificate validation
@@ -120,6 +189,9 @@ cannot be switched off), `NEXUSFLOW_SMTP_USERNAME`, `NEXUSFLOW_SMTP_FROM` and
 `secrets/smtp_password`. A relay with a private CA is trusted through
 `NEXUSFLOW_NOTIFICATIONS__SMTP_CA_BUNDLE`. Temporary SMTP failures (4xx replies)
 are retried with backoff; permanent ones (5xx) go to the dead-letter store.
+Leaving `NEXUSFLOW_SMTP_HOST` empty turns e-mail off: start-up warns, and account
+mail (sign-in notices, invitations, password resets) is skipped and logged, not
+retried.
 
 **AI provider (optional)**: put the Anthropic API key in `secrets/ai_api_key` and
 set `NEXUSFLOW_AI_PROVIDER=anthropic`. Only the integrations worker receives the
@@ -159,7 +231,10 @@ and invite further users from inside the organization.
 
 ## 4. n8n
 
-Follow [workflows/n8n/README.md](../workflows/n8n/README.md) to issue one
+n8n is opt-in: the platform orchestrates itself by default. Start it with
+`COMPOSE_PROFILES=n8n` in `.env` (then `docker compose up -d`), and **set up its
+owner account at once** - until then anyone who reaches the editor could claim
+it. Follow [workflows/n8n/README.md](../workflows/n8n/README.md) to issue one
 service token per workflow, create the credentials and import the five workflows.
 The editor is reachable only through an SSH tunnel:
 
@@ -167,8 +242,8 @@ The editor is reachable only through an SSH tunnel:
 ssh -L 5678:127.0.0.1:5678 admin@your-host
 ```
 
-Then open http://localhost:5678. To run without n8n, set
-`NEXUSFLOW_ORCHESTRATION=internal`.
+Then open http://localhost:5678, and switch orchestration over with
+`NEXUSFLOW_ORCHESTRATION=n8n` once the workflows are active.
 
 ## 5. Evaluation stack (demo overlay)
 
@@ -191,26 +266,19 @@ make demo
 ## 6. Optional components
 
 * **Malware scanning**: `docker compose --profile av up -d` starts ClamAV on its own
-  `av` network (only the API can reach it). Also set
-  `NEXUSFLOW_CLAMAV_ADDRESS=clamav:3310` in `.env`.
+  `av` network (only the API can reach it), unprivileged, with the 4 GiB upstream
+  recommends (a signature update briefly holds two engines). Also set
+  `NEXUSFLOW_CLAMAV_ADDRESS=clamav:3310` in `.env`. While ClamAV is unreachable,
+  uploads are refused and `MalwareScannerUnavailable` fires.
 * **JavaScript rendering**: the browser service starts by default; the sandbox
   reaches it as `renderer` on the internal `render` network (never over `egress`,
   which drops traffic between containers). Chromium's own sandbox needs user
   namespaces; to enable it, run the browser with a seccomp profile that permits
   `clone`/`unshare` for namespaces and set `NEXUSFLOW_BROWSER__CHROMIUM_SANDBOX=true`.
-* **Tracing**: set `NEXUSFLOW_OTLP_ENDPOINT` to your OpenTelemetry collector.
-* **TLS on internal hops**, for deployments that spread the services over several
-  hosts (on one host this traffic stays on internal Docker networks). The clients
-  are built for it and verify every server against your internal CA:
-  `NEXUSFLOW_DATABASE__SSL_MODE=verify-full` with `NEXUSFLOW_DATABASE__SSL_ROOT_CERT`;
-  a `rediss://` URL with `NEXUSFLOW_REDIS__SSL_CA_CERTS` (and
-  `NEXUSFLOW_SANDBOX__REDIS_SSL_CA_CERTS` for the sandbox's Redis); an `amqps://`
-  URL with `NEXUSFLOW_BROKER__USE_SSL=true` and `NEXUSFLOW_BROKER__SSL_CA_CERTS`.
-  On the servers, enable PostgreSQL `ssl` with a `hostssl`-only `pg_hba.conf`,
-  Redis `tls-port` with `port 0`, and RabbitMQ `listeners.ssl` with
-  `listeners.tcp = none`, and mount the CA into every application container. The
-  Compose file does not ship this server configuration; `check-config` warns for
-  every hop that is still unencrypted.
+* **Tracing**: set `NEXUSFLOW_OTLP_ENDPOINT` to your OpenTelemetry collector. The
+  APIs, the pipeline worker and beat have no route off their internal networks:
+  run the collector as a service on the `backend` network (and `monitoring`, to
+  export onwards), not on the host or the internet.
 
 ## 7. Monitoring
 
@@ -223,7 +291,8 @@ port 3000. Its admin password is `secrets/grafana_admin_password`.
 `deploy/alertmanager/alertmanager.yml` before production (SMTP relay, PagerDuty,
 Opsgenie or Slack): alerts must reach people without going through the platform
 being monitored. Critical alerts repeat hourly and silence the warnings they
-explain.
+explain. An SMTP relay that requires authentication reads its password from
+`secrets/smtp_password`, mounted for `auth_password_file`.
 
 Ship container logs (JSON) to a central store with append-only retention. The
 hourly `audit_anchor` log events (one per tenant chain and one for the platform
@@ -244,17 +313,20 @@ chain) are your external audit anchors: compare them with `nexusflow audit verif
 ## 9. Backups and restore
 
 ```bash
-BACKUP_AGE_RECIPIENT=age1... scripts/backup.sh /srv/backups
+BACKUP_AGE_RECIPIENT=age1... BACKUP_SIGNING_KEY=/root/.ssh/nexusflow-backup scripts/backup.sh /srv/backups
 ```
 
 The script dumps both databases and the file volume, encrypts everything with
-[age](https://age-encryption.org) and writes a SHA-256 manifest. Unencrypted backups
-are refused. `scripts/restore.sh` verifies the manifest before decrypting and asks
-for confirmation (automation can answer on standard input:
-`echo RESTORE | scripts/restore.sh <dir>`). Objects are restored as their usual
-owners, and any error stops the restore: the application database holds no
-superuser-owned objects (`pg_stat_statements` lives in the `postgres` database).
-Test restores regularly, and run `nexusflow audit verify` after each restore.
+[age](https://age-encryption.org) and writes a SHA-256 manifest - signed with
+`ssh-keygen -Y sign` when `BACKUP_SIGNING_KEY` names an SSH key kept off the backup
+store. Unencrypted backups are refused. `scripts/restore.sh` checks the manifest
+before decrypting anything - with `BACKUP_ALLOWED_SIGNERS` (an allowed-signers file
+naming `nexusflow-backup`), also that backup.sh signed it: a hash list proves
+integrity, not origin - and asks for confirmation (automation can answer on standard
+input: `echo RESTORE | scripts/restore.sh <dir>`). Each database is restored by its
+owner role, never as the superuser, so a tampered dump cannot escalate; any error
+stops the restore. Test restores regularly, and run `nexusflow audit verify` after
+each restore.
 
 Both are tested: `tests/integration/test_backup_restore.py` runs the same
 `pg_dump`/`pg_restore` steps against PostgreSQL with the production roles and
@@ -287,15 +359,25 @@ NEXUSFLOW_IMAGE=ghcr.io/<owner>/nexusflow-ai:0.1.0@sha256:<digest>
 NEXUSFLOW_BROWSER_IMAGE=ghcr.io/<owner>/nexusflow-browser:0.1.0@sha256:<digest>
 ```
 
-Base images (Dockerfiles) and third-party images (Compose files, CI) are pinned
-to digests; CI fails if a reference loses its digest. After Dependabot proposes a
-new tag, `make pin-images` resolves the digests it points at.
+Base images (literal `FROM` lines), the BuildKit frontend and third-party images
+(Compose files, CI) are pinned to digests in forms Dependabot reads; CI fails if a
+reference loses its digest. After Dependabot proposes a new tag, `make pin-images`
+resolves the digests it points at. A weekly job scans every third-party image with
+Trivy. Override one on purpose with its variable, digest included, e.g.
+`NGINX_IMAGE=nginxinc/nginx-unprivileged:1.30-alpine@sha256:<digest>`.
 
 ## 11. Upgrades
 
 1. Read the CHANGELOG.
 2. Take a backup.
-3. `docker compose pull` or `docker compose build`, then `docker compose up -d`.
+3. `make secrets` - adds any secret the new release needs, touching none that
+   exist.
+4. `docker compose pull` or `docker compose build`, then `docker compose up -d`.
+
+A stack set up before internal TLS existed (its `secrets/redis_app_url` still
+begins with `redis://`) also needs `python scripts/generate_secrets.py --tls-urls`
+before step 4: it rewrites the Redis and broker URLs for TLS and keeps their
+credentials.
 
 Migrations run automatically and are forward-only in production. They are
 additive (new nullable columns, columns with constant defaults, new functions and
@@ -307,13 +389,16 @@ restoring the pre-upgrade backup.
 - [ ] `NEXUSFLOW_APP__ENVIRONMENT=production`. The app refuses insecure combinations:
   debug mode, an http public URL, wildcard hosts or origins, missing keys.
 - [ ] TLS certificates valid; HTTP redirects to HTTPS.
-- [ ] Egress firewall rules applied (section 1).
+- [ ] Docker Engine 28.0 or later; no AAAA record for the domain (section 1).
+- [ ] Egress firewall rules applied, and names still resolve on `egress` (section 1).
+- [ ] `python scripts/internal_pki.py --check` scheduled monthly.
 - [ ] Sign-up disabled after bootstrapping; MFA required for admin organizations.
 - [ ] `./secrets` backed up offline and readable only by the deploy user.
 - [ ] Release images verified with cosign and run by digest; Dependabot enabled.
 - [ ] Alerts routed; logs shipped to append-only storage.
-- [ ] Backups scheduled and a restore tested.
-- [ ] n8n and Grafana reachable only through SSH tunnels.
+- [ ] Backups scheduled, signed (`BACKUP_SIGNING_KEY`), and a restore tested.
+- [ ] n8n and Grafana reachable only through SSH tunnels; n8n's owner set up the
+  moment it is enabled.
 - [ ] ClamAV enabled if tenants upload files from untrusted parties.
 - [ ] Alertmanager receiver configured and a test alert received.
 - [ ] `secrets/n8n_api_key` filled in (the kill switch unpublishes n8n workflows).

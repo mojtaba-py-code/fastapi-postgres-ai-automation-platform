@@ -28,7 +28,7 @@ receivers:
         smarthost: smtp.example.com:587
         require_tls: true
         # auth_username: alerts@nexusflow.example.com
-        # auth_password_file: /etc/alertmanager/secrets/smtp_password
+        # auth_password_file: /run/secrets/smtp_password   # secrets/smtp_password, mounted
         send_resolved: true
 
 # A critical alert silences the warnings it explains (same alert and service).

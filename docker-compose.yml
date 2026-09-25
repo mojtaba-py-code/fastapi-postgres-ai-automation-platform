@@ -477,6 +477,7 @@ services:
     volumes:
       - ./deploy/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
       - alertmanager-data:/alertmanager
+    secrets: [smtp_password]      # auth_password_file in alertmanager.yml, if the relay needs it
     # Delivers directly to the on-call receivers (SMTP/PagerDuty/Slack), hence egress.
     networks: [monitoring, egress]
     mem_limit: 128m
