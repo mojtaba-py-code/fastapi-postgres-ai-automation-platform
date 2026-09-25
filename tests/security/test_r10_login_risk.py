@@ -34,7 +34,7 @@ from nexusflow.domain.authorization.principal import Principal
 from nexusflow.domain.identity.auth_service import TokenPair
 from nexusflow.domain.identity.login_risk import FAILURES_BEFORE_SUCCESS, LoginRisk
 from nexusflow.domain.shared.context import RequestMeta
-from tests.support.fixtures import PASSWORD, register
+from tests.support.fixtures import META, PASSWORD, register
 
 pytestmark = [pytest.mark.security, pytest.mark.integration]
 
@@ -80,7 +80,9 @@ class TestMfaPath:
     ) -> None:
         email, tokens = await register(container)
         principal = await _principal(container, tokens)
-        enrollment = await container.auth.begin_mfa_enrollment(principal, password=PASSWORD)
+        enrollment = await container.auth.begin_mfa_enrollment(
+            principal, password=PASSWORD, meta=META
+        )
         totp = pyotp.TOTP(enrollment.secret)
         # Enrol with the previous step so the current step stays usable for a login.
         await container.auth.confirm_mfa_enrollment(

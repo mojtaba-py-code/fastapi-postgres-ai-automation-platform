@@ -4,10 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import timedelta
+from typing import Protocol
 from uuid import UUID
 
 from nexusflow.core.clock import Clock
-from nexusflow.core.errors import ConflictError, InvalidInputError, NotFoundError
+from nexusflow.core.errors import (
+    ConflictError,
+    InvalidInputError,
+    NotFoundError,
+    PermissionDeniedError,
+)
 from nexusflow.core.ids import uuid7
 from nexusflow.core.pagination import Page, PageRequest
 from nexusflow.core.text import clean_text
@@ -19,10 +25,18 @@ from nexusflow.domain.authorization.roles import Permission, Role
 from nexusflow.domain.identity.api_keys import CredentialKind, generate_credential
 from nexusflow.domain.identity.model import ApiKey, User
 from nexusflow.domain.shared.context import RequestMeta
-from nexusflow.domain.shared.security import PasswordHasher, TokenHasher
+from nexusflow.domain.shared.security import TokenHasher
 from nexusflow.domain.shared.unit_of_work import TenantScope, UnitOfWorkFactory
 
 MAX_API_KEY_LIFETIME_DAYS = 365
+
+
+class PasswordConfirmation(Protocol):
+    """``AuthService.confirm_password``: a password check that counts like a sign-in."""
+
+    async def __call__(
+        self, principal: Principal, password: str, meta: RequestMeta, *, purpose: str
+    ) -> str: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,14 +52,14 @@ class AccountService:
         uow_factory: UnitOfWorkFactory,
         clock: Clock,
         audit: AuditRecorder,
-        password_hasher: PasswordHasher,
         token_hasher: TokenHasher,
+        confirm_password: PasswordConfirmation,
     ) -> None:
         self._uow_factory = uow_factory
         self._clock = clock
         self._audit = audit
-        self._password_hasher = password_hasher
         self._token_hasher = token_hasher
+        self._confirm_password = confirm_password
 
     async def get_profile(self, principal: Principal) -> User:
         if principal.user_id is None:
@@ -78,13 +92,17 @@ class AccountService:
         user_id = principal.user_id
         if user_id is None:
             raise NotFoundError()
+        # Only from a signed-in session; a wrong password counts toward lockout.
+        verified = await self._confirm_password(
+            principal, password, meta, purpose="account_deletion"
+        )
         now = self._clock.now()
         async with self._uow_factory(TenantScope(user_id=user_id)) as uow:
             user = await uow.users.get_for_update(user_id)
             if user is None:
                 raise NotFoundError()
-            if not await self._password_hasher.verify(user.password_hash, password):
-                raise InvalidInputError("The password is incorrect.", code="invalid_password")
+            if user.password_hash != verified:  # changed since it was confirmed
+                raise PermissionDeniedError("The password is incorrect.", code="invalid_password")
             for org_id in await uow.memberships.list_org_ids_for_user(user_id):
                 await uow.switch_tenant(org_id)
                 membership = await uow.memberships.get(org_id, user_id)

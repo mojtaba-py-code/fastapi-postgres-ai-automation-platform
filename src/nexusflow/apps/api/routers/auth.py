@@ -239,9 +239,11 @@ async def reset_password(
     dependencies=[Depends(rate_limited("auth.mfa", by=client_ip))],
 )
 async def begin_mfa_enrollment(
-    body: PasswordConfirmation, principal: CurrentPrincipal, container: ContainerDep
+    body: PasswordConfirmation, principal: CurrentPrincipal, container: ContainerDep, meta: Meta
 ) -> MfaEnrollResponse:
-    enrollment = await container.auth.begin_mfa_enrollment(principal, password=body.password)
+    enrollment = await container.auth.begin_mfa_enrollment(
+        principal, password=body.password, meta=meta
+    )
     return MfaEnrollResponse(secret=enrollment.secret, provisioning_uri=enrollment.provisioning_uri)
 
 

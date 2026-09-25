@@ -795,9 +795,7 @@ class AuthService:
             if user is None:
                 raise NotFoundError()
             if user.is_locked(now):
-                raise AuthenticationError(
-                    "The account is temporarily locked.", code="account_locked"
-                )
+                raise _account_locked()
             checked_hash, email, name = user.password_hash, user.email, user.full_name
         verified = await self._hasher.verify(checked_hash, current_password)
         new_hash: str | None = None
@@ -839,9 +837,7 @@ class AuthService:
                 if locked:
                     await self._on_lockout(uow, user, meta)
                 await uow.commit()
-                raise AuthenticationError(
-                    "The current password is incorrect.", code="invalid_password"
-                )
+                raise _wrong_password()
             user.change_password_hash(new_hash, now)
             await uow.sessions.revoke_all_for_user(
                 user.id, now=now, reason="password_changed", except_session=session.id
@@ -925,15 +921,18 @@ class AuthService:
 
     # --------------------------------------------------------------------- mfa
 
-    async def begin_mfa_enrollment(self, principal: Principal, *, password: str) -> MfaEnrollment:
-        user_id = _require_user(principal)
+    async def begin_mfa_enrollment(
+        self, principal: Principal, *, password: str, meta: RequestMeta
+    ) -> MfaEnrollment:
+        user_id = _require_session(principal)
+        verified = await self.confirm_password(principal, password, meta, purpose="mfa_enrollment")
         now = self._clock.now()
         async with self._uow_factory(TenantScope.of(principal)) as uow:
             user = await uow.users.get_for_update(user_id)
             if user is None:
                 raise NotFoundError()
-            if not await self._hasher.verify(user.password_hash, password):
-                raise AuthenticationError("The password is incorrect.", code="invalid_password")
+            if user.password_hash != verified:  # changed since it was confirmed
+                raise _wrong_password()
             if user.mfa_enabled:
                 raise ConflictError(
                     "Multi-factor authentication is already enabled.", code="mfa_enabled"
@@ -955,7 +954,7 @@ class AuthService:
         self, principal: Principal, *, code: str, meta: RequestMeta
     ) -> list[str]:
         """Activate MFA and return one-time recovery codes (shown exactly once)."""
-        user_id = _require_user(principal)
+        user_id = _require_session(principal)
         now = self._clock.now()
         async with self._uow_factory(TenantScope.of(principal)) as uow:
             user = await uow.users.get_for_update(user_id)
@@ -998,7 +997,8 @@ class AuthService:
     async def disable_mfa(
         self, principal: Principal, *, password: str, code: str, meta: RequestMeta
     ) -> None:
-        user_id = _require_user(principal)
+        user_id = _require_session(principal)
+        verified = await self.confirm_password(principal, password, meta, purpose="mfa_disable")
         now = self._clock.now()
         async with self._uow_factory(TenantScope.of(principal)) as uow:
             user = await uow.users.get_for_update(user_id)
@@ -1006,9 +1006,23 @@ class AuthService:
                 raise ConflictError(
                     "Multi-factor authentication is not enabled.", code="mfa_disabled"
                 )
-            if not await self._hasher.verify(user.password_hash, password):
-                raise AuthenticationError("The password is incorrect.", code="invalid_password")
+            if user.password_hash != verified:  # changed since it was confirmed
+                raise _wrong_password()
             if not await self._check_second_factor(uow, user, code, now, meta):
+                # A wrong code counts toward lockout as at sign-in.
+                locked = self._register_failure(user, now)
+                await self._audit.record(
+                    uow.audit,
+                    action=AuditAction.MFA_FAILED,
+                    principal=principal,
+                    meta=meta,
+                    result=AuditResult.FAILURE,
+                    resource_type="user",
+                    resource_id=user.id,
+                )
+                if locked:
+                    await self._on_lockout(uow, user, meta)
+                await uow.commit()
                 raise InvalidInputError("The verification code is incorrect.", code="invalid_code")
             user.mfa_enabled = False
             user.mfa_secret_encrypted = None
@@ -1027,7 +1041,58 @@ class AuthService:
             await self._notify(uow, user, "mfa_disabled", now)
             await uow.commit()
 
+    async def confirm_password(
+        self, principal: Principal, password: str, meta: RequestMeta, *, purpose: str
+    ) -> str:
+        """Check the account password before a sensitive action, like a sign-in.
+
+        Only from a signed-in session (a leaked API key is no password oracle
+        for its creator's account); a locked account is refused; a wrong
+        password counts toward the lockout and is audited; the deliberately
+        slow hash never runs under the row lock. Returns the hash that was
+        verified, so the caller can check it is still the account's password
+        when it applies the action.
+        """
+        user_id = _require_session(principal)
+        now = self._clock.now()
+        async with self._uow_factory(TenantScope.of(principal)) as uow:
+            user = await uow.users.get(user_id)
+            if user is None:
+                raise NotFoundError()
+            if user.is_locked(now):
+                raise _account_locked()
+            checked_hash = user.password_hash
+        if await self._hasher.verify(checked_hash, password):
+            return checked_hash
+        async with self._uow_factory(TenantScope.of(principal)) as uow:
+            user = await uow.users.get_for_update(user_id)
+            if user is None:
+                raise NotFoundError()
+            locked = self._register_failure(user, now)
+            await self._audit.record(
+                uow.audit,
+                action=AuditAction.PASSWORD_CONFIRMATION_FAILED,
+                principal=principal,
+                meta=meta,
+                result=AuditResult.FAILURE,
+                resource_type="user",
+                resource_id=user.id,
+                metadata={"purpose": purpose},
+            )
+            if locked:
+                await self._on_lockout(uow, user, meta)
+            await uow.commit()
+        raise _wrong_password()
+
     # ----------------------------------------------------------------- helpers
+
+    def _register_failure(self, user: User, now: datetime) -> bool:
+        return user.register_failed_login(
+            now,
+            threshold=self._policy.lockout_threshold,
+            base_seconds=self._policy.lockout_base_seconds,
+            max_seconds=self._policy.lockout_max_seconds,
+        )
 
     def _decrypt_mfa_secret(self, user: User, blob: bytes | None) -> str:
         if blob is None:
@@ -1064,6 +1129,16 @@ def _require_session(principal: Principal) -> UUID:
             "This action requires a signed-in user session.", code="session_required"
         )
     return principal.user_id
+
+
+def _wrong_password() -> PermissionDeniedError:
+    # 403, not 401: the caller's credentials are valid - a 401 would tell a
+    # client to drop its tokens because someone mistyped a password.
+    return PermissionDeniedError("The password is incorrect.", code="invalid_password")
+
+
+def _account_locked() -> PermissionDeniedError:
+    return PermissionDeniedError("The account is temporarily locked.", code="account_locked")
 
 
 def _require_user(principal: Principal) -> UUID:

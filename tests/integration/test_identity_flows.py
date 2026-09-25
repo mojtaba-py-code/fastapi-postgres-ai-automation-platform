@@ -180,7 +180,9 @@ class TestMfa:
     async def test_enrollment_login_and_replay_protection(self, container: Container) -> None:
         email, tokens = await register(container)
         principal = await _principal(container, tokens)
-        enrollment = await container.auth.begin_mfa_enrollment(principal, password=PASSWORD)
+        enrollment = await container.auth.begin_mfa_enrollment(
+            principal, password=PASSWORD, meta=META
+        )
         totp = pyotp.TOTP(enrollment.secret)
         now = container.clock.now()
         recovery_codes = await container.auth.confirm_mfa_enrollment(

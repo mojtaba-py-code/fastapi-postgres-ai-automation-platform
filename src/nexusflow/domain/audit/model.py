@@ -61,6 +61,8 @@ class AuditAction(StrEnum):
     REFRESH_REUSE_DETECTED = "auth.refresh.reuse_detected"
     PASSWORD_CHANGED = "auth.password.changed"  # noqa: S105 - event name  # nosec B105
     PASSWORD_CHANGE_FAILED = "auth.password.change_failed"  # noqa: S105 - event name  # nosec B105
+    # A wrong password where an action asked for it (MFA, account deletion).
+    PASSWORD_CONFIRMATION_FAILED = "auth.password.confirmation_failed"  # noqa: S105  # nosec B105
     PASSWORD_RESET_REQUESTED = "auth.password.reset_requested"  # noqa: S105 - event name  # nosec B105
     PASSWORD_RESET_COMPLETED = "auth.password.reset_completed"  # noqa: S105 - event name  # nosec B105
     ORG_SWITCHED = "auth.org_switched"
