@@ -287,7 +287,7 @@ class WebhookService:
                 namespace, delivery_id, ttl_seconds=self._tolerance * 2
             )
             if not fresh:
-                return await self._seen_before(uow, endpoint.id, delivery_id)
+                return await self._seen_before(uow, org_id, endpoint.id, delivery_id)
             try:
                 return await self._store(uow, org_id, endpoint_id, delivery_id, body, now)
             except BaseException:
@@ -297,9 +297,9 @@ class WebhookService:
                 raise
 
     async def _seen_before(
-        self, uow: UnitOfWork, endpoint_id: UUID, delivery_id: str
+        self, uow: UnitOfWork, org_id: UUID, endpoint_id: UUID, delivery_id: str
     ) -> ReceiptResult:
-        if await uow.data.webhook_events.exists(endpoint_id, delivery_id):
+        if await uow.data.webhook_events.exists(org_id, endpoint_id, delivery_id):
             return ReceiptResult(status="duplicate", run_id=None)
         # Claimed by the fast path but not stored (yet): an earlier attempt is
         # still running, or failed without releasing its nonce. Acknowledging it

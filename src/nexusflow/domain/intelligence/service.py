@@ -315,7 +315,7 @@ class IntelligenceService:
             insight.complete(output, provider=provider, model=model, usage=usage, now=now)
             insight.prompt_version = PROMPT_VERSION
             insight.change_count = len(analysed)
-            await uow.data.changes.assign_insight(analysed, insight.id)
+            await uow.data.changes.assign_insight(org_id, analysed, insight.id)
             await uow.outbox.add(
                 event_message(
                     EventType.INSIGHT_CREATED,

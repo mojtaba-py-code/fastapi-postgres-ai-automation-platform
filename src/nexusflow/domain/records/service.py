@@ -50,13 +50,15 @@ class ChangeDetectionService:
             if dataset is None or dataset.is_deleted:
                 raise NotFoundError()
             spec = dataset.spec
-            versions = await uow.data.records.pending_versions(dataset_id, limit=self._batch)
+            versions = await uow.data.records.pending_versions(
+                org_id, dataset_id, limit=self._batch
+            )
             if not versions:
                 return DetectionOutcome(dataset_id, 0, 0, None, analyze=False)
             previous = await uow.data.records.previous_versions(
-                (v.record_id, v.version - 1) for v in versions
+                org_id, ((v.record_id, v.version - 1) for v in versions)
             )
-            keys = await uow.data.records.keys_for(list({v.record_id for v in versions}))
+            keys = await uow.data.records.keys_for(org_id, list({v.record_id for v in versions}))
             candidates: list[Change] = []
             for version in versions:
                 before = previous.get((version.record_id, version.version - 1))
@@ -91,7 +93,7 @@ class ChangeDetectionService:
                     )
                 )
             inserted = await uow.data.changes.add_new(candidates)
-            await uow.data.records.mark_diffed([v.id for v in versions])
+            await uow.data.records.mark_diffed(org_id, [v.id for v in versions])
             max_level = max((c.significance for c in inserted), key=lambda s: s.rank, default=None)
             analyze = await _analysis_requested(
                 uow, org_id, {v.run_id for v in versions if v.run_id}

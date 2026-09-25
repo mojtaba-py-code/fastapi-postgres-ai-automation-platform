@@ -452,12 +452,17 @@ class SqlRecordRepository:
             self._s, d.record_versions, "data", org_id, dataset_id, fields
         )
 
-    async def fetch_for_update(self, dataset_id: UUID, keys: Sequence[str]) -> dict[str, Record]:
+    async def fetch_for_update(
+        self, org_id: UUID, dataset_id: UUID, keys: Sequence[str]
+    ) -> dict[str, Record]:
         if not keys:
             return {}
+        r = d.records
         statement = (
             select(Record)
-            .where(d.records.c.dataset_id == dataset_id, d.records.c.record_key.in_(list(keys)))
+            .where(
+                r.c.org_id == org_id, r.c.dataset_id == dataset_id, r.c.record_key.in_(list(keys))
+            )
             .with_for_update()
             .execution_options(populate_existing=True)
         )
@@ -472,21 +477,28 @@ class SqlRecordRepository:
         await self._s.flush()
 
     async def touch(
-        self, record_ids: Sequence[UUID], *, run_id: UUID, source_id: UUID, now: datetime
+        self,
+        org_id: UUID,
+        record_ids: Sequence[UUID],
+        *,
+        run_id: UUID,
+        source_id: UUID,
+        now: datetime,
     ) -> None:
         if not record_ids:
             return
         await self._s.execute(
             update(d.records)
-            .where(d.records.c.id.in_(list(record_ids)))
+            .where(d.records.c.org_id == org_id, d.records.c.id.in_(list(record_ids)))
             .values(last_seen_at=now, last_run_id=run_id, source_id=source_id)
             .execution_options(synchronize_session=False)
         )
 
     @staticmethod
-    def _missing(dataset_id: UUID, source_id: UUID, run_id: UUID) -> tuple[Any, ...]:
+    def _missing(org_id: UUID, dataset_id: UUID, source_id: UUID, run_id: UUID) -> tuple[Any, ...]:
         r = d.records
         return (
+            r.c.org_id == org_id,
             r.c.dataset_id == dataset_id,
             r.c.source_id == source_id,
             r.c.deleted_at.is_(None),
@@ -494,21 +506,23 @@ class SqlRecordRepository:
         )
 
     async def missing_from_run(
-        self, dataset_id: UUID, source_id: UUID, run_id: UUID, *, limit: int
+        self, org_id: UUID, dataset_id: UUID, source_id: UUID, run_id: UUID, *, limit: int
     ) -> list[Record]:
         statement = (
             select(Record)
-            .where(*self._missing(dataset_id, source_id, run_id))
+            .where(*self._missing(org_id, dataset_id, source_id, run_id))
             .limit(limit)
             .with_for_update()
         )
         return list((await self._s.execute(statement)).scalars().all())
 
-    async def count_missing_from_run(self, dataset_id: UUID, source_id: UUID, run_id: UUID) -> int:
+    async def count_missing_from_run(
+        self, org_id: UUID, dataset_id: UUID, source_id: UUID, run_id: UUID
+    ) -> int:
         statement = (
             select(func.count())
             .select_from(d.records)
-            .where(*self._missing(dataset_id, source_id, run_id))
+            .where(*self._missing(org_id, dataset_id, source_id, run_id))
         )
         return int((await self._s.execute(statement)).scalar_one())
 
@@ -553,11 +567,13 @@ class SqlRecordRepository:
         )
         return list((await self._s.execute(statement)).scalars().all())
 
-    async def pending_versions(self, dataset_id: UUID, *, limit: int) -> list[RecordVersion]:
+    async def pending_versions(
+        self, org_id: UUID, dataset_id: UUID, *, limit: int
+    ) -> list[RecordVersion]:
         v = d.record_versions
         statement = (
             select(RecordVersion)
-            .where(v.c.dataset_id == dataset_id, v.c.diffed.is_(False))
+            .where(v.c.org_id == org_id, v.c.dataset_id == dataset_id, v.c.diffed.is_(False))
             .order_by(v.c.record_id, v.c.version)
             .limit(limit)
             .with_for_update(skip_locked=True)
@@ -565,31 +581,34 @@ class SqlRecordRepository:
         return list((await self._s.execute(statement)).scalars().all())
 
     async def previous_versions(
-        self, pairs: Iterable[tuple[UUID, int]]
+        self, org_id: UUID, pairs: Iterable[tuple[UUID, int]]
     ) -> dict[tuple[UUID, int], RecordVersion]:
         wanted = [(record_id, version) for record_id, version in pairs if version >= 1]
         if not wanted:
             return {}
         v = d.record_versions
-        statement = select(RecordVersion).where(tuple_(v.c.record_id, v.c.version).in_(wanted))
+        statement = select(RecordVersion).where(
+            v.c.org_id == org_id, tuple_(v.c.record_id, v.c.version).in_(wanted)
+        )
         rows = (await self._s.execute(statement)).scalars().all()
         return {(row.record_id, row.version): row for row in rows}
 
-    async def mark_diffed(self, version_ids: Sequence[UUID]) -> None:
+    async def mark_diffed(self, org_id: UUID, version_ids: Sequence[UUID]) -> None:
         if not version_ids:
             return
+        v = d.record_versions
         await self._s.execute(
-            update(d.record_versions)
-            .where(d.record_versions.c.id.in_(list(version_ids)))
+            update(v)
+            .where(v.c.org_id == org_id, v.c.id.in_(list(version_ids)))
             .values(diffed=True)
             .execution_options(synchronize_session=False)
         )
 
-    async def keys_for(self, record_ids: Sequence[UUID]) -> dict[UUID, str]:
+    async def keys_for(self, org_id: UUID, record_ids: Sequence[UUID]) -> dict[UUID, str]:
         if not record_ids:
             return {}
         statement = select(d.records.c.id, d.records.c.record_key).where(
-            d.records.c.id.in_(list(record_ids))
+            d.records.c.org_id == org_id, d.records.c.id.in_(list(record_ids))
         )
         return {row.id: row.record_key for row in (await self._s.execute(statement)).all()}
 
@@ -715,11 +734,13 @@ class SqlChangeRepository:
         )
         return list((await self._s.execute(statement)).scalars().all())
 
-    async def assign_insight(self, change_ids: Sequence[UUID], insight_id: UUID) -> None:
+    async def assign_insight(
+        self, org_id: UUID, change_ids: Sequence[UUID], insight_id: UUID
+    ) -> None:
         if change_ids:
             await self._s.execute(
                 update(d.changes)
-                .where(d.changes.c.id.in_(list(change_ids)))
+                .where(d.changes.c.org_id == org_id, d.changes.c.id.in_(list(change_ids)))
                 .values(insight_id=insight_id)
                 .execution_options(synchronize_session=False)
             )
@@ -772,11 +793,11 @@ class SqlChangeRepository:
         )
         return await _delete_ids(self._s, c, doomed)
 
-    async def mark_alerts_evaluated(self, change_ids: Sequence[UUID]) -> None:
+    async def mark_alerts_evaluated(self, org_id: UUID, change_ids: Sequence[UUID]) -> None:
         if change_ids:
             await self._s.execute(
                 update(d.changes)
-                .where(d.changes.c.id.in_(list(change_ids)))
+                .where(d.changes.c.org_id == org_id, d.changes.c.id.in_(list(change_ids)))
                 .values(alerts_evaluated=True)
                 .execution_options(synchronize_session=False)
             )
@@ -1155,10 +1176,12 @@ class SqlWebhookEventRepository:
         )
         return (await self._s.execute(statement)).scalar_one_or_none() is not None
 
-    async def exists(self, endpoint_id: UUID, delivery_id: str) -> bool:
+    async def exists(self, org_id: UUID, endpoint_id: UUID, delivery_id: str) -> bool:
         events = d.inbound_webhook_events
         statement = select(events.c.id).where(
-            events.c.endpoint_id == endpoint_id, events.c.delivery_id == delivery_id
+            events.c.org_id == org_id,
+            events.c.endpoint_id == endpoint_id,
+            events.c.delivery_id == delivery_id,
         )
         return (await self._s.execute(statement)).first() is not None
 
