@@ -34,6 +34,7 @@ from nexusflow.domain.catalog.model import (
 )
 from nexusflow.domain.records.model import Change, Record, RecordVersion
 from nexusflow.domain.shared.context import RequestMeta
+from nexusflow.domain.shared.files import file_deletions
 from nexusflow.domain.shared.outbox import TaskName, new_message
 from nexusflow.domain.shared.unit_of_work import TenantScope, UnitOfWork, UnitOfWorkFactory
 
@@ -210,7 +211,12 @@ class CatalogService:
                 raise ConflictError(
                     "Delete the project's datasets first.", code="project_not_empty"
                 )
+            # The cascade removes the project's uploads and reports (those of
+            # deleted datasets not purged yet included); their files follow the commit.
+            keys = await uow.data.maintenance.file_keys(org_id, project_id=project_id)
             await uow.data.projects.delete(project)
+            for message in file_deletions(org_id, keys, now=self._clock.now()):
+                await uow.outbox.add(message)
             await self._audit.record(
                 uow.audit,
                 action=AuditAction.PROJECT_DELETED,
@@ -498,11 +504,22 @@ async def get_dataset(uow: UnitOfWork, org_id: UUID, dataset_id: UUID) -> Datase
 
 async def project_datasets(uow: UnitOfWork, org_id: UUID, project_id: UUID) -> list[Dataset]:
     """Every live dataset of a project, however many pages they take."""
+    return await _live_datasets(uow, org_id, {"project_id": project_id})
+
+
+async def tenant_datasets(uow: UnitOfWork, org_id: UUID) -> list[Dataset]:
+    """Every live dataset of an organization, however many pages they take."""
+    return await _live_datasets(uow, org_id, {})
+
+
+async def _live_datasets(
+    uow: UnitOfWork, org_id: UUID, filters: Mapping[str, Any]
+) -> list[Dataset]:
     datasets: list[Dataset] = []
     cursor: Cursor | None = None
     while True:
         page = await uow.data.datasets.list_page(
-            org_id, PageRequest(limit=MAX_PAGE_SIZE, cursor=cursor), {"project_id": project_id}
+            org_id, PageRequest(limit=MAX_PAGE_SIZE, cursor=cursor), filters
         )
         datasets.extend(page.items)
         if page.next_cursor is None:

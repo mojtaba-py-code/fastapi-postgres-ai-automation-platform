@@ -9,14 +9,17 @@ from uuid import UUID
 
 from sqlalchemy import (
     DateTime,
+    Select,
     and_,
     delete,
+    false,
     func,
     literal_column,
     or_,
     select,
     text,
     tuple_,
+    union,
     update,
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -282,6 +285,15 @@ async def _rewrap_rows(
     return len(rows)
 
 
+async def _delete_ids(session: AsyncSession, table: Any, ids: Select[Any]) -> int:
+    """Delete the rows ``ids`` selects - a bounded batch, so one short statement."""
+    statement = (
+        delete(table).where(table.c.id.in_(ids)).execution_options(synchronize_session=False)
+    )
+    result = await session.execute(statement)
+    return int(getattr(result, "rowcount", 0) or 0)
+
+
 class SqlRecordRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._s = session
@@ -447,21 +459,32 @@ class SqlRecordRepository:
             statement = statement.where(r.c.id > after)
         return list((await self._s.execute(statement)).scalars().all())
 
-    async def purge_versions_before(self, org_id: UUID, dataset_id: UUID, before: datetime) -> int:
+    async def purge_versions_before(
+        self, org_id: UUID, dataset_id: UUID, before: datetime, *, limit: int
+    ) -> int:
         v = d.record_versions
-        # Keep the newest version of every record so history stays diffable.
-        statement = delete(v).where(
-            v.c.org_id == org_id,
-            v.c.dataset_id == dataset_id,
-            v.c.captured_at < before,
-            v.c.diffed.is_(True),
-            v.c.version
-            < select(func.max(d.records.c.version))
-            .where(d.records.c.id == v.c.record_id)
-            .scalar_subquery(),
+        successor = d.record_versions.alias("successor")
+        # Change detection diffs version n against version n - 1: a version may go
+        # only once its successor has been diffed. That keeps the newest version of
+        # every record, and every version a pending (undiffed) one still needs.
+        doomed = (
+            select(v.c.id)
+            .where(
+                v.c.org_id == org_id,
+                v.c.dataset_id == dataset_id,
+                v.c.captured_at < before,
+                v.c.diffed.is_(True),
+                select(successor.c.id)
+                .where(
+                    successor.c.record_id == v.c.record_id,
+                    successor.c.version == v.c.version + 1,
+                    successor.c.diffed.is_(True),
+                )
+                .exists(),
+            )
+            .limit(limit)
         )
-        result = await self._s.execute(statement.execution_options(synchronize_session=False))
-        return int(getattr(result, "rowcount", 0) or 0)
+        return await _delete_ids(self._s, v, doomed)
 
 
 _SIGNIFICANCE_ORDER = [s.value for s in Significance]
@@ -568,6 +591,25 @@ class SqlChangeRepository:
         return await _rewrap_rows(
             self._s, d.changes, "diff", "record_id", org_id, active_key_id, limit
         )
+
+    async def purge_before(
+        self, org_id: UUID, dataset_id: UUID, before: datetime, *, limit: int
+    ) -> int:
+        c = d.changes
+        # Nothing references a change by foreign key (alerts keep their own text
+        # and subject id; insights their own summary): once its alerts have been
+        # evaluated, an old change can go like the versions it compared.
+        doomed = (
+            select(c.c.id)
+            .where(
+                c.c.org_id == org_id,
+                c.c.dataset_id == dataset_id,
+                c.c.detected_at < before,
+                c.c.alerts_evaluated.is_(True),
+            )
+            .limit(limit)
+        )
+        return await _delete_ids(self._s, c, doomed)
 
     async def mark_alerts_evaluated(self, change_ids: Sequence[UUID]) -> None:
         if change_ids:
@@ -926,16 +968,58 @@ _PURGE_TARGETS = {
 _PURGE_DEAD_LETTERS = text("SELECT nf_purge_dead_letters(:before)")
 
 
+# Children removed bottom-up, in batches, before a dataset or an organization
+# row goes: one cascading DELETE of a large dataset outlasts the statement
+# timeout. Each entry scopes its table to a dataset (tables reached through
+# sources or alert rules by subquery); workflow runs belong to projects.
+_BATCHED_PURGE = {
+    "record_versions": d.record_versions,
+    "changes": d.changes,
+    "records": d.records,
+    "insights": d.insights,
+    "inbound_webhook_events": d.inbound_webhook_events,
+    "collection_runs": d.collection_runs,
+    "notification_deliveries": d.notification_deliveries,
+    "alerts": d.alerts,
+    "workflow_runs": d.workflow_runs,
+}
+
+
+def _dataset_scope(target: str, dataset_id: UUID) -> ColumnElement[bool]:
+    sources = select(d.sources.c.id).where(d.sources.c.dataset_id == dataset_id)
+    rules = select(d.alert_rules.c.id).where(d.alert_rules.c.dataset_id == dataset_id)
+    match target:
+        case "record_versions" | "changes" | "records" | "insights":
+            column: ColumnElement[bool] = _BATCHED_PURGE[target].c.dataset_id == dataset_id
+            return column
+        case "collection_runs":
+            return d.collection_runs.c.source_id.in_(sources)
+        case "inbound_webhook_events":
+            endpoints = select(d.webhook_endpoints.c.id).where(
+                d.webhook_endpoints.c.source_id.in_(sources)
+            )
+            return d.inbound_webhook_events.c.endpoint_id.in_(endpoints)
+        case "alerts":
+            return d.alerts.c.rule_id.in_(rules)
+        case "notification_deliveries":
+            alerts = select(d.alerts.c.id).where(d.alerts.c.rule_id.in_(rules))
+            return d.notification_deliveries.c.alert_id.in_(alerts)
+    raise ValueError(f"{target} rows are not purged per dataset")
+
+
 class SqlMaintenanceRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._s = session
 
-    async def purge(self, org_id: UUID | None, target: str, before: datetime) -> int:
-        """Retention delete for an allowlisted table (never built from input).
+    async def purge(
+        self, org_id: UUID | None, target: str, before: datetime, *, limit: int | None = None
+    ) -> int:
+        """Retention delete for an allowlisted table (never built from input): up
+        to ``limit`` rows, so the caller can purge in short batches.
 
         Dead letters are purged in the unit of work's tenant context - or,
-        with ``org_id=None``, the platform-level ones; every other target
-        belongs to a tenant.
+        with ``org_id=None``, the platform-level ones - all at once (their
+        purge function takes no limit); every other target belongs to a tenant.
         """
         if target == "dead_letters":
             return int(
@@ -944,15 +1028,60 @@ class SqlMaintenanceRepository:
         if org_id is None:
             raise ValueError(f"{target} rows always belong to a tenant")
         table, column = _PURGE_TARGETS[target]
-        statement = delete(table).where(table.c.org_id == org_id, column < before)
+        doomed = select(table.c.id).where(table.c.org_id == org_id, column < before)
         if target == "collection_runs":
-            statement = statement.where(
+            doomed = doomed.where(
                 table.c.status.in_(
                     [s.value for s in RunStatus if s not in (RunStatus.QUEUED, RunStatus.RUNNING)]
                 )
             )
-        result = await self._s.execute(statement.execution_options(synchronize_session=False))
-        return int(getattr(result, "rowcount", 0) or 0)
+        return await _delete_ids(self._s, table, doomed.limit(limit))
+
+    async def delete_batch(
+        self, org_id: UUID, target: str, *, dataset_id: UUID | None, limit: int
+    ) -> int:
+        table = _BATCHED_PURGE[target]
+        doomed = select(table.c.id).where(table.c.org_id == org_id)
+        if dataset_id is not None:
+            doomed = doomed.where(_dataset_scope(target, dataset_id))
+        return await _delete_ids(self._s, table, doomed.limit(limit))
+
+    async def file_keys(
+        self,
+        org_id: UUID,
+        *,
+        project_id: UUID | None = None,
+        dataset_id: UUID | None = None,
+        source_id: UUID | None = None,
+    ) -> list[str]:
+        """Storage keys of the uploads and reports a project, dataset or source holds."""
+        u, s, r = d.uploads, d.sources, d.reports
+        sources = select(s.c.id).where(s.c.org_id == org_id)
+        reports = select(r.c.storage_key).where(r.c.org_id == org_id, r.c.storage_key.is_not(None))
+        if source_id is not None:
+            sources = sources.where(s.c.id == source_id)
+            reports = reports.where(false())  # a source holds no reports
+        if dataset_id is not None:
+            sources = sources.where(s.c.dataset_id == dataset_id)
+            reports = reports.where(r.c.dataset_id == dataset_id)
+        if project_id is not None:
+            sources = sources.where(s.c.project_id == project_id)
+            reports = reports.where(r.c.project_id == project_id)
+        uploads = select(u.c.storage_key).where(u.c.org_id == org_id, u.c.source_id.in_(sources))
+        keys = (await self._s.execute(union(uploads, reports))).scalars().all()
+        return sorted(str(key) for key in keys)
+
+    async def referenced_keys(self, org_id: UUID, keys: Sequence[str]) -> set[str]:
+        """Which of ``keys`` an upload or a report still points to."""
+        if not keys:
+            return set()
+        uploads = select(d.uploads.c.storage_key).where(
+            d.uploads.c.org_id == org_id, d.uploads.c.storage_key.in_(list(keys))
+        )
+        reports = select(d.reports.c.storage_key).where(
+            d.reports.c.org_id == org_id, d.reports.c.storage_key.in_(list(keys))
+        )
+        return {str(key) for key in (await self._s.execute(union(uploads, reports))).scalars()}
 
     async def stuck_deliveries(
         self, org_id: UUID, *, before: datetime, limit: int
@@ -966,26 +1095,15 @@ class SqlMaintenanceRepository:
         )
         return list((await self._s.execute(statement)).scalars().all())
 
-    async def storage_keys(self, org_id: UUID) -> list[str]:
-        uploads = select(d.uploads.c.storage_key).where(d.uploads.c.org_id == org_id)
-        reports = select(d.reports.c.storage_key).where(
-            d.reports.c.org_id == org_id, d.reports.c.storage_key.is_not(None)
-        )
-        keys = list((await self._s.execute(uploads)).scalars().all())
-        keys.extend(k for k in (await self._s.execute(reports)).scalars().all() if k)
-        return keys
-
     async def delete_organization(self, org_id: UUID) -> None:
         await self._s.execute(delete(t.organizations).where(t.organizations.c.id == org_id))
 
-    async def purge_outbox(self, before: datetime) -> int:
-        result = await self._s.execute(
-            delete(t.outbox_messages).where(
-                t.outbox_messages.c.dispatched_at.is_not(None),
-                t.outbox_messages.c.dispatched_at < before,
-            )
-        )
-        return int(getattr(result, "rowcount", 0) or 0)
+    async def purge_outbox(self, before: datetime, *, limit: int) -> int:
+        o = t.outbox_messages
+        doomed = (
+            select(o.c.id).where(o.c.dispatched_at.is_not(None), o.c.dispatched_at < before)
+        ).limit(limit)
+        return await _delete_ids(self._s, o, doomed)
 
 
 class SqlSystemQueries:

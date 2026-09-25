@@ -246,6 +246,10 @@ class ReportService:
         async with self._uow_factory(TenantScope.system(org_id)) as uow:
             report = await uow.data.reports.get_for_update(org_id, report_id)
             if report is None:
+                # Deleted (with its project or dataset) while it was rendered: the
+                # file just stored belongs to nothing, and would stay for ever.
+                if key is not None:
+                    await self._storage.delete(key)
                 raise NotFoundError()
             if error:
                 report.status = ReportStatus.FAILED

@@ -14,6 +14,9 @@
 * Plaintext copies for inspection live in ``.scratch`` only while they are
   used; copies a killed process left behind are purged at start-up and by the
   retention job (:meth:`LocalFileStorage.purge_scratch`).
+* Deleting files and re-wrapping one (key rotation) exclude each other through
+  a lock shared by every process on the volume: a re-wrap never re-creates a
+  file deleted while it was being rewritten.
 
 Swap for an S3-compatible implementation of the same port in cloud deployments.
 """
@@ -26,9 +29,11 @@ import os
 import re
 import secrets
 import shutil
+import sys
+import threading
 import time
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from datetime import timedelta
 from pathlib import Path
 from uuid import UUID
@@ -157,30 +162,59 @@ class LocalFileStorage:
                         return rewrapped
         return rewrapped
 
-    @staticmethod
-    def _rewrap_file(sealer: FileSealer, key: str, path: Path) -> bool:
-        with path.open("rb") as handle:
-            if handle.read(len(MAGIC)) != MAGIC:
-                return False
-            wrapped = handle.read(int.from_bytes(handle.read(2), "big"))
-            header = sealer.rewrap_header(key, wrapped)
-            if header is None:
-                return False
-            temp = path.with_name(f".{path.name}.{secrets.token_hex(6)}.part")
-            fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    def _rewrap_file(self, sealer: FileSealer, key: str, path: Path) -> bool:
+        # Exclusive with deletions from reading the file to replacing it: a file
+        # deleted in between would otherwise be re-created by the replace.
+        with _exclusive(self._root):
             try:
-                with os.fdopen(fd, "wb") as out:
-                    out.write(MAGIC + len(header).to_bytes(2, "big") + header)
-                    shutil.copyfileobj(handle, out)
-            except BaseException:
-                temp.unlink(missing_ok=True)
-                raise
-        temp.replace(path)
-        return True
+                handle = path.open("rb")
+            except FileNotFoundError:
+                return False  # deleted since the directory was listed
+            with handle:
+                if handle.read(len(MAGIC)) != MAGIC:
+                    return False
+                wrapped = handle.read(int.from_bytes(handle.read(2), "big"))
+                header = sealer.rewrap_header(key, wrapped)
+                if header is None:
+                    return False
+                temp = path.with_name(f".{path.name}.{secrets.token_hex(6)}.part")
+                fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                try:
+                    with os.fdopen(fd, "wb") as out:
+                        out.write(MAGIC + len(header).to_bytes(2, "big") + header)
+                        shutil.copyfileobj(handle, out)
+                except BaseException:
+                    temp.unlink(missing_ok=True)
+                    raise
+            temp.replace(path)
+            return True
 
     async def delete(self, key: str) -> None:
         path = self.local_path(key)
-        await asyncio.to_thread(path.unlink, missing_ok=True)
+        await asyncio.to_thread(self._unlink, path)
+
+    def _unlink(self, path: Path) -> None:
+        with _exclusive(self._root):
+            path.unlink(missing_ok=True)
+
+    async def delete_tenant(self, org_id: UUID) -> int:
+        """Remove ``uploads/<org>`` and ``reports/<org>`` entirely - every file of
+        the tenant, whether a row still pointed to it or not; returns how many."""
+        return await asyncio.to_thread(self._delete_tenant, org_id)
+
+    def _delete_tenant(self, org_id: UUID) -> int:
+        removed = 0
+        with _exclusive(self._root):
+            for area in ("uploads", "reports"):
+                directory = self._root / area / str(org_id)  # str(UUID): canonical, no traversal
+                if directory.is_dir():
+                    removed += sum(
+                        1
+                        for path in _files_in(directory)
+                        if _KEY.fullmatch(f"{area}/{org_id}/{path.name}")
+                    )
+                    shutil.rmtree(directory)
+        return removed
 
     async def exists(self, key: str) -> bool:
         return await asyncio.to_thread(self.local_path(key).is_file)
@@ -191,7 +225,33 @@ class LocalFileStorage:
 
 
 def _files_in(directory: Path) -> list[Path]:
-    return sorted(p for p in directory.iterdir() if p.is_file()) if directory.is_dir() else []
+    try:
+        return sorted(p for p in directory.iterdir() if p.is_file())
+    except (FileNotFoundError, NotADirectoryError):
+        return []
+
+
+if sys.platform == "win32":  # development only: one process, so a thread lock serves
+    _LOCK = threading.Lock()
+
+    @contextmanager
+    def _exclusive(root: Path) -> Iterator[None]:
+        with _LOCK:
+            yield
+
+else:
+    import fcntl
+
+    @contextmanager
+    def _exclusive(root: Path) -> Iterator[None]:
+        """An exclusive lock on the storage, across processes (API, workers, CLI)."""
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(root / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)  # released when the descriptor closes
+            yield
+        finally:
+            os.close(fd)
 
 
 def _remove_older_than(directory: Path, age: timedelta) -> int:

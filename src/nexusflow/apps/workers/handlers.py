@@ -18,6 +18,7 @@ from nexusflow.apps.workers.messages import (
     DeliveryMessage,
     Empty,
     EventMessage,
+    FilesMessage,
     InsightMessage,
     InvitationMessage,
     Message,
@@ -402,13 +403,20 @@ async def relay_outbox(deps: WorkerDeps, msg: Empty) -> None:
 
 
 async def purge_organizations(deps: WorkerDeps, msg: OptionalOrgMessage) -> None:
-    purged = await deps.container.maintenance.purge_due_organizations()
+    def failed(org_id: UUID, exc: Exception) -> None:  # retried by the next run
+        _log.error("organization_purge_failed", org_id=str(org_id), error=type(exc).__name__)
+
+    purged = await deps.container.maintenance.purge_due_organizations(on_error=failed)
     if purged:
         _log.info("organizations_purged", count=len(purged))
 
 
 async def purge_dataset(deps: WorkerDeps, msg: DatasetMessage) -> None:
     await deps.container.maintenance.purge_dataset(msg.org_id, msg.dataset_id)
+
+
+async def delete_files(deps: WorkerDeps, msg: FilesMessage) -> None:
+    await deps.container.maintenance.delete_files(msg.org_id, msg.keys)
 
 
 async def _each_tenant(c: Container, work: Callable[[UUID], Awaitable[Any]], task: str) -> None:

@@ -146,8 +146,11 @@ class RecordRepository(Protocol):
     ) -> list[Record]: ...
 
     async def purge_versions_before(
-        self, org_id: UUID, dataset_id: UUID, before: datetime
-    ) -> int: ...
+        self, org_id: UUID, dataset_id: UUID, before: datetime, *, limit: int
+    ) -> int:
+        """Delete up to ``limit`` versions captured before ``before`` that change
+        detection no longer needs (the next version has been diffed)."""
+        ...
 
 
 class ChangeRepository(Protocol):
@@ -169,6 +172,13 @@ class ChangeRepository(Protocol):
 
     async def rewrap_sealed(self, org_id: UUID, active_key_id: str, *, limit: int) -> int:
         """Re-encrypt sealed values of diffs still under an older key."""
+        ...
+
+    async def purge_before(
+        self, org_id: UUID, dataset_id: UUID, before: datetime, *, limit: int
+    ) -> int:
+        """Delete up to ``limit`` changes detected before ``before`` whose alerts
+        have been evaluated (retention: they hold old and new values)."""
         ...
 
     async def ranked_in_period(
@@ -268,17 +278,35 @@ class DeadLetterRepository(TenantRepository[DeadLetter], Protocol):
 
 
 class MaintenanceRepository(Protocol):
-    async def purge(self, org_id: UUID | None, target: str, before: datetime) -> int: ...
+    async def purge(
+        self, org_id: UUID | None, target: str, before: datetime, *, limit: int | None = None
+    ) -> int: ...
+
+    async def delete_batch(
+        self, org_id: UUID, target: str, *, dataset_id: UUID | None, limit: int
+    ) -> int:
+        """Delete up to ``limit`` rows of ``target`` belonging to the dataset (or,
+        without one, to the whole organization) - one short statement."""
+        ...
 
     async def stuck_deliveries(
         self, org_id: UUID, *, before: datetime, limit: int
     ) -> list[NotificationDelivery]: ...
 
-    async def storage_keys(self, org_id: UUID) -> list[str]: ...
+    async def file_keys(
+        self,
+        org_id: UUID,
+        *,
+        project_id: UUID | None = None,
+        dataset_id: UUID | None = None,
+        source_id: UUID | None = None,
+    ) -> list[str]: ...
+
+    async def referenced_keys(self, org_id: UUID, keys: Sequence[str]) -> set[str]: ...
 
     async def delete_organization(self, org_id: UUID) -> None: ...
 
-    async def purge_outbox(self, before: datetime) -> int: ...
+    async def purge_outbox(self, before: datetime, *, limit: int) -> int: ...
 
 
 class SystemQueries(Protocol):

@@ -51,6 +51,10 @@ class FileStorage(Protocol):
 
     async def delete(self, key: str) -> None: ...
 
+    async def delete_tenant(self, org_id: UUID) -> int:
+        """Remove every stored file of a tenant (organization purge); returns how many."""
+        ...
+
     async def exists(self, key: str) -> bool: ...
 
 

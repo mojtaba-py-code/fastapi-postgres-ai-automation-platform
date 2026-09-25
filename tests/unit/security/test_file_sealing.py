@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
+import threading
 import time
 from collections.abc import AsyncIterator, Callable
 from datetime import timedelta
@@ -193,6 +195,42 @@ async def test_rotation_rewraps_headers_so_the_old_key_can_go(tmp_path: Path) ->
     retired = _storage(tmp_path, keys={"k2": KEY_2}, active="k2")
     for index, key in enumerate(keys):
         assert await _read(retired, key) == f"payload {index}".encode() * 5000
+
+
+async def test_a_rewrap_never_recreates_a_file_deleted_meanwhile(tmp_path: Path) -> None:
+    key = _key()
+    await _storage(tmp_path).save_bytes(key, os.urandom(3 * CHUNK))
+    reading, release = threading.Event(), threading.Event()
+
+    class SlowSealer(FileSealer):
+        def rewrap_header(self, storage_key: str, wrapped: bytes) -> bytes | None:
+            reading.set()  # the re-wrap has read the file...
+            assert release.wait(timeout=10)  # ...and is slow to write the new one
+            return super().rewrap_header(storage_key, wrapped)
+
+    rotated = LocalFileStorage(
+        tmp_path, SlowSealer(EnvelopeCipher({"k1": KEY_1, "k2": KEY_2}, "k2"))
+    )
+    rewrap = asyncio.create_task(rotated.rewrap(ORG, limit=10))
+    assert await asyncio.to_thread(reading.wait, 10)
+    delete = asyncio.create_task(rotated.delete(key))  # the upload's row went meanwhile
+    await asyncio.sleep(0.2)
+    release.set()
+    await asyncio.gather(rewrap, delete)
+    assert not rotated.local_path(key).exists()
+
+
+async def test_a_tenants_files_go_with_their_directories(tmp_path: Path) -> None:
+    storage = _storage(tmp_path)
+    keys = [_key(), f"reports/{ORG}/{uuid4()}.pdf"]
+    other = f"uploads/{uuid4()}/{uuid4()}.csv"
+    for key in [*keys, other]:
+        await storage.save_bytes(key, b"x")
+    assert await storage.delete_tenant(ORG) == 2
+    assert not (tmp_path / "uploads" / str(ORG)).exists()
+    assert not (tmp_path / "reports" / str(ORG)).exists()
+    assert await storage.exists(other)
+    assert await storage.delete_tenant(ORG) == 0  # nothing left: idempotent
 
 
 async def test_rotation_stops_at_its_batch_limit(tmp_path: Path) -> None:

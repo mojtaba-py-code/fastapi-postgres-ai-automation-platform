@@ -48,6 +48,7 @@ TASK_ROUTES: dict[TaskName, tuple[str, str]] = {
     TaskName.OPERATOR_ALERT: ("nexusflow.operators.alert", INTEGRATIONS),
     TaskName.PURGE_ORGANIZATION: ("nexusflow.maintenance.purge_organizations", PIPELINE),
     TaskName.PURGE_DATASET: ("nexusflow.maintenance.purge_dataset", PIPELINE),
+    TaskName.DELETE_FILES: ("nexusflow.maintenance.delete_files", PIPELINE),
     TaskName.WORKFLOW_EVENT: ("nexusflow.events.route", PIPELINE),
 }
 

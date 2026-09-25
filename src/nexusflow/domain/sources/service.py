@@ -20,6 +20,7 @@ from nexusflow.domain.catalog.model import Dataset
 from nexusflow.domain.catalog.service import get_dataset
 from nexusflow.domain.integrations.model import SOURCE_AUTH_KINDS, IntegrationStatus
 from nexusflow.domain.shared.context import RequestMeta
+from nexusflow.domain.shared.files import file_deletions
 from nexusflow.domain.shared.outbox import TaskName, new_message
 from nexusflow.domain.shared.unit_of_work import TenantScope, UnitOfWork, UnitOfWorkFactory
 from nexusflow.domain.shared.url_policy import UrlPolicy
@@ -160,7 +161,11 @@ class SourceService:
             source = await uow.data.sources.get_for_update(org_id, source_id)
             if source is None:
                 raise NotFoundError()
+            # The cascade removes the source's uploads; their files follow the commit.
+            keys = await uow.data.maintenance.file_keys(org_id, source_id=source.id)
             await uow.data.sources.delete(source)
+            for message in file_deletions(org_id, keys, now=self._clock.now()):
+                await uow.outbox.add(message)
             await self._audit.record(
                 uow.audit,
                 action=AuditAction.SOURCE_DELETED,
