@@ -13,6 +13,7 @@ from sqlalchemy import (
     Select,
     String,
     and_,
+    case,
     cast,
     delete,
     false,
@@ -1044,12 +1045,12 @@ class SqlUploadRepository(TenantRepository[Upload]):
 def _sealed_under_other_key(blob: Any, active_key_id: str) -> ColumnElement[bool]:
     """A secret blob wrapped under a key other than ``active_key_id``: its key id
     is stored in clear in the blob header (``NF | version | length | key id``)."""
-    key_id = func.substring(blob, 5, func.get_byte(blob, 3))
-    condition: ColumnElement[bool] = and_(
-        blob.is_not(None),
-        func.octet_length(blob) > 4,
-        key_id != literal(active_key_id.encode("ascii"), LargeBinary),
+    # CASE, not AND: SQL does not promise to test the length before get_byte runs.
+    key_id = case(
+        (func.octet_length(blob) > 4, func.substring(blob, 5, func.get_byte(blob, 3))),
+        else_=null(),
     )
+    condition: ColumnElement[bool] = key_id != literal(active_key_id.encode("ascii"), LargeBinary)
     return condition
 
 
