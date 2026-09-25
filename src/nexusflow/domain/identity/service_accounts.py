@@ -27,6 +27,8 @@ from nexusflow.domain.shared.security import TokenHasher
 from nexusflow.domain.shared.unit_of_work import TenantScope, UnitOfWorkFactory
 
 _KEY = re.compile(r"^[a-z0-9][a-z0-9_.-]{1,63}$")
+# The audit trail's resource type for these accounts.
+AUDIT_RESOURCE = "service_account"
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,7 +82,7 @@ class ServiceAccountService:
                 action=AuditAction.SERVICE_ACCOUNT_CREATED,
                 principal=Principal.system(),
                 meta=meta,
-                resource_type="service_account",
+                resource_type=AUDIT_RESOURCE,
                 resource_id=account.id,
                 metadata={"workflow_key": account.workflow_key, "scopes": granted},
             )
@@ -101,7 +103,7 @@ class ServiceAccountService:
                 action=AuditAction.SERVICE_ACCOUNT_ROTATED,
                 principal=Principal.system(),
                 meta=meta,
-                resource_type="service_account",
+                resource_type=AUDIT_RESOURCE,
                 resource_id=account.id,
             )
             await uow.commit()
@@ -123,7 +125,7 @@ class ServiceAccountService:
                 else AuditAction.SERVICE_ACCOUNT_DISABLED,
                 principal=Principal.system(),
                 meta=meta,
-                resource_type="service_account",
+                resource_type=AUDIT_RESOURCE,
                 resource_id=account.id,
                 metadata={"reason": account.disabled_reason},
             )

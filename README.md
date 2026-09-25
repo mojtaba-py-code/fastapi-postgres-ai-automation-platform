@@ -155,8 +155,8 @@ drift checks. Know the following before you deploy it:
 * **The container stack was not run in the development environment** (no Docker
   there); its startup was reviewed statically instead. CI builds and scans both
   images, runs the end-to-end suite against the full Compose stack behind the TLS
-  edge and tests a backup and restore - but has not run yet (the repository is
-  new). Do a clean-host dry run first.
+  edge and tests a backup and restore; check the latest run's result on the
+  repository before relying on it. Do a clean-host dry run first.
 * A real n8n and a real Chromium are not exercised by the tests. The n8n
   workflows are generated and linted; the browser's guard and pinning egress
   proxy are tested. The platform runs fully without n8n (`internal` mode, the

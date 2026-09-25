@@ -108,9 +108,8 @@ below.
 ## 7. Known limitations and roadmap
 
 **Before a production deployment**
-1. Move the code into its own repository (the working copy still carries the git
-   history of an earlier project), get the first CI run green including the
-   end-to-end job, and do a clean-host dry run.
+1. Get the first CI run green, including the end-to-end job and its backup and
+   restore, and do a clean-host dry run.
 2. Commission an independent penetration test.
 3. Publish the first signed release (tag `v0.1.0`) and deploy it by digest.
 
