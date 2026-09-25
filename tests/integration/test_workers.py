@@ -3,6 +3,7 @@ ingestion and event routing (internal orchestration mode)."""
 
 from __future__ import annotations
 
+import io
 import json
 import time
 from types import SimpleNamespace
@@ -10,6 +11,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import httpx2
+import openpyxl
 import pytest
 from fastapi import FastAPI
 
@@ -35,8 +37,9 @@ from nexusflow.apps.workers.messages import (
 )
 from nexusflow.apps.workers.sandbox import UploadJob, parse_uploaded_file
 from nexusflow.bootstrap.container import Container
-from nexusflow.bootstrap.sandbox import build_sandbox
+from nexusflow.bootstrap.sandbox import SandboxComponents, build_sandbox
 from nexusflow.core.config import SandboxSettings
+from nexusflow.domain.shared.unit_of_work import TenantScope
 from nexusflow.domain.webhooks.signatures import build_signature_header
 from nexusflow.infrastructure.messaging.celery_app import (
     SANDBOX,
@@ -63,6 +66,7 @@ WEBSITE_CONFIG = {
     "item_selector": "div.product",
     "fields": {"sku": {"selector": ".sku"}, "title": {"selector": "h2"}},
 }
+XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 class RecordingDispatcher:
@@ -89,6 +93,57 @@ async def _website_run(owner: ApiSession) -> tuple[UUID, UUID, str]:
 
 def _result_url(org_id: UUID, run_id: UUID) -> str:
     return f"/internal/v1/sandbox/orgs/{org_id}/runs/{run_id}/result"
+
+
+def _sandbox(internal_app: FastAPI) -> SandboxComponents:
+    """The sandbox's components, talking to the in-process internal app."""
+    sandbox = build_sandbox(SandboxSettings())
+    sandbox.gateway = SandboxGatewayClient(
+        "http://testserver", timeout_seconds=10, transport=httpx2.ASGITransport(app=internal_app)
+    )
+    sandbox.closers.append(sandbox.gateway.aclose)
+    return sandbox
+
+
+def _xlsx() -> bytes:
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    assert sheet is not None
+    sheet.append(["SKU", "Title", "Price", "Email"])
+    sheet.append(["X-1", "Crate", 12.5, "x@example.com"])
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
+async def _upload_source(
+    api: httpx2.AsyncClient, config: dict[str, Any] = UPLOAD_CONFIG
+) -> tuple[ApiSession, str, str]:
+    owner = await signup(api)
+    project_id = await create_project(owner)
+    dataset_id = await create_dataset(owner, project_id)
+    return owner, await create_source(owner, project_id, dataset_id, config), dataset_id
+
+
+async def _upload_job(
+    owner: ApiSession,
+    container: Container,
+    source_id: str,
+    content: bytes,
+    content_type: str = "text/csv",
+) -> tuple[UUID, UUID, UploadJob]:
+    """Upload ``content`` and dispatch its run: the job the sandbox receives."""
+    name = "parts.xlsx" if content_type == XLSX else "parts.csv"
+    uploaded = await owner.post(
+        f"/api/v1/sources/{source_id}/uploads", files={"file": (name, content, content_type)}
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    org_id, run_id = await org_id_of(owner), UUID(uploaded.json()["run_id"])
+    deps, dispatcher = _deps(container)
+    await collect_dispatch(deps, RunMessage(org_id=org_id, run_id=run_id))
+    [(task, kwargs, _)] = dispatcher.sent
+    assert task == SANDBOX_UPLOAD_TASK
+    return org_id, run_id, UploadJob.model_validate(kwargs)
 
 
 class TestSandboxBoundary:
@@ -263,6 +318,30 @@ class TestSandboxBoundary:
         assert (run["status"], run["error_code"]) == ("failed", "parse_failed")
         retry = await owner.post(uploads_url, files=csv_file)
         assert retry.status_code == 201, retry.text  # the failed file may be uploaded again
+
+    async def test_an_xlsx_upload_is_parsed_end_to_end(
+        self, api: httpx2.AsyncClient, internal_app: FastAPI, container: Container
+    ) -> None:
+        config = {**UPLOAD_CONFIG, "format": "xlsx"}
+        owner, source_id, dataset_id = await _upload_source(api, config)
+        org_id, run_id, job = await _upload_job(owner, container, source_id, _xlsx(), XLSX)
+        sandbox = _sandbox(internal_app)
+        try:
+            await parse_uploaded_file(sandbox, job)
+        finally:
+            await sandbox.aclose()
+        async with container.uow_factory(TenantScope.system(org_id)) as uow:
+            staged = await uow.data.payloads.exists(org_id, run_id)
+            upload = await uow.data.uploads.get_by_run(org_id, run_id)
+            run = await uow.data.runs.get(org_id, run_id)
+        assert staged
+        assert upload is not None and (upload.status.value, upload.row_count) == ("processed", 1)
+        assert run is not None and run.status.value == "running"  # its ingestion is queued
+
+        await collect_dispatch(_deps(container)[0], RunMessage(org_id=org_id, run_id=run_id))
+        assert (await owner.get(f"/api/v1/runs/{run_id}")).json()["status"] == "succeeded"
+        records = (await owner.get(f"/api/v1/datasets/{dataset_id}/records")).json()["items"]
+        assert [(r["record_key"], r["data"]["title"]) for r in records] == [("X-1", "Crate")]
 
     async def test_upload_is_parsed_by_the_sandbox_via_its_ticket(
         self,
