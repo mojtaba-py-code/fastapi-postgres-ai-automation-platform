@@ -49,6 +49,10 @@ class FileStorage(Protocol):
         """Key rotation: re-wrap the keys of up to ``limit`` of a tenant's files."""
         ...
 
+    async def count_stale(self, org_id: UUID) -> int:
+        """How many of a tenant's files still have their key under an older KEK."""
+        ...
+
     async def delete(self, key: str) -> None: ...
 
     async def delete_tenant(self, org_id: UUID) -> int:

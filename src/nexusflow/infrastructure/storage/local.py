@@ -162,6 +162,29 @@ class LocalFileStorage:
                         return rewrapped
         return rewrapped
 
+    async def count_stale(self, org_id: UUID) -> int:
+        """How many of a tenant's files still have their key under an older KEK."""
+        sealer = self._sealer
+        if sealer is None:
+            return 0
+        return await asyncio.to_thread(self._count_stale, sealer, org_id)
+
+    def _count_stale(self, sealer: FileSealer, org_id: UUID) -> int:
+        stale = 0
+        for area in ("uploads", "reports"):
+            for path in _files_in(self._root / area / str(org_id)):
+                if not _KEY.fullmatch(f"{area}/{org_id}/{path.name}"):
+                    continue
+                try:
+                    with path.open("rb") as handle:
+                        if handle.read(len(MAGIC)) != MAGIC:
+                            continue
+                        wrapped = handle.read(int.from_bytes(handle.read(2), "big"))
+                except FileNotFoundError:
+                    continue  # deleted since the directory was listed
+                stale += sealer.is_stale(wrapped)
+        return stale
+
     def _rewrap_file(self, sealer: FileSealer, key: str, path: Path) -> bool:
         # Exclusive with deletions from reading the file to replacing it: a file
         # deleted in between would otherwise be re-created by the replace.

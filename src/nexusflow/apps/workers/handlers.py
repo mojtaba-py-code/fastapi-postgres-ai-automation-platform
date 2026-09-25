@@ -461,7 +461,7 @@ async def rewrap_keys(deps: WorkerDeps, msg: Empty) -> None:
 
     async def rewrap(org_id: UUID) -> None:
         count = await c.integrations.rewrap(org_id, active_key_id=active)
-        count += await c.webhooks.rewrap(org_id)
+        count += await c.webhooks.rewrap(org_id, active_key_id=active)
         count += await c.maintenance.rewrap_sealed(org_id, active_key_id=active)
         if count:
             _log.info("secrets_rewrapped", org_id=str(org_id), count=count, key_id=active)

@@ -215,24 +215,32 @@ class WebhookService:
             await uow.commit()
             return endpoint
 
-    async def rewrap(self, org_id: UUID, *, batch: int = 500) -> int:
-        """Re-encrypt signing secrets under the active KEK (key rotation)."""
+    async def rewrap(self, org_id: UUID, *, active_key_id: str, batch: int = 500) -> int:
+        """Re-encrypt signing secrets under the active KEK (key rotation): every
+        endpoint with a secret under an older key, a batch at a time, by id."""
         rewrapped = 0
-        async with self._uow_factory(TenantScope.system(org_id)) as uow:
-            for endpoint in await uow.data.webhook_endpoints.list_for_update(org_id, limit=batch):
-                context = secret_context(org_id, endpoint.id)
-                if self._cipher.needs_rewrap(endpoint.secret_ciphertext):
-                    endpoint.secret_ciphertext = self._cipher.rewrap(
-                        endpoint.secret_ciphertext, context=context
-                    )
-                    rewrapped += 1
-                previous = endpoint.previous_secret_ciphertext
-                if previous is not None and self._cipher.needs_rewrap(previous):
-                    endpoint.previous_secret_ciphertext = self._cipher.rewrap(
-                        previous, context=context
-                    )
-            await uow.commit()
-        return rewrapped
+        after: UUID | None = None
+        while True:
+            async with self._uow_factory(TenantScope.system(org_id)) as uow:
+                endpoints = await uow.data.webhook_endpoints.stale_for_update(
+                    org_id, active_key_id, after=after, limit=batch
+                )
+                for endpoint in endpoints:
+                    context = secret_context(org_id, endpoint.id)
+                    if self._cipher.needs_rewrap(endpoint.secret_ciphertext):
+                        endpoint.secret_ciphertext = self._cipher.rewrap(
+                            endpoint.secret_ciphertext, context=context
+                        )
+                    previous = endpoint.previous_secret_ciphertext
+                    if previous is not None and self._cipher.needs_rewrap(previous):
+                        endpoint.previous_secret_ciphertext = self._cipher.rewrap(
+                            previous, context=context
+                        )
+                await uow.commit()
+            rewrapped += len(endpoints)
+            if len(endpoints) < batch:
+                return rewrapped
+            after = endpoints[-1].id
 
     async def list_endpoints(
         self, principal: Principal, page: PageRequest

@@ -24,6 +24,7 @@ import httpx2
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from nexusflow.apps.cli.main import build_parser
 from nexusflow.bootstrap.container import Container, build_container
 from nexusflow.core.jsonutil import content_hash
 from nexusflow.core.pagination import PageRequest
@@ -340,6 +341,98 @@ class TestKeyRotation:
             assert updated[0].diff["supplier_email"] == {"old": FIRST, "new": CHANGED}
         finally:
             await retired.aclose()
+
+    async def test_a_rewrap_that_meets_a_held_row_reports_what_remains(
+        self,
+        api: httpx2.AsyncClient,
+        container: Container,
+        database: ProvisionedDatabase,
+        admin_conn: asyncpg.Connection,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        tenant = await _tenant(api)
+        await tenant.collect(container, [{"sku": "A-1", "supplier_email": FIRST}])
+        current = json.loads(container.settings.security.encryption_keys.get_secret_value())
+        new_key = base64.b64encode(os.urandom(32)).decode()
+        rotated = _platform(database, tmp_path, {**current, "kek-2": new_key}, "kek-2")
+
+        async def only_this_tenant() -> list[UUID]:
+            return [tenant.org_id]
+
+        monkeypatch.setattr(rotated.maintenance, "tenants", only_this_tenant)
+        # A long transaction (an ingestion, say) holds the record's row.
+        locker = await asyncpg.connect(database.admin_url.rsplit("/", 1)[0] + f"/{database.name}")
+        held = locker.transaction()
+        await held.start()
+        await locker.execute(
+            "SELECT 1 FROM records WHERE dataset_id = $1 FOR UPDATE", UUID(tenant.dataset_id)
+        )
+        try:
+            partial = await _cli(rotated, "keys", "rewrap", "--passes", "2", "--wait-seconds", "0")
+            await held.rollback()
+            complete = await _cli(rotated, "keys", "rewrap")
+        finally:
+            await locker.close()
+            await rotated.aclose()
+
+        # The batches skipped the held row: that is reported, never "done".
+        assert partial["ok"] is False
+        assert partial["remaining"] == {str(tenant.org_id): {"records": 1}}
+        assert complete["ok"] is True
+        assert "remaining" not in complete
+        assert '"kid": "kek-1"' not in await _stored_text(admin_conn, tenant.dataset_id)
+
+    async def test_every_webhook_secret_is_rewrapped_whatever_the_batch(
+        self,
+        api: httpx2.AsyncClient,
+        container: Container,
+        database: ProvisionedDatabase,
+        tmp_path: Path,
+    ) -> None:
+        owner = await signup(api)
+        org_id = await org_id_of(owner)
+        project_id = await create_project(owner)
+        dataset_id = await create_dataset(owner, project_id)
+        source_id = await create_source(owner, project_id, dataset_id, WEBHOOK_CONFIG)
+        endpoints = []
+        for name in ("erp", "shop", "crm"):
+            created = await owner.post(
+                "/api/v1/webhook-endpoints", json={"source_id": source_id, "name": name}
+            )
+            assert created.status_code == 201, created.text
+            endpoints.append(created.json())
+        current = json.loads(container.settings.security.encryption_keys.get_secret_value())
+        new_key = base64.b64encode(os.urandom(32)).decode()
+
+        rotated = _platform(database, tmp_path, {**current, "kek-2": new_key}, "kek-2")
+        try:
+            assert await rotated.webhooks.rewrap(org_id, active_key_id="kek-2", batch=1) == 3
+            left = await rotated.maintenance.still_under_old_keys(org_id, active_key_id="kek-2")
+        finally:
+            await rotated.aclose()
+
+        assert "webhook_endpoints" not in left
+        retired = _platform(database, tmp_path, {"kek-2": new_key}, "kek-2")
+        try:
+            for endpoint in endpoints:  # every secret opens without the old key
+                body = json.dumps({"items": [{"sku": endpoint["name"]}]}).encode()
+                headers = signed_headers(endpoint["secret"], body)
+                received = await retired.webhooks.receive(
+                    org_id=org_id,
+                    endpoint_id=UUID(endpoint["id"]),
+                    headers={name.lower(): value for name, value in headers.items()},
+                    body=body,
+                )
+                assert received.status == "accepted"
+        finally:
+            await retired.aclose()
+
+
+async def _cli(container: Container, *argv: str) -> dict[str, Any]:
+    args = build_parser().parse_args(argv)
+    result: dict[str, Any] = await args.handler(container, args)
+    return result
 
 
 class TestStoredFiles:

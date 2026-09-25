@@ -128,12 +128,36 @@ class MaintenanceService:
 
     async def rewrap_sealed(self, org_id: UUID, *, active_key_id: str, batch: int = 200) -> int:
         """Key rotation: move one batch of a tenant's sealed data to the active
-        key-encryption key (records, versions, change diffs and stored files)."""
+        key-encryption key (records, versions, change diffs and stored files).
+
+        Rows other transactions hold are skipped, so a batch that re-wraps
+        nothing does not mean nothing is left: :meth:`still_under_old_keys`
+        tells."""
         async with self._uow_factory(TenantScope.system(org_id)) as uow:
             count = await uow.data.records.rewrap_sealed(org_id, active_key_id, limit=batch)
             count += await uow.data.changes.rewrap_sealed(org_id, active_key_id, limit=batch)
             await uow.commit()
         return count + await self._storage.rewrap(org_id, limit=batch)
+
+    async def still_under_old_keys(self, org_id: UUID, *, active_key_id: str) -> dict[str, int]:
+        """What of a tenant is still encrypted under another key than the active
+        one, counted without locks (locked rows count): until all of it is zero,
+        the old key must stay in the keyring. Only non-zero counts are listed."""
+        async with self._uow_factory(TenantScope.system(org_id)) as uow:
+            records, versions = await uow.data.records.count_stale_sealed(org_id, active_key_id)
+            counts = {
+                "integrations": await uow.data.integrations.count_needing_rewrap(
+                    org_id, active_key_id
+                ),
+                "webhook_endpoints": await uow.data.webhook_endpoints.count_stale(
+                    org_id, active_key_id
+                ),
+                "records": records,
+                "record_versions": versions,
+                "changes": await uow.data.changes.count_stale_sealed(org_id, active_key_id),
+            }
+        counts["files"] = await self._storage.count_stale(org_id)
+        return {name: count for name, count in counts.items() if count}
 
     async def apply_retention(self, org_id: UUID) -> MaintenanceReport:
         """Purge a tenant's data past its retention, target by target.

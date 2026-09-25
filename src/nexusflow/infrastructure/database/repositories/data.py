@@ -9,6 +9,7 @@ from uuid import UUID
 
 from sqlalchemy import (
     DateTime,
+    LargeBinary,
     Select,
     String,
     and_,
@@ -126,6 +127,15 @@ class SqlIntegrationRepository(TenantRepository[Integration]):
             .with_for_update(skip_locked=True)
         )
         return list((await self._s.execute(statement)).scalars().all())
+
+    async def count_needing_rewrap(self, org_id: UUID, active_key_id: str) -> int:
+        i = d.integrations
+        statement = (
+            select(func.count())
+            .select_from(i)
+            .where(i.c.org_id == org_id, i.c.secret_key_id != active_key_id)
+        )
+        return int((await self._s.execute(statement)).scalar_one())
 
 
 class SqlSourceRepository(TenantRepository[Source]):
@@ -290,6 +300,25 @@ async def _rewrap_rows(
     return len(rows)
 
 
+async def _count_stale(
+    session: AsyncSession, table: Any, column: str, org_id: UUID, active_key_id: str
+) -> int:
+    """Rows of ``table`` holding a value sealed under an older key - counted
+    without locks, so rows other transactions hold are counted too."""
+    stale = _STALE_IN_DIFF if column == "diff" else _STALE_IN_DATA
+    statement = (
+        select(func.count())
+        .select_from(table)
+        .where(
+            table.c.org_id == org_id,
+            func.jsonb_path_exists(
+                table.c[column], stale, func.jsonb_build_object("kid", active_key_id)
+            ),
+        )
+    )
+    return int((await session.execute(statement)).scalar_one())
+
+
 async def _delete_ids(session: AsyncSession, table: Any, ids: Select[Any]) -> int:
     """Delete the rows ``ids`` selects - a bounded batch, so one short statement."""
     statement = (
@@ -307,6 +336,12 @@ class SqlRecordRepository:
         count = await _rewrap_rows(self._s, d.records, "data", "id", org_id, active_key_id, limit)
         return count + await _rewrap_rows(
             self._s, d.record_versions, "data", "record_id", org_id, active_key_id, limit
+        )
+
+    async def count_stale_sealed(self, org_id: UUID, active_key_id: str) -> tuple[int, int]:
+        return (
+            await _count_stale(self._s, d.records, "data", org_id, active_key_id),
+            await _count_stale(self._s, d.record_versions, "data", org_id, active_key_id),
         )
 
     async def fetch_for_update(self, dataset_id: UUID, keys: Sequence[str]) -> dict[str, Record]:
@@ -597,6 +632,9 @@ class SqlChangeRepository:
             self._s, d.changes, "diff", "record_id", org_id, active_key_id, limit
         )
 
+    async def count_stale_sealed(self, org_id: UUID, active_key_id: str) -> int:
+        return await _count_stale(self._s, d.changes, "diff", org_id, active_key_id)
+
     async def purge_before(
         self, org_id: UUID, dataset_id: UUID, before: datetime, *, limit: int
     ) -> int:
@@ -886,18 +924,53 @@ class SqlUploadRepository(TenantRepository[Upload]):
         return (await self._s.execute(statement)).scalar_one_or_none()
 
 
+def _sealed_under_other_key(blob: Any, active_key_id: str) -> ColumnElement[bool]:
+    """A secret blob wrapped under a key other than ``active_key_id``: its key id
+    is stored in clear in the blob header (``NF | version | length | key id``)."""
+    key_id = func.substring(blob, 5, func.get_byte(blob, 3))
+    condition: ColumnElement[bool] = and_(
+        blob.is_not(None),
+        func.octet_length(blob) > 4,
+        key_id != literal(active_key_id.encode("ascii"), LargeBinary),
+    )
+    return condition
+
+
+def _stale_endpoint(active_key_id: str) -> ColumnElement[bool]:
+    w = d.webhook_endpoints
+    return or_(
+        _sealed_under_other_key(w.c.secret_ciphertext, active_key_id),
+        _sealed_under_other_key(w.c.previous_secret_ciphertext, active_key_id),
+    )
+
+
 class SqlWebhookEndpointRepository(TenantRepository[WebhookEndpoint]):
     entity = WebhookEndpoint
     table = d.webhook_endpoints
 
-    async def list_for_update(self, org_id: UUID, *, limit: int) -> list[WebhookEndpoint]:
+    async def stale_for_update(
+        self, org_id: UUID, active_key_id: str, *, after: UUID | None, limit: int
+    ) -> list[WebhookEndpoint]:
+        w = d.webhook_endpoints
         statement = (
             select(WebhookEndpoint)
-            .where(d.webhook_endpoints.c.org_id == org_id)
+            .where(w.c.org_id == org_id, _stale_endpoint(active_key_id))
+            .order_by(w.c.id)
             .limit(limit)
             .with_for_update(skip_locked=True)
         )
+        if after is not None:
+            statement = statement.where(w.c.id > after)
         return list((await self._s.execute(statement)).scalars().all())
+
+    async def count_stale(self, org_id: UUID, active_key_id: str) -> int:
+        w = d.webhook_endpoints
+        statement = (
+            select(func.count())
+            .select_from(w)
+            .where(w.c.org_id == org_id, _stale_endpoint(active_key_id))
+        )
+        return int((await self._s.execute(statement)).scalar_one())
 
 
 class SqlWebhookEventRepository:

@@ -180,20 +180,43 @@ async def org_clear_network_allowlist(c: Container, args: argparse.Namespace) ->
 
 
 async def keys_rewrap(c: Container, args: argparse.Namespace) -> dict[str, Any]:
+    """Re-wrap everything under the active key, then count - without locks -
+    what is still under an older one. Batches skip rows other transactions
+    hold, so "a pass re-wrapped nothing" is not "done": only ``remaining``
+    being empty (``ok``) means the old key may leave the keyring."""
     active = c.settings.security.encryption_active_key_id
     total = 0
+    remaining: dict[str, dict[str, int]] = {}
     for org_id in await c.maintenance.tenants():
-        while True:  # batches until nothing is left under older keys
-            count = await c.integrations.rewrap(org_id, active_key_id=active)
-            count += await c.webhooks.rewrap(org_id)
-            count += await c.maintenance.rewrap_sealed(org_id, active_key_id=active)
-            total += count
-            if count == 0:
+        left: dict[str, int] = {}
+        for attempt in range(max(args.passes, 1)):
+            if attempt:
+                await asyncio.sleep(args.wait_seconds)  # held rows: let their transactions end
+            while True:  # batches until a pass re-wraps nothing
+                count = await c.integrations.rewrap(org_id, active_key_id=active)
+                count += await c.webhooks.rewrap(org_id, active_key_id=active)
+                count += await c.maintenance.rewrap_sealed(org_id, active_key_id=active)
+                total += count
+                if count == 0:
+                    break
+            left = await c.maintenance.still_under_old_keys(org_id, active_key_id=active)
+            if not left:
                 break
+        if left:
+            remaining[str(org_id)] = left
     await _platform_audit(
-        c, AuditAction.ENCRYPTION_KEYS_REWRAPPED, {"active_key_id": active, "rewrapped": total}
+        c,
+        AuditAction.ENCRYPTION_KEYS_REWRAPPED,
+        {"active_key_id": active, "rewrapped": total, "tenants_remaining": len(remaining)},
     )
-    return {"active_key_id": active, "rewrapped": total}
+    result: dict[str, Any] = {"ok": not remaining, "active_key_id": active, "rewrapped": total}
+    if remaining:
+        result["remaining"] = remaining
+        result["warning"] = (
+            "Some data is still under an older key (rows in use): run this command again "
+            "before removing any key from NEXUSFLOW_SECURITY__ENCRYPTION_KEYS."
+        )
+    return result
 
 
 async def audit_verify(c: Container, args: argparse.Namespace) -> dict[str, Any]:
@@ -333,9 +356,14 @@ def build_parser() -> argparse.ArgumentParser:
     keys = sub.add_parser("keys", help="encryption key maintenance").add_subparsers(
         dest="action", required=True
     )
-    keys.add_parser("rewrap", help="re-encrypt secrets under the active KEK").set_defaults(
-        handler=keys_rewrap
+    rewrap = keys.add_parser("rewrap", help="re-encrypt secrets under the active KEK")
+    rewrap.add_argument(
+        "--passes", type=int, default=3, help="re-wrap passes per tenant while data remains"
     )
+    rewrap.add_argument(
+        "--wait-seconds", type=float, default=5.0, help="pause between passes (held rows)"
+    )
+    rewrap.set_defaults(handler=keys_rewrap)
 
     audit = sub.add_parser("audit", help="audit trail").add_subparsers(dest="action", required=True)
     verify = audit.add_parser("verify", help="recompute tenant hash chains")

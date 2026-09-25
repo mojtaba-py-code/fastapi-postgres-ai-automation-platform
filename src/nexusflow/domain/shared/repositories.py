@@ -55,6 +55,8 @@ class IntegrationRepository(TenantRepository[Integration], Protocol):
         self, org_id: UUID, active_key_id: str, limit: int
     ) -> list[Integration]: ...
 
+    async def count_needing_rewrap(self, org_id: UUID, active_key_id: str) -> int: ...
+
 
 class SourceRepository(TenantRepository[Source], Protocol):
     async def lock(self, source_id: UUID) -> None: ...
@@ -96,6 +98,10 @@ class RecordRepository(Protocol):
 
     async def rewrap_sealed(self, org_id: UUID, active_key_id: str, *, limit: int) -> int:
         """Re-encrypt sealed values of records and versions still under an older key."""
+        ...
+
+    async def count_stale_sealed(self, org_id: UUID, active_key_id: str) -> tuple[int, int]:
+        """Records and versions still holding a value under an older key (no locks)."""
         ...
 
     async def add_many(self, records: Sequence[Record]) -> None: ...
@@ -172,6 +178,10 @@ class ChangeRepository(Protocol):
 
     async def rewrap_sealed(self, org_id: UUID, active_key_id: str, *, limit: int) -> int:
         """Re-encrypt sealed values of diffs still under an older key."""
+        ...
+
+    async def count_stale_sealed(self, org_id: UUID, active_key_id: str) -> int:
+        """Changes still holding a value under an older key (no locks)."""
         ...
 
     async def purge_before(
@@ -254,7 +264,16 @@ class UploadRepository(TenantRepository[Upload], Protocol):
 
 
 class WebhookEndpointRepository(TenantRepository[WebhookEndpoint], Protocol):
-    async def list_for_update(self, org_id: UUID, *, limit: int) -> list[WebhookEndpoint]: ...
+    async def stale_for_update(
+        self, org_id: UUID, active_key_id: str, *, after: UUID | None, limit: int
+    ) -> list[WebhookEndpoint]:
+        """Endpoints (after ``after``, by id) whose current or previous secret is
+        wrapped under another key than the active one; locked rows are skipped."""
+        ...
+
+    async def count_stale(self, org_id: UUID, active_key_id: str) -> int:
+        """How many endpoints still hold a secret under an older key (no locks)."""
+        ...
 
 
 class WebhookEventRepository(Protocol):
