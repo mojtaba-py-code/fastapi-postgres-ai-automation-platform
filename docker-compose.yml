@@ -95,14 +95,18 @@ services:
     image: nginxinc/nginx-unprivileged:${NGINX_VERSION:-1.29-alpine@sha256:0c79d56aee561a1d81c63f00eee5fb5fe29279560cdc55e91425133104c7fbe6}
     tmpfs: ["/tmp:size=32m,noexec,nosuid,nodev"]
     ports:
-      - "80:8080"
-      - "443:8443"
+      # IPv4 only: an IPv6 client would reach nginx through Docker's userland
+      # proxy and appear as the bridge gateway - one address for all of them
+      # (rate limits, sign-in risk and network allowlists). See DEPLOYMENT.md.
+      - "0.0.0.0:80:8080"
+      - "0.0.0.0:443:8443"
       - "127.0.0.1:5678:5678"   # n8n editor - SSH tunnel only
       - "127.0.0.1:3000:3000"   # Grafana - SSH tunnel only
     volumes:
       - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./deploy/nginx/snippets:/etc/nginx/snippets:ro
       - ${NEXUSFLOW_TLS_DIR:-./deploy/certs}:/etc/nginx/tls:ro
+      - ./deploy/acme:/var/www/acme:ro      # certbot --webroot challenges
     environment:
       NEXUSFLOW_DOMAIN: ${NEXUSFLOW_DOMAIN}
     depends_on:
@@ -166,6 +170,11 @@ services:
 
   worker-pipeline:
     <<: *app
+    tmpfs:
+      - "/tmp:size=64m,mode=1777,noexec,nosuid,nodev"
+      # Metric files of the prefork children (one set per child): kept apart
+      # from /tmp, so they cannot fill it, and emptied at every start.
+      - "/run/prometheus:size=128m,mode=0700,uid=10001,gid=10001,noexec,nosuid,nodev"
     command: ["celery", "-A", "nexusflow.apps.workers.app:celery_app", "worker", "-Q", "pipeline",
               "--concurrency", "4", "--without-gossip", "--without-mingle", "--loglevel", "INFO"]
     environment:
@@ -173,7 +182,7 @@ services:
       NEXUSFLOW_HEALTHCHECK: heartbeat                 # see docker/healthcheck.py
       NEXUSFLOW_HEARTBEAT_PATH: /tmp/nexusflow-heartbeat
       NEXUSFLOW_OBSERVABILITY__WORKER_METRICS_PORT: "9101"
-      PROMETHEUS_MULTIPROC_DIR: /tmp
+      PROMETHEUS_MULTIPROC_DIR: /run/prometheus   # its own tmpfs, see below
     secrets: *app-secrets
     volumes: ["nexusflow-data:/var/lib/nexusflow"]      # reports, purges
     depends_on:
@@ -183,6 +192,11 @@ services:
 
   worker-integrations:
     <<: *app
+    tmpfs:
+      - "/tmp:size=64m,mode=1777,noexec,nosuid,nodev"
+      # Metric files of the prefork children (one set per child): kept apart
+      # from /tmp, so they cannot fill it, and emptied at every start.
+      - "/run/prometheus:size=128m,mode=0700,uid=10001,gid=10001,noexec,nosuid,nodev"
     command: ["celery", "-A", "nexusflow.apps.workers.app:celery_app", "worker", "-Q", "integrations",
               "--concurrency", "4", "--without-gossip", "--without-mingle", "--loglevel", "INFO"]
     environment:
@@ -190,7 +204,7 @@ services:
       NEXUSFLOW_HEALTHCHECK: heartbeat                 # see docker/healthcheck.py
       NEXUSFLOW_HEARTBEAT_PATH: /tmp/nexusflow-heartbeat
       NEXUSFLOW_OBSERVABILITY__WORKER_METRICS_PORT: "9101"
-      PROMETHEUS_MULTIPROC_DIR: /tmp
+      PROMETHEUS_MULTIPROC_DIR: /run/prometheus   # its own tmpfs, see below
       # The only process that calls an AI provider or an SMTP relay holds their
       # credentials (empty secret files mean "not configured").
       NEXUSFLOW_AI__PROVIDER: ${NEXUSFLOW_AI_PROVIDER:-offline}
@@ -273,6 +287,10 @@ services:
   # ---------------------------------------------------------- automation
   n8n:
     <<: *hardened
+    # Opt-in (COMPOSE_PROFILES=n8n): the platform orchestrates itself by default,
+    # and an n8n that is running but not set up can be claimed by whoever calls
+    # its owner set-up first. Set the owner up as soon as you enable it.
+    profiles: ["n8n"]
     init: false                   # the image runs its own init (tini)
     image: n8nio/n8n:${N8N_VERSION:-2.40.6@sha256:9c7871d5cc4fc2565bb905e4df5bf7d6a5a4bf2f4313fb99a2b3fa380f331d7c}   # keep current: n8n ships frequent security fixes
     read_only: false              # n8n writes its settings/cache under /home/node
@@ -315,20 +333,22 @@ services:
   postgres:
     <<: *hardened
     image: postgres:${POSTGRES_VERSION:-17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24}
-    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]   # entrypoint drops to "postgres"
+    # The image's own "postgres" user from the start: no root, no capabilities
+    # (the entrypoint supports it; the data volume belongs to that user).
+    user: postgres
     tmpfs: ["/tmp:size=64m", "/var/run/postgresql:size=8m"]
     environment:
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
       POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=scram-sha-256"
     # PostgreSQL refuses a key file others can read, and Compose mounts secrets
-    # with their host mode: install a private copy for "postgres" first.
+    # with their host mode: install a private copy first.
     entrypoint:
       - sh
       - -ec
       - |
-        install -d -o postgres -g postgres -m 0700 /var/run/postgresql/tls
-        install -o postgres -g postgres -m 0600 /run/secrets/tls_postgres_key /var/run/postgresql/tls/server.key
-        install -o postgres -g postgres -m 0644 /run/secrets/tls_postgres_cert /var/run/postgresql/tls/server.crt
+        install -d -m 0700 /var/run/postgresql/tls
+        install -m 0600 /run/secrets/tls_postgres_key /var/run/postgresql/tls/server.key
+        install -m 0644 /run/secrets/tls_postgres_cert /var/run/postgresql/tls/server.crt
         exec docker-entrypoint.sh "$$@"
       - docker-entrypoint.sh
     command: ["postgres",
@@ -428,11 +448,16 @@ services:
     profiles: ["av"]              # enable: docker compose --profile av up -d
     image: clamav/clamav:${CLAMAV_VERSION:-1.4@sha256:a5f03c12a79dbe9f6d8a527b6bb1ea053fa8dd061d3738a26897f055ee2d9303}
     read_only: false
-    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]   # clamd/freshclam drop to "clamav"
+    # Upstream's unprivileged mode: no root, no capabilities.
+    user: clamav
+    entrypoint: ["/init-unprivileged"]
     # Scans hostile uploads: reachable only from the API (av), never from the
     # database/broker network; egress only for signature updates.
     networks: [av, egress]
-    mem_limit: 2g
+    # Upstream's minimum is 3 GiB, 4 recommended: a signature update builds a
+    # second engine before dropping the old one. Below that clamd is killed on
+    # its first update and every upload is refused (MalwareScannerUnavailable).
+    mem_limit: 4g
 
   # ---------------------------------------------------------- monitoring
   prometheus:

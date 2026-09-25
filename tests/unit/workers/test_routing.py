@@ -146,3 +146,58 @@ def test_placeholders_are_created_empty_and_never_overwritten(tmp_path: Path) ->
     (target / "n8n_api_key").write_text("filled-in-by-the-operator", encoding="utf-8")
     assert script.main(["--dir", str(target), "--force"]) == 0  # regenerate the rest
     assert (target / "n8n_api_key").read_text(encoding="utf-8") == "filled-in-by-the-operator"
+
+
+def test_a_second_run_adds_only_what_is_missing(tmp_path: Path) -> None:
+    # Review F-7: re-running used to refuse outright, and the "--force" it
+    # suggested replaced every key - the database roles and encrypted data with them.
+    script = _generate_secrets()
+    target = tmp_path / "secrets"
+    assert script.main(["--dir", str(target)]) == 0
+    before = {p.name: p.read_bytes() for p in target.iterdir()}
+    (target / "browser_token").unlink()  # e.g. a secret a newer release introduced
+
+    assert script.main(["--dir", str(target)]) == 0
+
+    after = {p.name: p.read_bytes() for p in target.iterdir()}
+    assert set(after) == set(before)
+    assert after["browser_token"] != before["browser_token"]  # created anew ...
+    assert {k: v for k, v in after.items() if k != "browser_token"} == {
+        k: v for k, v in before.items() if k != "browser_token"
+    }  # ... and nothing else touched
+
+
+def test_half_a_group_is_refused_not_repaired(tmp_path: Path) -> None:
+    script = _generate_secrets()
+    target = tmp_path / "secrets"
+    assert script.main(["--dir", str(target)]) == 0
+    (target / "db_app_url").unlink()  # the password alone would not match a new URL
+
+    assert script.main(["--dir", str(target)]) == 1
+    assert not (target / "db_app_url").exists()
+
+
+def test_urls_from_before_internal_tls_are_upgraded_in_place(tmp_path: Path) -> None:
+    script = _generate_secrets()
+    target = tmp_path / "secrets"
+    assert script.main(["--dir", str(target)]) == 0
+    legacy = {
+        "redis_app_url": "redis://app:pw1@redis:6379/0",
+        "redis_sandbox_url": "redis://sandbox:pw2@redis-sandbox:6379/0",
+        "broker_platform_url": "amqp://nexusflow:pw3@rabbitmq:5672/nexusflow",
+        "broker_sandbox_url": "amqp://sandbox:pw4@rabbitmq:5672/nexusflow",
+    }
+    for name, value in legacy.items():
+        (target / name).write_text(value, encoding="utf-8")
+
+    assert script.main(["--dir", str(target), "--tls-urls"]) == 0
+    assert script.main(["--dir", str(target), "--tls-urls"]) == 0  # idempotent
+
+    assert (target / "redis_app_url").read_text() == "rediss://app:pw1@redis:6379/0"
+    assert (target / "redis_sandbox_url").read_text() == "rediss://sandbox:pw2@redis-sandbox:6379/0"
+    assert (target / "broker_platform_url").read_text() == (
+        "amqps://nexusflow:pw3@rabbitmq:5671/nexusflow"
+    )
+    assert (
+        target / "broker_sandbox_url"
+    ).read_text() == "amqps://sandbox:pw4@rabbitmq:5671/nexusflow"

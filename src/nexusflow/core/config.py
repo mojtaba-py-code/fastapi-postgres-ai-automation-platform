@@ -424,6 +424,11 @@ class Settings(BaseSettings):
                 warnings.append("broker TLS is disabled (rely on an isolated network)")
             if self.storage.clamav_address is None:
                 warnings.append("uploads are not malware-scanned (storage.clamav_address unset)")
+            if not self.notifications.smtp_host:
+                warnings.append(
+                    "e-mail is off (notifications.smtp_host unset): no sign-in notices, "
+                    "invitations or password resets are sent"
+                )
         return warnings
 
 

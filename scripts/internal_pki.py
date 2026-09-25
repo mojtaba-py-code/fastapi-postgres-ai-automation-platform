@@ -12,6 +12,7 @@ Writes into the secrets directory (``./secrets``, mode 0700):
   and key, mounted only into that server.
 
     python scripts/internal_pki.py              # create whatever is missing
+    python scripts/internal_pki.py --check      # exit 1 within 30 days of an expiry
     python scripts/internal_pki.py --renew      # new server certificates, same CA
     python scripts/internal_pki.py --rotate-ca  # new CA and server certificates
 
@@ -204,13 +205,42 @@ def run(directory: Path, *, renew: bool = False, rotate_ca: bool = False) -> lis
     return summary
 
 
+def check(directory: Path, *, warn_days: int = 30) -> list[str]:
+    """Problems with the issued certificates: missing, foreign, expiring or expired."""
+    authority = _load_authority(directory)
+    if authority is None:
+        return ["no internal CA - run scripts/internal_pki.py"]
+    now = dt.datetime.now(dt.UTC)
+    problems: list[str] = []
+    named = {"internal_ca.pem": authority.certificate}
+    for service in SERVICES:
+        path = directory / f"tls_{service}.pem"
+        if not path.exists():
+            problems.append(f"{path.name} is missing")
+        elif not _issued_by(path, authority):
+            problems.append(f"{path.name} was not issued by internal_ca.pem")
+        else:
+            named[path.name] = x509.load_pem_x509_certificate(path.read_bytes())
+    for name, certificate in named.items():
+        days = (certificate.not_valid_after_utc - now).days
+        if days < warn_days:
+            problems.append(f"{name} expires in {days} days" if days >= 0 else f"{name} expired")
+    return problems
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--dir", type=Path, default=Path("secrets"))
     group = parser.add_mutually_exclusive_group()
+    group.add_argument("--check", action="store_true", help="report expiring certificates")
     group.add_argument("--renew", action="store_true", help="re-issue the server certificates")
     group.add_argument("--rotate-ca", action="store_true", help="new CA and server certificates")
     args = parser.parse_args(argv)
+    if args.check:
+        problems = check(args.dir)
+        for line in problems or ["internal certificates valid for at least 30 more days"]:
+            print(line)
+        return 1 if problems else 0
     summary = run(args.dir, renew=args.renew, rotate_ca=args.rotate_ca)
     for line in summary or ["internal PKI complete - nothing to do"]:
         print(line)

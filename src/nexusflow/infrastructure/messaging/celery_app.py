@@ -194,7 +194,10 @@ def build_celery(
         "task_soft_time_limit": 840,
         # Sandbox: a fresh child process per job, so state (or an exploit)
         # never carries over from one tenant's job to the next in-process.
-        "worker_max_tasks_per_child": 1 if sandboxed else 500,
+        # Platform pools recycle rarely: every child leaves its metric files
+        # behind (prometheus multiprocess mode), and the memory cap below
+        # already guards against leaks.
+        "worker_max_tasks_per_child": 1 if sandboxed else 10_000,
         # KiB. Four children and the parent stay under the pools' 1 GB limit;
         # Docker would kill the whole container before Celery recycled one.
         "worker_max_memory_per_child": 200_000,

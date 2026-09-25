@@ -9,12 +9,12 @@ from uuid import uuid4
 import asyncpg
 import fakeredis
 import pytest
-from sqlalchemy.ext.asyncio import create_async_engine
 
 from nexusflow.bootstrap.container import Container, build_container
 from nexusflow.core.clock import FrozenClock
 from nexusflow.domain.identity.auth_service import TokenPair
 from nexusflow.domain.shared.context import RequestMeta
+from nexusflow.infrastructure.database.engine import create_engine
 from tests.conftest import make_settings
 from tests.support.database import (
     ProvisionedDatabase,
@@ -51,7 +51,9 @@ async def container(
         database={"url": database.app_url},
         app={"public_base_url": "https://nexusflow.test.example", "allowed_hosts": ["testserver"]},
     )
-    engine = create_async_engine(database.app_url, pool_size=5, max_overflow=5)
+    # The production engine: the same statement, lock and idle-in-transaction
+    # timeouts as a deployment, so a query too slow for them fails here too.
+    engine = create_engine(settings.database, application_name="nexusflow-tests")
     built = build_container(
         settings,
         application_name="nexusflow-tests",

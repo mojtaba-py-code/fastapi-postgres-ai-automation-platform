@@ -4,13 +4,22 @@
 * passwords and tokens come from the OS CSPRNG (``secrets``);
 * the JWT signing key is a fresh Ed25519 key pair;
 * Redis ACL and RabbitMQ definitions contain password *hashes*, not passwords;
-* existing files are never overwritten unless ``--force`` is given (rotating a
-  KEK or the pepper requires the procedures in docs/DEPLOYMENT.md);
+* existing files are never overwritten: a run creates only what is missing,
+  so an upgrade that introduces a new secret simply adds it. Values that are
+  generated together (a password and the URL or hash that embeds it) form a
+  group; a group that is only partly present is refused, never "repaired"
+  with a new password the database or broker does not know;
+* ``--force`` regenerates EVERY secret - for a fresh install only (on a
+  running stack it locks the database roles out and makes encrypted data
+  unreadable; rotating a key follows docs/DEPLOYMENT.md instead);
+* ``--tls-urls`` upgrades the Redis and broker URLs of a stack created before
+  internal TLS (redis:// -> rediss://, amqp://...:5672 -> amqps://...:5671),
+  keeping their credentials;
 * the directory is 0700, so no other host user can reach the files, while
   the files are 0644: Compose bind-mounts file secrets with their host mode,
   and PostgreSQL, Redis and RabbitMQ read them as their own unprivileged users.
 
-Usage: ``python scripts/generate_secrets.py [--dir secrets] [--force]``
+Usage: ``python scripts/generate_secrets.py [--dir secrets] [--tls-urls | --force]``
 """
 
 from __future__ import annotations
@@ -234,6 +243,45 @@ def build() -> dict[str, str]:
     }
 
 
+# Values generated together: a password and everything that embeds it must
+# come from the same run. Every other secret stands alone.
+GROUPS: tuple[tuple[str, ...], ...] = (
+    ("db_app_password", "db_app_url"),
+    ("db_migrator_password", "db_migrator_url"),
+    ("redis_users_acl", "redis_app_url"),
+    ("redis_sandbox_acl", "redis_sandbox_url"),
+    ("rabbitmq_definitions", "broker_platform_url", "broker_sandbox_url"),
+)
+_TLS_URLS: dict[str, tuple[tuple[str, str], ...]] = {
+    "redis_app_url": (("redis://", "rediss://"),),
+    "redis_sandbox_url": (("redis://", "rediss://"),),
+    "broker_platform_url": (("amqp://", "amqps://"), ("@rabbitmq:5672/", "@rabbitmq:5671/")),
+    "broker_sandbox_url": (("amqp://", "amqps://"), ("@rabbitmq:5672/", "@rabbitmq:5671/")),
+}
+
+
+def _groups(names: list[str]) -> list[tuple[str, ...]]:
+    grouped = {name for group in GROUPS for name in group}
+    return list(GROUPS) + [(name,) for name in names if name not in grouped]
+
+
+def upgrade_urls_to_tls(directory: Path) -> list[str]:
+    """Rewrite plaintext Redis/broker URLs for internal TLS; returns what changed."""
+    changed: list[str] = []
+    for name, replacements in _TLS_URLS.items():
+        path = directory / name
+        if not path.exists():
+            continue
+        value = original = path.read_text(encoding="utf-8")
+        for old, new in replacements:
+            if value.startswith(old) or old.startswith("@"):
+                value = value.replace(old, new, 1)
+        if value != original:
+            _write(path, value)
+            changed.append(name)
+    return changed
+
+
 # Optional secrets that only exist after a manual step. They are created empty
 # (an empty secret file means "not configured") so Compose can always mount
 # them, and they are never overwritten once an operator has filled them in.
@@ -245,26 +293,56 @@ PLACEHOLDERS = {
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--dir", type=Path, default=Path("secrets"))
-    parser.add_argument("--force", action="store_true", help="overwrite existing files")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--force", action="store_true", help="regenerate EVERY secret (fresh installs only)"
+    )
+    mode.add_argument(
+        "--tls-urls", action="store_true", help="upgrade Redis/broker URLs to internal TLS"
+    )
     args = parser.parse_args(argv)
+    if args.tls_urls:
+        changed = upgrade_urls_to_tls(args.dir)
+        print(f"upgraded to TLS: {', '.join(changed)}" if changed else "URLs already use TLS")
+        return 0
     values = build()
-    existing = sorted(name for name in values if (args.dir / name).exists())
-    if existing and not args.force:
-        # Passwords and the URLs embedding them are generated together; a partial
-        # regeneration would leave them out of sync.
-        print(f"refusing to overwrite existing secrets: {', '.join(existing)} (use --force)")
-        return 1
+    if not args.force:
+        partial = [
+            group
+            for group in _groups(list(values))
+            if 0 < sum((args.dir / name).exists() for name in group) < len(group)
+        ]
+        if partial:
+            # A new password for half a group would not match the other half,
+            # which the database or the broker already knows.
+            for group in partial:
+                missing = [n for n in group if not (args.dir / n).exists()]
+                print(f"incomplete group {', '.join(group)}: missing {', '.join(missing)}")
+            print("restore the missing files from your backup of the secrets directory")
+            return 1
     args.dir.mkdir(mode=0o700, exist_ok=True)
     args.dir.chmod(0o700)
-    for name, value in values.items():
-        _write(args.dir / name, value)
+    created = [
+        name for name, value in values.items() if args.force or not (args.dir / name).exists()
+    ]
+    for name in created:
+        _write(args.dir / name, values[name])
     for name, value in PLACEHOLDERS.items():
         if not (args.dir / name).exists():
             _write(args.dir / name, value)
-    print(f"wrote {len(values)} secrets to {args.dir.resolve()} - never commit this directory.")
-    print(f"fill in when needed: {', '.join(sorted(PLACEHOLDERS))} (see docs/DEPLOYMENT.md)")
+    kept = len(values) - len(created)
+    print(f"created {len(created)} secrets, kept {kept} in {args.dir.resolve()}")
+    print("never commit this directory; fill in when needed: " + ", ".join(sorted(PLACEHOLDERS)))
+    plaintext = [
+        name
+        for name, replacements in _TLS_URLS.items()
+        if (args.dir / name).exists()
+        and (args.dir / name).read_text(encoding="utf-8").startswith(replacements[0][0])
+    ]
+    if plaintext:
+        print(f"these URLs predate internal TLS: {', '.join(plaintext)} - run with --tls-urls")
     return 0
 
 

@@ -52,6 +52,11 @@ WEBHOOK_EVENTS = Counter(
     "Inbound webhook deliveries.",
     ["result"],
 )
+MALWARE_SCANS = Counter(
+    "nexusflow_malware_scans_total",
+    "Uploads scanned by ClamAV, by result (clean, infected or unavailable).",
+    ["result"],
+)
 AUDIT_CHAIN_VERIFICATIONS = Counter(
     "nexusflow_audit_chain_verifications_total",
     "Scheduled audit hash-chain verifications, by result (ok or broken).",
@@ -144,6 +149,9 @@ CIRCUIT_STATE = Gauge(
     "nexusflow_circuit_breaker_open",
     "1 when a circuit breaker is open.",
     ["dependency"],
+    # Across worker processes: the highest value among the *living* ones - a
+    # recycled child's last state must not keep an alert firing for ever.
+    multiprocess_mode="livemax",
 )
 
 

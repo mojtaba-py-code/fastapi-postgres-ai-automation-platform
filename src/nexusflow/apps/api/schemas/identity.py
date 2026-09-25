@@ -257,3 +257,6 @@ class AuditVerificationResponse(ResponseModel):
     checked: int
     first_invalid_seq: int | None
     reason: str | None
+    # False: the check stopped at its bound before the chain's head, and "ok"
+    # covers only the entries checked. The daily verification checks it all.
+    complete: bool

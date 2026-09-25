@@ -70,6 +70,10 @@ async def create_database(admin_url: str) -> ProvisionedDatabase:
             if not exists:
                 await conn.execute(f"CREATE ROLE {role} LOGIN {attrs} PASSWORD '{ROLE_PASSWORD}'")
         await conn.execute(f"CREATE DATABASE {name} OWNER {MIGRATOR_ROLE}")
+        # As in deploy/postgres/init/01-roles.sh: CONNECT only - no TEMP, so a
+        # search_path hijack of the SECURITY DEFINER functions stays impossible.
+        await conn.execute(f"REVOKE ALL ON DATABASE {name} FROM PUBLIC")
+        await conn.execute(f"GRANT CONNECT ON DATABASE {name} TO {APP_ROLE}")
     finally:
         await conn.close()
     migrator = _with_credentials(

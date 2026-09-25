@@ -8,6 +8,7 @@ from pathlib import Path
 
 from nexusflow.core.errors import ServiceUnavailableError
 from nexusflow.domain.shared.ports import ScanVerdict
+from nexusflow.infrastructure.observability import metrics
 
 _CHUNK = 64 * 1024
 
@@ -51,12 +52,16 @@ class ClamdScanner:
                     await writer.wait_closed()
         except (OSError, TimeoutError) as exc:
             # Fail closed: an unscanned file is not accepted.
+            metrics.MALWARE_SCANS.labels(result="unavailable").inc()
             raise ServiceUnavailableError(internal_detail=f"clamd unavailable: {exc}") from exc
         if response.endswith("OK"):
+            metrics.MALWARE_SCANS.labels(result="clean").inc()
             return ScanVerdict(clean=True)
         if "FOUND" in response:
+            metrics.MALWARE_SCANS.labels(result="infected").inc()
             signature = response.rsplit(":", 1)[-1].replace("FOUND", "").strip()[:100]
             return ScanVerdict(clean=False, signature=signature)
+        metrics.MALWARE_SCANS.labels(result="unavailable").inc()
         raise ServiceUnavailableError(
             internal_detail=f"unexpected clamd response: {response[:100]}"
         )

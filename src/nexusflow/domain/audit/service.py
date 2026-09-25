@@ -34,24 +34,38 @@ class AuditService:
         async with self._uow_factory(TenantScope.of(principal)) as uow:
             return await uow.audit.list_page(org_id, filters, page)
 
-    async def verify_integrity(self, principal: Principal) -> ChainVerification:
-        """Recompute the tenant's hash chain in batches (bounded work)."""
+    async def verify_integrity(
+        self, principal: Principal, *, complete: bool = False
+    ) -> ChainVerification:
+        """Recompute the tenant's hash chain in batches.
+
+        The API bounds the work per request (``max_verify_entries``) and says
+        so in the result (``complete=False``); the daily job and the CLI pass
+        ``complete=True`` and check the whole chain.
+        """
         principal.require(Permission.AUDIT_READ)
         org_id = principal.require_org()
+        limit = None if complete else self._max_verify_entries
         async with self._uow_factory(TenantScope.of(principal)) as uow:
-            return await self._verify(uow, org_id)
+            return await self._verify(uow, org_id, limit)
 
     async def verify_platform_chain(self) -> ChainVerification:
-        """Recompute the chain of events without a tenant (operators, via the CLI)."""
+        """Recompute the whole chain of events without a tenant (job and CLI)."""
         async with self._uow_factory(TenantScope.system(None)) as uow:
-            return await self._verify(uow, PLATFORM_CHAIN)
+            return await self._verify(uow, PLATFORM_CHAIN, None)
 
-    async def _verify(self, uow: UnitOfWork, chain_key: UUID) -> ChainVerification:
+    async def _verify(
+        self, uow: UnitOfWork, chain_key: UUID, limit: int | None
+    ) -> ChainVerification:
         checked = 0
         previous: AuditLogEntry | None = None
         next_seq = 1
-        while checked < self._max_verify_entries:
-            batch = await uow.audit.chain(chain_key, from_seq=next_seq, limit=_BATCH)
+        while limit is None or checked < limit:
+            batch = await uow.audit.chain(
+                chain_key,
+                from_seq=next_seq,
+                limit=_BATCH if limit is None else min(_BATCH, limit - checked),
+            )
             if not batch:
                 break
             window = [previous, *batch] if previous is not None else batch
@@ -66,6 +80,9 @@ class AuditService:
             checked += len(batch)
             previous = batch[-1]
             next_seq = previous.seq + 1
+        else:  # stopped at the bound: is there more?
+            if await uow.audit.chain(chain_key, from_seq=next_seq, limit=1):
+                return ChainVerification(True, checked, complete=False)
         return ChainVerification(True, checked)
 
     async def anchor(self, org_id: UUID | None) -> tuple[int, str] | None:

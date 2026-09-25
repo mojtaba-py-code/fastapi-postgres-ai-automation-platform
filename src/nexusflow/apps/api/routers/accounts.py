@@ -387,4 +387,5 @@ async def verify_audit_chain(
         checked=result.checked,
         first_invalid_seq=result.first_invalid_seq,
         reason=result.reason,
+        complete=result.complete,
     )

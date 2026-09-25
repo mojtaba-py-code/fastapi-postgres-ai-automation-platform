@@ -210,6 +210,9 @@ class ChainVerification:
     checked: int
     first_invalid_seq: int | None = None
     reason: str | None = None
+    # False when a bounded check stopped before the head: "ok" then covers only
+    # the entries checked, never the rest of the chain.
+    complete: bool = True
 
 
 def chain_hash(prev_hash: bytes, canonical: str) -> bytes:

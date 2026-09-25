@@ -201,7 +201,7 @@ async def audit_verify(c: Container, args: argparse.Namespace) -> dict[str, Any]
     targets = [UUID(args.org)] if args.org else await c.maintenance.tenants()
     results = []
     for org_id in targets:
-        verification = await c.audit_log.verify_integrity(Principal.system(org_id))
+        verification = await c.audit_log.verify_integrity(Principal.system(org_id), complete=True)
         results.append({"chain": str(org_id), "org_id": org_id, **asdict(verification)})
     if not args.org:
         platform = await c.audit_log.verify_platform_chain()

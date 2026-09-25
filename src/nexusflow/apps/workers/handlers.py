@@ -270,7 +270,19 @@ async def generate_report(deps: WorkerDeps, msg: ReportMessage) -> None:
 # ------------------------------------------------------------ security mail
 
 
+def _mail_disabled(deps: WorkerDeps, kind: str) -> bool:
+    """An empty SMTP host means "no e-mail" (reported at start-up): account mail
+    is skipped and logged, not failed - failing would dead-letter every message
+    and keep DeadLettersAccumulating firing for a deliberate setting."""
+    if deps.container.settings.notifications.smtp_host:
+        return False
+    _log.warning("account_email_skipped", kind=kind, reason="smtp_not_configured")
+    return True
+
+
 async def send_security_email(deps: WorkerDeps, msg: SecurityEmailMessage) -> None:
+    if _mail_disabled(deps, msg.template):
+        return
     sign_in = (
         SignInDetails(
             at=msg.sign_in.at,
@@ -286,12 +298,16 @@ async def send_security_email(deps: WorkerDeps, msg: SecurityEmailMessage) -> No
 
 
 async def send_invitation(deps: WorkerDeps, msg: InvitationMessage) -> None:
+    if _mail_disabled(deps, "invitation"):
+        return
     await deps.container.security_emails.send_invitation(
         org_id=msg.org_id, invitation_id=msg.invitation_id
     )
 
 
 async def send_password_reset(deps: WorkerDeps, msg: PasswordResetMessage) -> None:
+    if _mail_disabled(deps, "password_reset"):
+        return
     await deps.container.security_emails.send_password_reset(reset_id=msg.reset_id)
 
 
@@ -481,7 +497,8 @@ async def verify_audit_chains(deps: WorkerDeps, msg: Empty) -> None:
             )
 
     async def verify(org_id: UUID) -> None:
-        record(str(org_id), await c.audit_log.verify_integrity(Principal.system(org_id)))
+        verification = await c.audit_log.verify_integrity(Principal.system(org_id), complete=True)
+        record(str(org_id), verification)
 
     await _each_tenant(c, verify, "audit_verify")
     record("platform", await c.audit_log.verify_platform_chain())

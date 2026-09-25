@@ -12,6 +12,7 @@ providers. Untrusted content is never parsed here - that is the sandbox's job.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from celery import Celery
@@ -19,6 +20,7 @@ from celery.signals import worker_init, worker_process_init, worker_process_shut
 
 from nexusflow.apps.workers.handlers import WorkerDeps
 from nexusflow.apps.workers.observability import (
+    forget_worker_process,
     setup_worker_observability,
     setup_worker_tracing,
 )
@@ -62,5 +64,6 @@ def _on_process_init(**_: Any) -> None:
 
 
 @worker_process_shutdown.connect
-def _on_process_shutdown(**_: Any) -> None:
+def _on_process_shutdown(pid: int | None = None, **_: Any) -> None:
     _runtime.close()
+    forget_worker_process(pid or os.getpid())

@@ -7,7 +7,9 @@
 # * files: the nexusflow-data volume (uploads, reports);
 # * every artifact is encrypted with age to BACKUP_AGE_RECIPIENT before it
 #   touches the disk - unencrypted backups are refused;
-# * a SHA-256 manifest lets restore.sh verify integrity first.
+# * a SHA-256 manifest lets restore.sh verify integrity first; with
+#   BACKUP_SIGNING_KEY (an SSH private key, kept off the backup store) the
+#   manifest is also signed, so restore.sh can verify where it came from.
 # Secrets (./secrets) are NOT included: back them up separately, offline.
 set -euo pipefail
 
@@ -38,4 +40,7 @@ docker compose run --rm --no-deps -T --entrypoint tar api -C /var/lib/nexusflow 
   | age -r "${BACKUP_AGE_RECIPIENT}" -o "${target}/files.tar.age"
 
 (cd "${target}" && sha256sum ./*.age > SHA256SUMS)
+if [[ -n "${BACKUP_SIGNING_KEY:-}" ]]; then
+  ssh-keygen -Y sign -q -f "${BACKUP_SIGNING_KEY}" -n nexusflow-backup "${target}/SHA256SUMS"
+fi
 echo "backup written to ${target}"

@@ -140,6 +140,19 @@ def test_errors_the_edge_answers_use_the_json_error_schema(config: Block) -> Non
             assert key in body, (target, key)
 
 
+def test_plain_http_serves_acme_challenges_and_redirects_everything_else(
+    config: Block,
+) -> None:
+    # Review F-3: certificates could not be renewed while nginx held port 80.
+    [plain] = [b for b in _blocks(config) if any(d[:2] == ["listen", "8080"] for d in b.directives)]
+    locations = {b.name: b for b in plain.children}
+    acme = locations["location ^~ /.well-known/acme-challenge/"]
+    assert ["root", "/var/www/acme"] in acme.directives
+    assert ["try_files", "$uri", "=404"] in acme.directives
+    assert ["return", "301", "https://$host$request_uri"] in locations["location /"].directives
+    assert set(locations) == {"location ^~ /.well-known/acme-challenge/", "location /"}
+
+
 def test_internal_and_diagnostic_paths_are_never_exposed(config: Block) -> None:
     api = _api_server(config)
     hidden = {

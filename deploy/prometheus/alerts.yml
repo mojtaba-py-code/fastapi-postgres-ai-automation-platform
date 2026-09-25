@@ -101,6 +101,13 @@ groups:
         labels: {severity: warning}
         annotations:
           summary: "Requests refused by a network allowlist - leaked credential or stale allowlist"
+      - alert: MalwareScannerUnavailable
+        # clamd is down or was killed (for instance on a signature update with
+        # too little memory): uploads fail closed, so every one is refused.
+        expr: sum(increase(nexusflow_malware_scans_total{result="unavailable"}[10m])) > 0
+        labels: {severity: critical}
+        annotations:
+          summary: "The malware scanner is unreachable - every upload is refused until it is back"
       - alert: AuthorizationDenialsSpike
         expr: sum(increase(nexusflow_authorization_denials_total[15m])) > 50
         labels: {severity: warning}

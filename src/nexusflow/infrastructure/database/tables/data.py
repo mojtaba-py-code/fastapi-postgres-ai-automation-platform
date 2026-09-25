@@ -558,3 +558,60 @@ dead_letters = Table(
     CheckConstraint("origin IN ('celery', 'n8n')", name="origin"),
     Index("ix_dead_letters_org_status", "org_id", "status"),
 )
+
+
+def _index(name: str, table: Table, *columns: str, where: str | None = None) -> None:
+    Index(name, *(table.c[c] for c in columns), postgresql_where=text(where) if where else None)
+
+
+# Migration 0007 (review E-1, E-2, E-6): children of deleted rows, the
+# organization purge, per-tenant maintenance and change listings.
+_index("ix_inbound_webhook_events_run", inbound_webhook_events, "run_id")
+_index("ix_uploads_run", uploads, "run_id")
+_index("ix_collection_runs_workflow_run", collection_runs, "workflow_run_id")
+_index("ix_changes_insight", changes, "insight_id", where="insight_id IS NOT NULL")
+_index("ix_alerts_rule", alerts, "rule_id")
+_index("ix_alert_rules_dataset", alert_rules, "dataset_id")
+_index("ix_notification_deliveries_channel", notification_deliveries, "channel_id")
+_index("ix_records_source", records, "source_id", where="source_id IS NOT NULL")
+_index("ix_sources_dataset", sources, "dataset_id")
+_index("ix_sources_integration", sources, "integration_id", where="integration_id IS NOT NULL")
+_index(
+    "ix_notification_channels_integration",
+    notification_channels,
+    "integration_id",
+    where="integration_id IS NOT NULL",
+)
+_index("ix_insights_dataset", insights, "dataset_id")
+_index("ix_insights_project", insights, "project_id")
+_index("ix_reports_dataset", reports, "dataset_id")
+_index("ix_reports_project", reports, "project_id")
+_index("ix_webhook_endpoints_source", webhook_endpoints, "source_id")
+_index("ix_record_versions_org", record_versions, "org_id")
+_index("ix_run_payloads_org", run_payloads, "org_id")
+_index("ix_uploads_org", uploads, "org_id", "created_at")
+_index("ix_webhook_endpoints_org", webhook_endpoints, "org_id")
+_index("ix_workflows_org", workflows, "org_id")
+_index("ix_alert_rules_org", alert_rules, "org_id")
+_index("ix_collection_runs_org_created", collection_runs, "org_id", "created_at")
+_index(
+    "ix_collection_runs_running",
+    collection_runs,
+    "org_id",
+    "started_at",
+    where="status = 'running'",
+)
+_index("ix_inbound_webhook_events_org_received", inbound_webhook_events, "org_id", "received_at")
+_index("ix_notification_deliveries_org_created", notification_deliveries, "org_id", "created_at")
+_index(
+    "ix_notification_deliveries_sending",
+    notification_deliveries,
+    "org_id",
+    "claimed_at",
+    where="status = 'sending'",
+)
+_index("ix_reports_org_status_created", reports, "org_id", "status", "created_at")
+_index("ix_reports_ready_expiry", reports, "org_id", "expires_at", where="status = 'ready'")
+_index("ix_record_versions_retention", record_versions, "dataset_id", "captured_at", where="diffed")
+_index("ix_changes_org_detected", changes, "org_id", "detected_at", "id")
+_index("ix_changes_org_score", changes, "org_id", "score", "id")

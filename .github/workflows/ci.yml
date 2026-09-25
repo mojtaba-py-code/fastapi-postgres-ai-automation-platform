@@ -190,12 +190,17 @@ jobs:
       - name: Back up, change the data, restore, verify
         env:
           BACKUP_AGE_IDENTITY: ${{ runner.temp }}/backup-age.key
+          BACKUP_SIGNING_KEY: ${{ runner.temp }}/backup-signing
+          BACKUP_ALLOWED_SIGNERS: ${{ runner.temp }}/backup-allowed-signers
           BACKUPS: ${{ runner.temp }}/backups
         run: |
           sudo apt-get install -y --no-install-recommends age > /dev/null
           age-keygen -o "$BACKUP_AGE_IDENTITY" 2> /dev/null
           BACKUP_AGE_RECIPIENT="$(age-keygen -y "$BACKUP_AGE_IDENTITY")"
           export BACKUP_AGE_RECIPIENT
+          # The manifest is signed at backup and verified at restore.
+          ssh-keygen -q -t ed25519 -N "" -f "$BACKUP_SIGNING_KEY"
+          echo "nexusflow-backup $(cut -d' ' -f1,2 "$BACKUP_SIGNING_KEY.pub")" > "$BACKUP_ALLOWED_SIGNERS"
           sql() {
             docker compose exec -T postgres sh -c \
               'PGPASSWORD="$(cat /run/secrets/postgres_password)" exec psql -U postgres -d nexusflow -Atc "$1"' sh "$1"

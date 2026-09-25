@@ -124,6 +124,19 @@ def test_a_certificate_from_another_ca_is_refused_not_silently_kept(
         pki.run(tmp_path)
 
 
+def test_the_check_reports_expiring_and_foreign_certificates(
+    pki: ModuleType, tmp_path: Path
+) -> None:
+    assert pki.check(tmp_path) == ["no internal CA - run scripts/internal_pki.py"]
+    pki.run(tmp_path)
+    assert pki.check(tmp_path) == []
+    assert pki.check(tmp_path, warn_days=pki.SERVER_DAYS + 1) == [
+        f"tls_{service}.pem expires in {pki.SERVER_DAYS - 1} days" for service in pki.SERVICES
+    ]
+    (tmp_path / "tls_redis.pem").unlink()
+    assert pki.check(tmp_path) == ["tls_redis.pem is missing"]
+
+
 def test_half_a_ca_is_refused(pki: ModuleType, tmp_path: Path) -> None:
     pki.run(tmp_path)
     (tmp_path / "internal_ca.key").unlink()

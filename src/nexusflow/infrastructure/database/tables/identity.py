@@ -273,3 +273,11 @@ outbox_messages = Table(
         postgresql_where=text("dispatched_at IS NULL"),
     ),
 )
+
+
+# Migration 0007 (review E-1): the organization purge sets org_id to NULL here.
+Index(
+    "ix_user_sessions_org",
+    user_sessions.c.org_id,
+    postgresql_where=text("org_id IS NOT NULL"),
+)

@@ -1,8 +1,22 @@
 # TLS certificates
 
 nginx expects `fullchain.pem` and `privkey.pem` in this directory, or in the
-directory set by `NEXUSFLOW_TLS_DIR` in `.env`. Use certificates from your
-CA or from Let's Encrypt (for example `certbot certonly --standalone`).
+directory set by `NEXUSFLOW_TLS_DIR` in `.env`. nginx runs as uid 101 and
+must be able to read them: install certificates with
+`scripts/install_edge_cert.sh <directory>`, which copies them (Let's Encrypt's
+`live/` entries are symlinks that would dangle inside the container), gives
+them to uid 101 (the key 0600) and reloads nginx.
+
+With Let's Encrypt, issue and renew through the running edge - it serves the
+HTTP-01 challenges from `deploy/acme`, so nothing has to stop for a renewal:
+
+```bash
+sudo certbot certonly --webroot -w ./deploy/acme -d example.com \
+  --deploy-hook "$PWD/scripts/install_edge_cert.sh"
+```
+
+certbot's timer renews the certificate and the hook installs it and reloads
+nginx. Do not point `NEXUSFLOW_TLS_DIR` at `/etc/letsencrypt/live/...`.
 
 Never commit key material: `.gitignore` excludes `*.pem` and `*.key` here.
 

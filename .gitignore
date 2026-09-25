@@ -5,6 +5,7 @@
 secrets/
 deploy/certs/*.pem
 deploy/certs/*.key
+deploy/acme/.well-known/
 *.pem
 *.key
 *.p12
