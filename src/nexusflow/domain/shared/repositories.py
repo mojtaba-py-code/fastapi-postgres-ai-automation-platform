@@ -48,6 +48,13 @@ class TenantRepository[E](Protocol):
     async def count(self, org_id: UUID, **filters: Any) -> int: ...
 
 
+class DatasetRepository(TenantRepository[Dataset], Protocol):
+    async def get_for_share(self, org_id: UUID, dataset_id: UUID) -> Dataset | None:
+        """Read a dataset and keep its schema from changing until the transaction
+        ends (``FOR SHARE``): a schema change waits for the readers."""
+        ...
+
+
 class IntegrationRepository(TenantRepository[Integration], Protocol):
     async def references(self, org_id: UUID, integration_id: UUID) -> int: ...
 
@@ -62,6 +69,10 @@ class SourceRepository(TenantRepository[Source], Protocol):
     async def lock(self, source_id: UUID) -> None: ...
 
     async def list_by_ids(self, org_id: UUID, ids: Sequence[UUID]) -> list[Source]: ...
+
+    async def wait_for_ingestions(self, org_id: UUID, dataset_id: UUID) -> None:
+        """Wait until no ingestion into the dataset that started earlier is running."""
+        ...
 
 
 class CollectionRunRepository(TenantRepository[CollectionRun], Protocol):
@@ -102,6 +113,17 @@ class RecordRepository(Protocol):
 
     async def count_stale_sealed(self, org_id: UUID, active_key_id: str) -> tuple[int, int]:
         """Records and versions still holding a value under an older key (no locks)."""
+        ...
+
+    async def seal_plaintext(
+        self, org_id: UUID, dataset_id: UUID, fields: frozenset[str], *, limit: int
+    ) -> int:
+        """Seal values of ``fields`` stored in clear, in up to ``limit`` records and
+        up to ``limit`` versions (rows other transactions hold are skipped)."""
+        ...
+
+    async def count_plaintext(self, org_id: UUID, dataset_id: UUID, fields: frozenset[str]) -> int:
+        """Records and versions holding a value of ``fields`` in clear (no locks)."""
         ...
 
     async def add_many(self, records: Sequence[Record]) -> None: ...
@@ -182,6 +204,16 @@ class ChangeRepository(Protocol):
 
     async def count_stale_sealed(self, org_id: UUID, active_key_id: str) -> int:
         """Changes still holding a value under an older key (no locks)."""
+        ...
+
+    async def seal_plaintext(
+        self, org_id: UUID, dataset_id: UUID, fields: frozenset[str], *, limit: int
+    ) -> int:
+        """Seal old/new/pct values of ``fields`` stored in clear in up to ``limit`` diffs."""
+        ...
+
+    async def count_plaintext(self, org_id: UUID, dataset_id: UUID, fields: frozenset[str]) -> int:
+        """Changes whose diff holds a value of ``fields`` in clear (no locks)."""
         ...
 
     async def purge_before(
@@ -352,7 +384,7 @@ class DataRepositories(Protocol):
     def projects(self) -> TenantRepository[Project]: ...
 
     @property
-    def datasets(self) -> TenantRepository[Dataset]: ...
+    def datasets(self) -> DatasetRepository: ...
 
     @property
     def integrations(self) -> IntegrationRepository: ...

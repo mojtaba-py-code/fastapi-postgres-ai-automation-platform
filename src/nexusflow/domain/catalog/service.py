@@ -309,10 +309,24 @@ class CatalogService:
             if dataset is None or dataset.is_deleted:
                 raise NotFoundError()
             changes: dict[str, Any] = {}
+            now = self._clock.now()
             if schema is not None:
                 ensure_schema_compatible(dataset.spec, schema)
+                newly_sensitive = schema.sensitive_fields - dataset.spec.sensitive_fields
                 dataset.schema = schema.model_dump(mode="json")
                 changes["schema_fields"] = len(schema.fields)
+                if newly_sensitive:
+                    # From now on these values are sealed as they are written; a job
+                    # seals the values stored before (records, versions, diffs).
+                    changes["sealing"] = sorted(newly_sensitive)
+                    await uow.outbox.add(
+                        new_message(
+                            TaskName.SEAL_DATASET,
+                            {"org_id": str(org_id), "dataset_id": str(dataset.id)},
+                            org_id=org_id,
+                            now=now,
+                        )
+                    )
             if description is not None:
                 dataset.description = clean_text(description, max_length=1000, multiline=True)
             if classification is not None:
@@ -321,7 +335,7 @@ class CatalogService:
             if retention_days is not None:
                 changes["retention_days"] = retention_days
                 dataset.retention_days = retention_days
-            dataset.updated_at = self._clock.now()
+            dataset.updated_at = now
             await self._audit.record(
                 uow.audit,
                 action=AuditAction.DATASET_UPDATED,

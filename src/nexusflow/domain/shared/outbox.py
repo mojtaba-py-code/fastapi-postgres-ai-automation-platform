@@ -38,6 +38,7 @@ class TaskName(StrEnum):
     PURGE_ORGANIZATION = "maintenance.purge_organization"
     PURGE_DATASET = "maintenance.purge_dataset"
     DELETE_FILES = "maintenance.delete_files"
+    SEAL_DATASET = "maintenance.seal_dataset"
     WORKFLOW_EVENT = "workflows.emit_event"
 
 

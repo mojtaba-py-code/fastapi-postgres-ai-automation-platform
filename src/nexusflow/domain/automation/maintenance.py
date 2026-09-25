@@ -321,6 +321,31 @@ class MaintenanceService:
             await uow.commit()
         return report
 
+    async def seal_sensitive(self, org_id: UUID, dataset_id: UUID) -> int:
+        """Seal the stored values of a dataset's sensitive fields that are still
+        in clear - after a field was marked sensitive, its old values are.
+
+        First waits for the ingestions that may have read the schema before
+        the change (change detection reads it under a share lock, so none of
+        it runs with the old schema any more); then seals in batches. Returns
+        how many rows still hold a value in clear - rows in use are skipped,
+        so the caller retries later until none is left.
+        """
+        async with self._uow_factory(TenantScope.system(org_id)) as uow:
+            dataset = await uow.data.datasets.get(org_id, dataset_id)
+            if dataset is None or dataset.is_deleted:
+                return 0
+            await uow.data.sources.wait_for_ingestions(org_id, dataset_id)
+            await uow.commit()
+        fields = dataset.spec.sensitive_fields
+        if not fields:
+            return 0
+        await self._in_batches(org_id, _seal_records(org_id, dataset_id, fields))
+        await self._in_batches(org_id, _seal_changes(org_id, dataset_id, fields))
+        async with self._uow_factory(TenantScope.system(org_id)) as uow:
+            left = await uow.data.records.count_plaintext(org_id, dataset_id, fields)
+            return left + await uow.data.changes.count_plaintext(org_id, dataset_id, fields)
+
     async def purge_dataset(self, org_id: UUID, dataset_id: UUID) -> bool:
         """Delete a soft-deleted dataset: its large tables in batches, then the
         dataset row, whose cascade takes the rest; its files after the commit."""
@@ -457,6 +482,24 @@ def _changes_batch(
 ) -> Callable[[UnitOfWork, int], Awaitable[int]]:
     async def step(uow: UnitOfWork, limit: int) -> int:
         return await uow.data.changes.purge_before(org_id, dataset_id, before, limit=limit)
+
+    return step
+
+
+def _seal_records(
+    org_id: UUID, dataset_id: UUID, fields: frozenset[str]
+) -> Callable[[UnitOfWork, int], Awaitable[int]]:
+    async def step(uow: UnitOfWork, limit: int) -> int:
+        return await uow.data.records.seal_plaintext(org_id, dataset_id, fields, limit=limit)
+
+    return step
+
+
+def _seal_changes(
+    org_id: UUID, dataset_id: UUID, fields: frozenset[str]
+) -> Callable[[UnitOfWork, int], Awaitable[int]]:
+    async def step(uow: UnitOfWork, limit: int) -> int:
+        return await uow.data.changes.seal_plaintext(org_id, dataset_id, fields, limit=limit)
 
     return step
 

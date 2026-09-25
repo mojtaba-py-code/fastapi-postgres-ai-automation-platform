@@ -53,6 +53,8 @@ from nexusflow.domain.records.sealing import (
     is_sealed,
     open_value,
     rewrap_value,
+    seal_data,
+    seal_diff,
     seal_value,
 )
 from nexusflow.domain.reports.model import Report
@@ -78,6 +80,15 @@ class SqlDatasetRepository(TenantRepository[Dataset]):
     entity = Dataset
     table = d.datasets
     sortable = ("created_at", "name")
+
+    async def get_for_share(self, org_id: UUID, dataset_id: UUID) -> Dataset | None:
+        statement = (
+            select(Dataset)
+            .where(d.datasets.c.org_id == org_id, d.datasets.c.id == dataset_id)
+            .with_for_update(read=True)
+            .execution_options(populate_existing=True)
+        )
+        return (await self._s.execute(statement)).scalar_one_or_none()
 
     async def list_page(
         self,
@@ -155,6 +166,17 @@ class SqlSourceRepository(TenantRepository[Source]):
             return []
         statement = select(Source).where(d.sources.c.org_id == org_id, d.sources.c.id.in_(ids))
         return list((await self._s.execute(statement)).scalars().all())
+
+    async def wait_for_ingestions(self, org_id: UUID, dataset_id: UUID) -> None:
+        """Lock the dataset's sources: an ingestion holds its source's row from
+        before it reads the dataset until it commits, so this waits for every
+        ingestion that may still work with an older schema."""
+        statement = (
+            select(d.sources.c.id)
+            .where(d.sources.c.org_id == org_id, d.sources.c.dataset_id == dataset_id)
+            .with_for_update()
+        )
+        await self._s.execute(statement)
 
 
 class SqlCollectionRunRepository(TenantRepository[CollectionRun]):
@@ -300,6 +322,75 @@ async def _rewrap_rows(
     return len(rows)
 
 
+def _plaintext(table: Any, column: str, fields: Iterable[str]) -> ColumnElement[bool]:
+    """A value of one of ``fields`` stored in clear (a scalar where a sealed
+    marker - an object - belongs). Field names travel as bound parameters."""
+    value = table.c[column]
+    parts = ("old", "new", "pct") if column == "diff" else (None,)
+    return or_(
+        *(
+            func.jsonb_typeof(value[name] if part is None else value[name][part]).not_in(
+                ("object", "null")
+            )
+            for name in fields
+            for part in parts
+        )
+    )
+
+
+async def _seal_rows(
+    session: AsyncSession,
+    table: Any,
+    column: str,
+    record_column: str,
+    org_id: UUID,
+    dataset_id: UUID,
+    fields: frozenset[str],
+    limit: int,
+) -> int:
+    """Seal the plaintext values of ``fields`` in up to ``limit`` rows of
+    ``table`` (rows other transactions hold are skipped)."""
+    cipher = _session_cipher(session)
+    statement = (
+        select(table.c.id, table.c[record_column].label("record_id"), table.c[column])
+        .where(
+            table.c.org_id == org_id,
+            table.c.dataset_id == dataset_id,
+            _plaintext(table, column, fields),
+        )
+        .limit(limit)
+        .with_for_update(skip_locked=True)
+    )
+    rows = (await session.execute(statement)).all()
+    seal = seal_diff if column == "diff" else seal_data
+    for row_id, record_id, value in rows:
+        sealed = seal(
+            cipher, value, fields, org_id=org_id, dataset_id=dataset_id, record_id=record_id
+        )
+        await session.execute(update(table).where(table.c.id == row_id).values({column: sealed}))
+    return len(rows)
+
+
+async def _count_plaintext(
+    session: AsyncSession,
+    table: Any,
+    column: str,
+    org_id: UUID,
+    dataset_id: UUID,
+    fields: frozenset[str],
+) -> int:
+    statement = (
+        select(func.count())
+        .select_from(table)
+        .where(
+            table.c.org_id == org_id,
+            table.c.dataset_id == dataset_id,
+            _plaintext(table, column, fields),
+        )
+    )
+    return int((await session.execute(statement)).scalar_one())
+
+
 async def _count_stale(
     session: AsyncSession, table: Any, column: str, org_id: UUID, active_key_id: str
 ) -> int:
@@ -342,6 +433,22 @@ class SqlRecordRepository:
         return (
             await _count_stale(self._s, d.records, "data", org_id, active_key_id),
             await _count_stale(self._s, d.record_versions, "data", org_id, active_key_id),
+        )
+
+    async def seal_plaintext(
+        self, org_id: UUID, dataset_id: UUID, fields: frozenset[str], *, limit: int
+    ) -> int:
+        count = await _seal_rows(
+            self._s, d.records, "data", "id", org_id, dataset_id, fields, limit
+        )
+        return count + await _seal_rows(
+            self._s, d.record_versions, "data", "record_id", org_id, dataset_id, fields, limit
+        )
+
+    async def count_plaintext(self, org_id: UUID, dataset_id: UUID, fields: frozenset[str]) -> int:
+        count = await _count_plaintext(self._s, d.records, "data", org_id, dataset_id, fields)
+        return count + await _count_plaintext(
+            self._s, d.record_versions, "data", org_id, dataset_id, fields
         )
 
     async def fetch_for_update(self, dataset_id: UUID, keys: Sequence[str]) -> dict[str, Record]:
@@ -634,6 +741,16 @@ class SqlChangeRepository:
 
     async def count_stale_sealed(self, org_id: UUID, active_key_id: str) -> int:
         return await _count_stale(self._s, d.changes, "diff", org_id, active_key_id)
+
+    async def seal_plaintext(
+        self, org_id: UUID, dataset_id: UUID, fields: frozenset[str], *, limit: int
+    ) -> int:
+        return await _seal_rows(
+            self._s, d.changes, "diff", "record_id", org_id, dataset_id, fields, limit
+        )
+
+    async def count_plaintext(self, org_id: UUID, dataset_id: UUID, fields: frozenset[str]) -> int:
+        return await _count_plaintext(self._s, d.changes, "diff", org_id, dataset_id, fields)
 
     async def purge_before(
         self, org_id: UUID, dataset_id: UUID, before: datetime, *, limit: int

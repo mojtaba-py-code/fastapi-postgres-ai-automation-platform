@@ -136,6 +136,13 @@ PLATFORM_TASKS: tuple[TaskSpec[Any], ...] = (
     TaskSpec("nexusflow.maintenance.purge_dataset", m.DatasetMessage, h.purge_dataset),
     TaskSpec("nexusflow.maintenance.delete_files", m.FilesMessage, h.delete_files),
     TaskSpec(
+        "nexusflow.maintenance.seal_dataset",
+        m.DatasetMessage,
+        h.seal_dataset,
+        TaskName.SEAL_DATASET,
+        reference=("dataset", "dataset_id"),
+    ),
+    TaskSpec(
         "nexusflow.automation.dispatch", m.Empty, h.dispatch_due_workflows, retries=0, periodic=True
     ),
     TaskSpec("nexusflow.automation.sweep", m.Empty, h.sweep_detection, retries=0, periodic=True),

@@ -6,9 +6,9 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from nexusflow.core.clock import Clock
+from nexusflow.core.errors import NotFoundError
 from nexusflow.core.ids import uuid7
 from nexusflow.domain.automation.events import EventType, event_message
-from nexusflow.domain.catalog.service import get_dataset
 from nexusflow.domain.records.detection import diff_versions
 from nexusflow.domain.records.model import Change, Significance
 from nexusflow.domain.records.sealing import seal_diff
@@ -44,7 +44,11 @@ class ChangeDetectionService:
         (``SKIP LOCKED``) and repeatedly (unique ``(record_id, to_version)``)."""
         now = self._clock.now()
         async with self._uow_factory(TenantScope.system(org_id)) as uow:
-            dataset = await get_dataset(uow, org_id, dataset_id)
+            # Share-locked: the schema - which fields are sealed - cannot change
+            # while this batch diffs with it (a change waits for the batch).
+            dataset = await uow.data.datasets.get_for_share(org_id, dataset_id)
+            if dataset is None or dataset.is_deleted:
+                raise NotFoundError()
             spec = dataset.spec
             versions = await uow.data.records.pending_versions(dataset_id, limit=self._batch)
             if not versions:

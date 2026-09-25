@@ -419,6 +419,14 @@ async def delete_files(deps: WorkerDeps, msg: FilesMessage) -> None:
     await deps.container.maintenance.delete_files(msg.org_id, msg.keys)
 
 
+async def seal_dataset(deps: WorkerDeps, msg: DatasetMessage) -> None:
+    remaining = await deps.container.maintenance.seal_sensitive(msg.org_id, msg.dataset_id)
+    if remaining:
+        # Rows in use were skipped: retried with backoff (then dead-lettered,
+        # retryable from the API) until every stored value is sealed.
+        raise TransientError(code="sealing_incomplete", internal_detail=f"{remaining} rows")
+
+
 async def _each_tenant(c: Container, work: Callable[[UUID], Awaitable[Any]], task: str) -> None:
     """Per-tenant maintenance: one tenant's failure must not starve the others."""
     for org_id in await c.maintenance.tenants():

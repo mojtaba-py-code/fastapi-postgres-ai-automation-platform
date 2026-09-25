@@ -211,6 +211,86 @@ class TestAtRest:
         assert CHANGED not in json.dumps(alert)
 
 
+class TestMarkedSensitiveLater:
+    async def test_values_stored_before_are_sealed_when_a_field_becomes_sensitive(
+        self,
+        api: httpx2.AsyncClient,
+        container: Container,
+        bus: InProcessBus,
+        admin_conn: asyncpg.Connection,
+    ) -> None:
+        owner = await signup(api)
+        org_id = await org_id_of(owner)
+        project_id = await create_project(owner)
+        plain = json.loads(json.dumps(SCHEMA))
+        for spec in plain["fields"]:
+            spec["sensitive"] = False  # nobody thought of it at first
+        created = await owner.post(
+            "/api/v1/datasets",
+            json={"project_id": project_id, "name": "suppliers", "schema": plain},
+        )
+        dataset_id = str(created.json()["id"])
+        source_id = await create_source(owner, project_id, dataset_id, WEBSITE)
+        tenant = Tenant(owner, org_id, project_id, dataset_id, source_id)
+        await tenant.collect(container, [{"sku": "A-1", "supplier_email": FIRST, "cost": "12.5"}])
+        await tenant.collect(container, [{"sku": "A-1", "supplier_email": CHANGED, "cost": "20.5"}])
+        assert FIRST in await _stored_text(admin_conn, dataset_id)
+
+        patched = await owner.patch(f"/api/v1/datasets/{dataset_id}", json={"schema": SCHEMA})
+        assert patched.status_code == 200, patched.text
+        await bus.drain(org_id)  # the sealing job the change queued
+
+        stored = await _stored_text(admin_conn, dataset_id)
+        for secret in (FIRST, CHANGED, "12.5", "20.5"):
+            assert secret not in stored  # records, versions and change diffs
+        [record] = (await owner.get(f"/api/v1/datasets/{dataset_id}/records")).json()["items"]
+        assert (record["data"]["supplier_email"], record["data"]["cost"]) == (CHANGED, "20.5")
+        changes = (await owner.get("/api/v1/changes", params={"dataset_id": dataset_id})).json()[
+            "items"
+        ]
+        updated = next(c for c in changes if c["change_type"] == "updated")
+        assert updated["diff"]["supplier_email"] == {"old": FIRST, "new": CHANGED}
+        viewer = await viewer_key(owner, ["records:read"])
+        [masked] = (await api.get(f"/api/v1/datasets/{dataset_id}/records", headers=viewer)).json()[
+            "items"
+        ]
+        assert masked["data"]["supplier_email"] == "[masked]"
+        [audit] = (await owner.get("/api/v1/audit", params={"action": "dataset.updated"})).json()[
+            "items"
+        ]
+        assert audit["metadata"]["sealing"] == ["cost", "supplier_email"]
+
+    async def test_rows_in_use_are_left_for_a_retry_not_forgotten(
+        self,
+        api: httpx2.AsyncClient,
+        container: Container,
+        database: ProvisionedDatabase,
+        admin_conn: asyncpg.Connection,
+    ) -> None:
+        tenant = await _tenant(api)
+        dataset_id = UUID(tenant.dataset_id)
+        await tenant.collect(container, [{"sku": "A-1", "title": "Lamp"}])
+        # The title turns out to be personal, directly in the database for the test.
+        await admin_conn.execute(
+            "UPDATE datasets SET schema = jsonb_set(schema, '{fields,1,sensitive}', 'true')"
+            " WHERE id = $1",
+            dataset_id,
+        )
+        locker = await asyncpg.connect(database.admin_url.rsplit("/", 1)[0] + f"/{database.name}")
+        held = locker.transaction()
+        await held.start()
+        await locker.execute("SELECT 1 FROM records WHERE dataset_id = $1 FOR UPDATE", dataset_id)
+        try:
+            left = await container.maintenance.seal_sensitive(tenant.org_id, dataset_id)
+        finally:
+            await held.rollback()
+            await locker.close()
+        assert left == 1  # the held record: the job retries, it does not report done
+
+        assert await container.maintenance.seal_sensitive(tenant.org_id, dataset_id) == 0
+        assert "Lamp" not in await _stored_text(admin_conn, tenant.dataset_id)
+
+
 class TestTampering:
     async def test_a_sealed_value_copied_to_another_record_does_not_open(
         self, api: httpx2.AsyncClient, container: Container, admin_conn: asyncpg.Connection
