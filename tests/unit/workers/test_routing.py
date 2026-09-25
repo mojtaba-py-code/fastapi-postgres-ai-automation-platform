@@ -125,10 +125,17 @@ def test_sandbox_app_consumes_only_its_queue_and_declares_nothing() -> None:
 
 def test_every_secret_compose_mounts_is_generated() -> None:
     script = _generate_secrets()
-    generated = set(script.build()) | set(script.PLACEHOLDERS)
+    spec = importlib.util.spec_from_file_location("pki", ROOT / "scripts" / "internal_pki.py")
+    assert spec is not None and spec.loader is not None
+    pki = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pki)
+    issued = {"internal_ca.pem"} | {
+        f"tls_{service}{suffix}" for service in pki.SERVICES for suffix in (".pem", ".key")
+    }
+    generated = set(script.build()) | set(script.PLACEHOLDERS) | issued
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
-    referenced = set(re.findall(r"\./secrets/([a-z0-9_]+)", compose))
-    assert referenced == generated
+    referenced = set(re.findall(r"\./secrets/([a-z0-9_.]+)", compose))
+    assert referenced == generated  # and internal_ca.key, the CA's key, is never mounted
 
 
 def test_placeholders_are_created_empty_and_never_overwritten(tmp_path: Path) -> None:

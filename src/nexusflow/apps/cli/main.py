@@ -36,6 +36,7 @@ from nexusflow.domain.authorization.principal import Principal, ServiceScope
 from nexusflow.domain.identity.model import ServiceAccount
 from nexusflow.domain.shared.context import RequestMeta
 from nexusflow.domain.shared.unit_of_work import TenantScope
+from nexusflow.infrastructure.database.engine import ssl_connect_args
 from nexusflow.infrastructure.observability.logging import configure_logging
 from nexusflow.infrastructure.redis.client import FeatureFlags
 
@@ -234,14 +235,18 @@ def migrate(settings: Settings, config_path: Path) -> dict[str, Any]:
     if settings.database.migrator_url is None:
         raise SystemExit("NEXUSFLOW_DATABASE__MIGRATOR_URL(_FILE) is required for migrations")
     url = settings.database.migrator_url.get_secret_value()
-    wait_for_database(url)
+    connect_args = ssl_connect_args(settings.database)  # the app's TLS verification
+    wait_for_database(url, connect_args=connect_args)
     config = Config(str(config_path))
     config.attributes["db_url"] = url
+    config.attributes["connect_args"] = connect_args
     command.upgrade(config, "head")
     return {"migrated_to": "head"}
 
 
-def wait_for_database(url: str, *, timeout: float = 90.0) -> None:
+def wait_for_database(
+    url: str, *, connect_args: dict[str, Any] | None = None, timeout: float = 90.0
+) -> None:
     """Block until the database accepts connections for this role.
 
     On a first boot PostgreSQL restarts once after running its init scripts,
@@ -252,7 +257,7 @@ def wait_for_database(url: str, *, timeout: float = 90.0) -> None:
     delay = 1.0
     while True:
         try:
-            asyncio.run(_probe_database(url))
+            asyncio.run(_probe_database(url, connect_args or {}))
         except (OSError, SQLAlchemyError) as exc:
             if time.monotonic() + delay > deadline:
                 raise SystemExit(f"database not reachable: {type(exc).__name__}") from exc
@@ -262,8 +267,8 @@ def wait_for_database(url: str, *, timeout: float = 90.0) -> None:
             return
 
 
-async def _probe_database(url: str) -> None:
-    engine = create_async_engine(url, pool_pre_ping=False)
+async def _probe_database(url: str, connect_args: dict[str, Any]) -> None:
+    engine = create_async_engine(url, pool_pre_ping=False, connect_args=connect_args)
     try:
         async with engine.connect() as connection:
             await connection.execute(text("SELECT 1"))

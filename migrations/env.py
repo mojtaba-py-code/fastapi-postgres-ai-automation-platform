@@ -58,7 +58,13 @@ def _run(connection: Connection) -> None:
 async def _run_async() -> None:
     section = config.get_section(config.config_ini_section) or {}
     section["sqlalchemy.url"] = _database_url()
-    engine = async_engine_from_config(section, prefix="sqlalchemy.", poolclass=pool.NullPool)
+    engine = async_engine_from_config(
+        section,
+        prefix="sqlalchemy.",
+        poolclass=pool.NullPool,
+        # The CLI passes the application's TLS verification (``nexusflow migrate``).
+        connect_args=config.attributes.get("connect_args") or {},
+    )
     async with engine.connect() as connection:
         await connection.run_sync(_run)
     await engine.dispose()

@@ -7,6 +7,7 @@ carries a TTL, and the server is configured with ``maxmemory`` +
 
 from __future__ import annotations
 
+import ssl
 from typing import Any
 
 from redis.asyncio import Redis
@@ -30,6 +31,10 @@ def create_redis(settings: RedisSettings) -> Redis:
     url = settings.url.get_secret_value()
     if url.startswith("rediss://"):
         kwargs["ssl_cert_reqs"] = "required"
+        # redis-py 8 checks the host name by default; explicit, so that no
+        # upgrade can relax it.
+        kwargs["ssl_check_hostname"] = True
+        kwargs["ssl_min_version"] = ssl.TLSVersion.TLSv1_2
         if settings.ssl_ca_certs is not None:
             kwargs["ssl_ca_certs"] = str(settings.ssl_ca_certs)
     client: Redis = Redis.from_url(url, **kwargs)

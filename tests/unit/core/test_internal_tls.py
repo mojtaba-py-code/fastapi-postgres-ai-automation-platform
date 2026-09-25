@@ -78,6 +78,8 @@ class TestRedis:
         options = client.connection_pool.connection_kwargs
         assert options["ssl_cert_reqs"] == "required"
         assert options["ssl_ca_certs"] == str(private_ca)
+        assert options["ssl_check_hostname"] is True
+        assert options["ssl_min_version"] == ssl.TLSVersion.TLSv1_2
         assert client.connection_pool.connection_class.__name__ == "SSLConnection"
 
     def test_plain_redis_carries_no_tls_options(self) -> None:
@@ -121,6 +123,8 @@ class TestBroker:
         assert app.conf.broker_use_ssl == {
             "cert_reqs": ssl.CERT_REQUIRED,
             "ca_certs": str(private_ca),
+            # py-amqp verifies the host name only when it is given one.
+            "server_hostname": "rabbitmq",
         }
 
     def test_plain_amqp_has_no_tls_options(self) -> None:

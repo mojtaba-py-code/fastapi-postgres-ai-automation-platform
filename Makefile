@@ -43,6 +43,7 @@ pin-images: ## Pin every base and third-party image to the digest its tag points
 
 secrets: ## Generate ./secrets for docker compose
 	$(UV) run python scripts/generate_secrets.py
+	$(UV) run python scripts/internal_pki.py
 
 dev-certs: ## Local development CA + TLS certificate in deploy/certs (never for production)
 	$(UV) run python scripts/dev_certs.py

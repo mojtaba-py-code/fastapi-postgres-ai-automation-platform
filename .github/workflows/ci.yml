@@ -150,6 +150,7 @@ jobs:
       - name: Secrets, development TLS certificate and environment (CI only)
         run: |
           uv run python scripts/generate_secrets.py
+          uv run python scripts/internal_pki.py
           uv run python scripts/dev_certs.py --domain localhost
           sed 's/^NEXUSFLOW_DOMAIN=.*/NEXUSFLOW_DOMAIN=localhost/' .env.example > .env
       - name: Compose file is valid
@@ -165,6 +166,20 @@ jobs:
             sleep 5
           done
           echo "the platform did not become ready" >&2
+          exit 1
+      - name: Every service is running and healthy
+        run: |
+          # A crash-looping container fails neither `up -d` nor the edge's
+          # readiness (n8n, for one, is not on that path): check every service,
+          # the one-shot migration aside.
+          for attempt in $(seq 1 36); do
+            bad="$($COMPOSE ps --all --format '{{.Service}} {{.State}} {{.Health}}' \
+              | awk '$1 != "migrate" && ($2 != "running" || ($3 != "" && $3 != "healthy"))')"
+            if [ -z "$bad" ]; then exit 0; fi
+            sleep 5
+          done
+          echo "not running or not healthy:" >&2
+          echo "$bad" >&2
           exit 1
       - name: End-to-end tests
         env:

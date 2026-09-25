@@ -30,6 +30,13 @@ def _ssl_context(settings: DatabaseSettings) -> ssl.SSLContext | str | None:
     return context
 
 
+def ssl_connect_args(settings: DatabaseSettings) -> dict[str, Any]:
+    """asyncpg's TLS argument for ``settings``: the application, the CLI and
+    the migrations all connect with the same verification."""
+    ssl_arg = _ssl_context(settings)
+    return {} if ssl_arg is None else {"ssl": ssl_arg}
+
+
 def create_engine(settings: DatabaseSettings, *, application_name: str) -> AsyncEngine:
     connect_args: dict[str, Any] = {
         "server_settings": {
@@ -40,10 +47,8 @@ def create_engine(settings: DatabaseSettings, *, application_name: str) -> Async
             "idle_in_transaction_session_timeout": str(settings.idle_in_transaction_timeout_ms),
         },
         "command_timeout": settings.statement_timeout_ms / 1000 + 5,
+        **ssl_connect_args(settings),
     }
-    ssl_arg = _ssl_context(settings)
-    if ssl_arg is not None:
-        connect_args["ssl"] = ssl_arg
     return create_async_engine(
         settings.url.get_secret_value(),
         pool_size=settings.pool_size,

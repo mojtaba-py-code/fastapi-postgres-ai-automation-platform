@@ -1,6 +1,7 @@
 # NexusFlow AI - production-like single-host deployment.
 #
 #   python scripts/generate_secrets.py        # once: ./secrets (dir 0700)
+#   python scripts/internal_pki.py            # once: CA + certificates for internal TLS
 #   cp .env.example .env && $EDITOR .env      # domain, image tags, TLS paths
 #   docker compose up -d --build
 #
@@ -11,6 +12,9 @@
 #   `egress`, joined only by the integrations worker, the sandbox and the
 #   headless browser; the pipeline worker and both APIs have no egress;
 # * all secrets are files under /run/secrets, never environment values;
+# * PostgreSQL, both Redis instances and RabbitMQ accept TLS connections only,
+#   and every client verifies the server's certificate and host name against
+#   the stack's private CA (scripts/internal_pki.py);
 # * every container has no-new-privileges and a memory limit, and drops all
 #   capabilities; the platform's own containers (API, workers, sandbox,
 #   browser) and nginx, Redis, Prometheus, Alertmanager and Grafana also run
@@ -52,6 +56,12 @@ x-app-env: &app-env
   NEXUSFLOW_SECURITY__ENCRYPTION_KEYS_FILE: /run/secrets/encryption_keys
   NEXUSFLOW_SECURITY__HMAC_PEPPER_FILE: /run/secrets/hmac_pepper
   NEXUSFLOW_N8N__WEBHOOK_JWT_SECRET_FILE: /run/secrets/n8n_webhook_jwt_secret
+  # Internal TLS: encrypted, and each server's certificate and host name verified.
+  NEXUSFLOW_DATABASE__SSL_MODE: verify-full
+  NEXUSFLOW_DATABASE__SSL_ROOT_CERT: /run/secrets/internal_ca
+  NEXUSFLOW_REDIS__SSL_CA_CERTS: /run/secrets/internal_ca
+  NEXUSFLOW_BROKER__USE_SSL: "true"
+  NEXUSFLOW_BROKER__SSL_CA_CERTS: /run/secrets/internal_ca
   # internal: the platform orchestrates itself (works out of the box). Switch to
   # n8n after provisioning the workflows (workflows/n8n/README.md).
   NEXUSFLOW_N8N__ORCHESTRATION: ${NEXUSFLOW_ORCHESTRATION:-internal}
@@ -69,6 +79,7 @@ x-app-env: &app-env
   NEXUSFLOW_SCRAPING__BROWSER_SERVICE_URL: http://renderer:8090
 
 x-app-secrets: &app-secrets
+  - internal_ca
   - db_app_url
   - redis_app_url
   - broker_platform_url
@@ -108,7 +119,8 @@ services:
     environment:
       <<: *app-env
       NEXUSFLOW_DATABASE__MIGRATOR_URL_FILE: /run/secrets/db_migrator_url
-    secrets: [db_migrator_url, db_app_url, redis_app_url, broker_platform_url, jwt_private_key, encryption_keys, hmac_pepper, n8n_webhook_jwt_secret]
+    secrets: [internal_ca, db_migrator_url, db_app_url, redis_app_url, broker_platform_url,
+              jwt_private_key, encryption_keys, hmac_pepper, n8n_webhook_jwt_secret]
     depends_on:
       postgres: {condition: service_healthy}
     networks: [backend]
@@ -144,8 +156,8 @@ services:
       # Operators run the CLI here (it reaches n8n): the kill switch unpublishes
       # n8n workflows with this key. Empty until created in n8n.
       NEXUSFLOW_N8N__API_KEY_FILE: /run/secrets/n8n_api_key
-    secrets: [db_app_url, redis_app_url, broker_platform_url, jwt_private_key, encryption_keys,
-              hmac_pepper, n8n_webhook_jwt_secret, n8n_api_key]
+    secrets: [internal_ca, db_app_url, redis_app_url, broker_platform_url, jwt_private_key,
+              encryption_keys, hmac_pepper, n8n_webhook_jwt_secret, n8n_api_key]
     volumes: ["nexusflow-data:/var/lib/nexusflow:ro"]   # streams upload input to the sandbox
     depends_on:
       migrate: {condition: service_completed_successfully}
@@ -184,8 +196,8 @@ services:
       NEXUSFLOW_AI__PROVIDER: ${NEXUSFLOW_AI_PROVIDER:-offline}
       NEXUSFLOW_AI__API_KEY_FILE: /run/secrets/ai_api_key
       NEXUSFLOW_NOTIFICATIONS__SMTP_PASSWORD_FILE: /run/secrets/smtp_password
-    secrets: [db_app_url, redis_app_url, broker_platform_url, jwt_private_key, encryption_keys,
-              hmac_pepper, n8n_webhook_jwt_secret, ai_api_key, smtp_password]
+    secrets: [internal_ca, db_app_url, redis_app_url, broker_platform_url, jwt_private_key,
+              encryption_keys, hmac_pepper, n8n_webhook_jwt_secret, ai_api_key, smtp_password]
     depends_on:
       migrate: {condition: service_completed_successfully}
     networks: [backend, automation, egress]             # APIs, AI, SMTP, Slack, n8n events
@@ -219,12 +231,15 @@ services:
       NEXUSFLOW_HEALTHCHECK: heartbeat                 # see docker/healthcheck.py
       NEXUSFLOW_HEARTBEAT_PATH: /tmp/nexusflow-heartbeat
       NEXUSFLOW_BROKER__URL_FILE: /run/secrets/broker_sandbox_url
+      NEXUSFLOW_BROKER__USE_SSL: "true"
+      NEXUSFLOW_BROKER__SSL_CA_CERTS: /run/secrets/internal_ca
       NEXUSFLOW_SANDBOX__REDIS_URL_FILE: /run/secrets/redis_sandbox_url
+      NEXUSFLOW_SANDBOX__REDIS_SSL_CA_CERTS: /run/secrets/internal_ca
       NEXUSFLOW_SANDBOX__GATEWAY_URL: http://api-internal:8001
       NEXUSFLOW_SCRAPING__BROWSER_SERVICE_URL: http://renderer:8090   # render network only
       NEXUSFLOW_SCRAPING__BROWSER_SERVICE_TOKEN_FILE: /run/secrets/browser_token
       NEXUSFLOW_OBSERVABILITY__LOG_FORMAT: json
-    secrets: [broker_sandbox_url, redis_sandbox_url, browser_token]
+    secrets: [internal_ca, broker_sandbox_url, redis_sandbox_url, browser_token]
     depends_on:
       api-internal: {condition: service_healthy}
       redis-sandbox: {condition: service_healthy}
@@ -268,6 +283,8 @@ services:
       DB_POSTGRESDB_DATABASE: n8n
       DB_POSTGRESDB_USER: n8n
       DB_POSTGRESDB_PASSWORD_FILE: /run/secrets/n8n_db_password
+      # TLS to PostgreSQL, verified against the stack's CA (the file's contents).
+      DB_POSTGRESDB_SSL_CA_FILE: /run/secrets/internal_ca
       N8N_ENCRYPTION_KEY_FILE: /run/secrets/n8n_encryption_key
       N8N_HOST: localhost
       N8N_PROTOCOL: http
@@ -287,7 +304,7 @@ services:
       EXECUTIONS_DATA_MAX_AGE: "168"
       EXECUTIONS_DATA_SAVE_ON_SUCCESS: none
       GENERIC_TIMEZONE: UTC
-    secrets: [n8n_db_password, n8n_encryption_key]
+    secrets: [internal_ca, n8n_db_password, n8n_encryption_key]
     volumes: ["n8n-data:/home/node/.n8n"]
     depends_on:
       postgres: {condition: service_healthy}
@@ -303,16 +320,34 @@ services:
     environment:
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
       POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=scram-sha-256"
+    # PostgreSQL refuses a key file others can read, and Compose mounts secrets
+    # with their host mode: install a private copy for "postgres" first.
+    entrypoint:
+      - sh
+      - -ec
+      - |
+        install -d -o postgres -g postgres -m 0700 /var/run/postgresql/tls
+        install -o postgres -g postgres -m 0600 /run/secrets/tls_postgres_key /var/run/postgresql/tls/server.key
+        install -o postgres -g postgres -m 0644 /run/secrets/tls_postgres_cert /var/run/postgresql/tls/server.crt
+        exec docker-entrypoint.sh "$$@"
+      - docker-entrypoint.sh
     command: ["postgres",
+              "-c", "ssl=on",
+              "-c", "ssl_cert_file=/var/run/postgresql/tls/server.crt",
+              "-c", "ssl_key_file=/var/run/postgresql/tls/server.key",
+              "-c", "ssl_min_protocol_version=TLSv1.2",
+              "-c", "hba_file=/etc/postgresql/pg_hba.conf",   # TLS-only over the network
               "-c", "password_encryption=scram-sha-256",
               "-c", "log_connections=on", "-c", "log_disconnections=on",
               "-c", "log_min_duration_statement=1000",
               "-c", "shared_preload_libraries=pg_stat_statements",
               "-c", "max_connections=200"]
-    secrets: [postgres_password, db_app_password, db_migrator_password, n8n_db_password]
+    secrets: [postgres_password, db_app_password, db_migrator_password, n8n_db_password,
+              tls_postgres_cert, tls_postgres_key]
     volumes:
       - pg-data:/var/lib/postgresql/data
       - ./deploy/postgres/init:/docker-entrypoint-initdb.d:ro
+      - ./deploy/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
     healthcheck:
       # TCP, not the socket: during initdb the temporary server listens on the
       # socket only, and must not be reported healthy to the migrate job.
@@ -328,14 +363,15 @@ services:
     <<: *hardened
     image: redis:${REDIS_VERSION:-7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499}
     user: "999:1000"
-    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    command: ["redis-server", "/usr/local/etc/redis/redis-tls.conf"]
     volumes:
       - ./deploy/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+      - ./deploy/redis/redis-tls.conf:/usr/local/etc/redis/redis-tls.conf:ro
       - redis-data:/data
-    secrets: [redis_users_acl]
+    secrets: [redis_users_acl, internal_ca, tls_redis_cert, tls_redis_key]
     healthcheck:
       # Unauthenticated PING answers NOAUTH: proves liveness without a password.
-      test: ["CMD-SHELL", "redis-cli -h 127.0.0.1 ping 2>&1 | grep -Eq 'PONG|NOAUTH'"]
+      test: ["CMD-SHELL", "redis-cli --tls --cacert /run/secrets/internal_ca -h 127.0.0.1 ping 2>&1 | grep -Eq 'PONG|NOAUTH'"]
       interval: 10s
       timeout: 3s
       retries: 10
@@ -348,12 +384,13 @@ services:
     <<: *hardened
     image: redis:${REDIS_VERSION:-7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499}
     user: "999:1000"
-    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    command: ["redis-server", "/usr/local/etc/redis/redis-tls.conf"]
     volumes:
       - ./deploy/redis/redis-sandbox.conf:/usr/local/etc/redis/redis.conf:ro
-    secrets: [redis_sandbox_acl]
+      - ./deploy/redis/redis-sandbox-tls.conf:/usr/local/etc/redis/redis-tls.conf:ro
+    secrets: [redis_sandbox_acl, internal_ca, tls_redis_sandbox_cert, tls_redis_sandbox_key]
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli -h 127.0.0.1 ping 2>&1 | grep -Eq 'PONG|NOAUTH'"]
+      test: ["CMD-SHELL", "redis-cli --tls --cacert /run/secrets/internal_ca -h 127.0.0.1 ping 2>&1 | grep -Eq 'PONG|NOAUTH'"]
       interval: 10s
       timeout: 3s
       retries: 10
@@ -374,9 +411,10 @@ services:
       RABBITMQ_CONFIG_FILES: /etc/rabbitmq/conf.d
     volumes:
       - ./deploy/rabbitmq/rabbitmq.conf:/etc/rabbitmq/conf.d/10-nexusflow.conf:ro
+      - ./deploy/rabbitmq/tls.conf:/etc/rabbitmq/conf.d/20-tls.conf:ro   # AMQP over TLS only
       - ./deploy/rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
       - rabbitmq-data:/var/lib/rabbitmq
-    secrets: [rabbitmq_definitions]
+    secrets: [rabbitmq_definitions, internal_ca, tls_rabbitmq_cert, tls_rabbitmq_key]
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 15s
@@ -473,6 +511,16 @@ volumes:
   grafana-data:
 
 secrets:
+  # Internal TLS (scripts/internal_pki.py). The CA's own key stays on the host.
+  internal_ca: {file: ./secrets/internal_ca.pem}
+  tls_postgres_cert: {file: ./secrets/tls_postgres.pem}
+  tls_postgres_key: {file: ./secrets/tls_postgres.key}
+  tls_redis_cert: {file: ./secrets/tls_redis.pem}
+  tls_redis_key: {file: ./secrets/tls_redis.key}
+  tls_redis_sandbox_cert: {file: ./secrets/tls_redis_sandbox.pem}
+  tls_redis_sandbox_key: {file: ./secrets/tls_redis_sandbox.key}
+  tls_rabbitmq_cert: {file: ./secrets/tls_rabbitmq.pem}
+  tls_rabbitmq_key: {file: ./secrets/tls_rabbitmq.key}
   postgres_password: {file: ./secrets/postgres_password}
   db_app_password: {file: ./secrets/db_app_password}
   db_migrator_password: {file: ./secrets/db_migrator_password}

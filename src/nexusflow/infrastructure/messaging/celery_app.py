@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import ssl
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from celery import Celery
 from kombu import Exchange, Queue
@@ -217,6 +218,9 @@ def build_celery(
         config["broker_use_ssl"] = {
             "cert_reqs": ssl.CERT_REQUIRED,
             "ca_certs": str(broker.ssl_ca_certs) if broker.ssl_ca_certs else None,
+            # py-amqp checks the certificate's host name only when it is given
+            # one: without it, any certificate from the CA would be accepted.
+            "server_hostname": urlsplit(broker.url.get_secret_value()).hostname,
         }
     app.conf.update(config)
     # Liveness: the consumer (and beat, below) keep a heartbeat file fresh.
