@@ -32,17 +32,21 @@ vulnerabilities:
       (trace-export client only, not configured).
     expired_at: 2026-11-30
 
-  # Grafana 12.4.11, the newest release of the maintained 12.4 line, reached
-  # by operators only (SSH tunnel), with the Prometheus data source alone.
+  # OpenSSL 3.5: unbounded memory growth in a QUIC *server*. Only programs
+  # that open an OpenSSL QUIC listener are exposed; nothing in the stack does
+  # (the edge serves TLS over TCP, no HTTP/3; the databases, Redis and
+  # RabbitMQ speak TLS over TCP; Grafana, a Go program, does not use OpenSSL).
   - id: CVE-2026-14456
     purls:
       - pkg:apk/alpine/libcrypto3
-    paths:
-      - grafana/grafana
+      - pkg:apk/alpine/libssl3
     statement: >-
-      OpenSSL denial of service. Grafana is a Go program and terminates TLS
-      with Go's own library; no process in the container uses OpenSSL.
+      QUIC-server denial of service; no component of the stack runs an
+      OpenSSL QUIC listener.
     expired_at: 2026-10-31
+
+  # Grafana 12.4.11, the newest release of the maintained 12.4 line, reached
+  # by operators only (SSH tunnel), with the Prometheus data source alone.
   - id: CVE-2026-43871
     paths:
       - usr/share/grafana/bin/grafana
