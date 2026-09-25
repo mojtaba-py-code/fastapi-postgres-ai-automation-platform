@@ -158,6 +158,21 @@ Optional extras:
 * **One request, every job**: an API response's `X-Request-ID` appears as
   `request_id` in the log lines of every worker job the request caused
   (`docker compose logs worker-pipeline | grep <id>`).
+* **Network allowlist**: with the owner's token, `PATCH /api/v1/organizations/current`
+  with `{"settings": {"allowed_ip_ranges": ["198.51.100.0/24"]}}` is refused with
+  `422 would_lock_you_out` - a list must include the caller's own address. Once a
+  list is set, sessions and API keys from any other network get `403 ip_not_allowed`,
+  and a valid sign-in from outside shows in the audit trail (`auth.network_denied`).
+  An operator can lift a list that locked an organization out:
+
+  ```bash
+  docker compose run --rm api-internal nexusflow org clear-network-allowlist --org <id> --reason "<ticket>"
+  ```
+
+* **Tested as deployed**: every CI run's `zap-report` artifact is the OWASP ZAP scan
+  of every API operation against the running stack (no warnings); the security
+  posture against OWASP ASVS 5.0, with evidence and gaps, is in
+  [ASVS.md](ASVS.md).
 
 ## 6. Reset
 

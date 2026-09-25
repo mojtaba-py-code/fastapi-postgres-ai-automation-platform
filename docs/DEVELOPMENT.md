@@ -29,9 +29,12 @@ and the *local development* block in `.env.example`.
 | `make demo` | The scripted walkthrough against the running demo stack ([DEMO.md](DEMO.md)) |
 | `make config-docs` | Regenerate [CONFIGURATION.md](CONFIGURATION.md) from the settings classes |
 
-CI also runs Semgrep, Gitleaks, CodeQL, the image builds, Trivy and SBOM generation
-for both images, and the end-to-end suite against the full Compose stack behind the
-TLS edge. Third-party actions are pinned to commit SHAs.
+CI also runs Semgrep, Gitleaks, CodeQL, zizmor (the workflows themselves), the
+image builds, Trivy and SBOM generation for both images, and - against the full
+Compose stack behind the TLS edge - `nginx -t`, the end-to-end suite, a
+backup-and-restore round trip with audit verification, and a passive OWASP ZAP scan
+of every API operation (`scripts/zap_gate.py` fails the build on Medium or High
+alerts). Third-party actions are pinned to commit SHAs.
 
 ## Test strategy
 

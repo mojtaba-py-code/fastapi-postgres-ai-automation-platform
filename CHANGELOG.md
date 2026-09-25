@@ -74,6 +74,11 @@ All notable changes are documented here. The format follows
 * Release workflow: a version tag publishes both images to GHCR, scanned first,
   with SBOM and provenance attestations, signed keyless with cosign.
 * Base and third-party images pinned to digests (`make pin-images`).
+* DAST in CI: OWASP ZAP requests every API operation of the running stack as a
+  signed-in owner and scans the responses passively; Medium or High alerts fail
+  the build. zizmor audits the workflows; dependency review and OpenSSF Scorecard
+  run once the repository is public.
+* A self-assessed OWASP ASVS 5.0 mapping with evidence and gaps (`docs/ASVS.md`).
 
 ### Security
 The code went through several AI-assisted reviews (adversarial code review,

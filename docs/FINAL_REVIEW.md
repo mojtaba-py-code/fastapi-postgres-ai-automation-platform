@@ -5,18 +5,19 @@ deployment review, and an honest list of remaining limitations. This is that
 review, as of 2026-09-25.
 
 **Verdict.** NexusFlow AI is a complete, well-tested reference implementation of
-a secure automation and intelligence platform, ready for a pilot. It is not yet
-production-proven: the container stack has not been run outside CI (its startup
-was reviewed statically, and the CI end-to-end job has not run yet), no
-independent penetration test has been done, and enterprise features such as SSO,
-high availability and an admin UI are on the roadmap (section 7).
+a secure automation and intelligence platform, ready for a pilot. The whole stack
+runs in CI on every change - end-to-end tests behind the TLS edge, a
+backup-and-restore round trip and a passive DAST scan - but it is not yet
+production-proven: it has not run on a customer-like host, no independent
+penetration test has been done, and enterprise features such as SSO, high
+availability and an admin UI are on the roadmap (section 7).
 
 ## 1. Architecture review
 
 | Aspect | Assessment |
 |---|---|
 | Layering | Clean architecture `apps -> bootstrap -> infrastructure -> domain -> core`, enforced in CI by import-linter; the domain imports no framework (no FastAPI, SQLAlchemy, Celery, Redis, HTTP or AI SDK) |
-| Size | 196 modules, about 29,000 lines of Python; 6 migrations (the initial schema in two parts, and four additive ones); 10 ADRs |
+| Size | 199 modules, about 30,000 lines of Python; 6 migrations (the initial schema in two parts, and four additive ones); 10 ADRs |
 | Components | Public API, internal API (n8n and sandbox), pipeline and integrations workers, sandbox worker, headless browser, beat, n8n (optional), PostgreSQL, Redis (two instances), RabbitMQ, nginx, Prometheus, Alertmanager, Grafana |
 | Trust boundaries | Edge (TLS, limits); tenant isolation (forced RLS plus `org_id` filters); sandbox (no DB, no secrets, per-run tickets); browser (pinning egress proxy); n8n (per-workflow service tokens, signed events). Every entry point is enumerated in the [threat model](THREAT_MODEL.md) (section 3.1) |
 | Reliability | Transactional outbox; idempotent workers; quorum queues with dead-lettering, delayed retries held by the broker; reaper with bounded attempts and fencing; heartbeat health; one request ID from the API into every job it causes |
@@ -29,10 +30,11 @@ audit); see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## 2. Security review
 
-Nine AI-assisted review passes (adversarial code review, due diligence,
+Ten AI-assisted review passes (adversarial code review, due diligence,
 traceability, test-driven reviews of the adapters, the core chain and of hostile
-uploads and rate limits, a deployment startup review, and two completion
-reviews) produced 76 numbered findings plus smaller observations. All are fixed
+uploads and rate limits, a deployment startup review, two completion reviews and
+an adversarial review of the day's new code) and the first run of the full stack
+in CI produced 80 numbered findings plus smaller observations. All are fixed
 with regression tests (or, for configuration, in the file named as evidence),
 except one accepted risk (sign-up reveals registered e-mails; it is
 rate-limited). The full record, including the specification's security
@@ -62,17 +64,25 @@ with evidence and the remaining gaps, is in [ASVS.md](ASVS.md).
 * A version tag runs the release workflow: both images are scanned, pushed to
   GHCR with SBOM and provenance attestations, and signed keyless with cosign.
   No release has been published yet.
+* Every CI run ends with a dynamic scan: OWASP ZAP (pinned by digest) requests
+  every API operation of the running stack as a signed-in owner and scans the
+  responses passively; any alert of Medium risk or higher fails the build unless
+  it is accepted with a written reason (none is). The first scan found one
+  Medium and three Low alert types, all on responses the edge generated itself
+  (R11-3, fixed); the current scan raises no warning of any level (118 rules
+  pass), only informational notes (client errors for placeholder identifiers,
+  and the deliberate `no-store`).
 
 ## 4. Test review
 
 | Layer | Tests | What they exercise |
 |---|---|---|
-| Unit | 1,214 | Crypto, tokens, SSRF guard, log redaction, all adapters (scraping, robots.txt, collectors, senders, AI provider, ClamAV, n8n client), the core chain (detection, alert rules, offline analysis, property-based tests), pipeline stages, reports and analytics, sign-in risk, request correlation, hostile uploads (hand-built zip bombs, traversal, macros, XXE, sparse sheets), the rate limiter, TLS client configuration, worker policy and liveness, n8n generator and lint, configuration and broker consistency |
-| Integration | 139 | Real PostgreSQL with production roles (RLS really enforced): identity and sign-in risk, database security, the business API and change analytics, the core chain end to end with the real worker handlers, crash recovery, data lifecycle, workflows, request correlation, backup and restore (`pg_dump`/`pg_restore` with the production roles), the CLI, and the demo walkthrough over real HTTP |
-| Security | 87 | Authentication, authorization, an IDOR sweep over every resource route, API-key lifecycle, login locking, every rate-limit scope and its failure policy, hostile uploads through the API, input handling, headers, error leakage |
-| End to end | 11 | The business scenario and the edge's security properties against the running Compose stack (CI), followed by a backup, restore and audit verification; skipped without a stack |
+| Unit | 1,348 | Crypto, tokens, SSRF guard, log redaction, network allowlists, the edge configuration (nginx), alert rules against the exported metrics, the DAST gate, script modes in git, all adapters (scraping, robots.txt, collectors, senders, AI provider, ClamAV, n8n client), the core chain (detection, alert rules, offline analysis, property-based tests), pipeline stages, reports and analytics, sign-in risk, request correlation, hostile uploads (hand-built zip bombs, traversal, macros, XXE, sparse sheets), the rate limiter, TLS client configuration, worker policy and liveness, n8n generator and lint, configuration and broker consistency |
+| Integration | 147 | Real PostgreSQL with production roles (RLS really enforced): identity and sign-in risk, database security, the business API and change analytics, the core chain end to end with the real worker handlers, crash recovery, data lifecycle, workflows, request correlation, backup and restore (`pg_dump`/`pg_restore` with the production roles), the CLI, and the demo walkthrough over real HTTP |
+| Security | 97 | Authentication, authorization, an IDOR sweep over every resource route, API-key lifecycle, login locking, session management, network allowlists (members, API keys, sign-in, anti-lockout, operator recovery), every rate-limit scope and its failure policy, hostile uploads through the API, input handling, headers, error leakage |
+| End to end | 13 | The business scenario and the edge's security properties (headers on every response, JSON errors, hidden paths, body limits, tenant isolation) against the running Compose stack (CI), followed by a backup, restore and audit verification and a DAST scan; skipped without a stack |
 
-* The last full run: 1,440 passed (the 11 end-to-end tests are skipped without a
+* The last full run: 1,592 passed (the 13 end-to-end tests run in CI against the
   stack); line and branch coverage 87 %, with a CI floor of 80 %.
 * Defects found by writing tests were pinned as strict expected failures first,
   then fixed.
@@ -85,7 +95,7 @@ with evidence and the remaining gaps, is in [ASVS.md](ASVS.md).
 
 | Checked | How |
 |---|---|
-| Startup | Reviewed statically (R7): the Compose files resolved with the example environment; settings and application objects of all 8 application roles built with exactly the variables and secrets Compose gives them; every image tag resolved in its registry; nginx, Prometheus, RabbitMQ, Docker DNS, Grafana and Mailpit behaviour checked against their sources. The one certain startup failure (Prometheus) and 14 further findings are fixed |
+| Startup | Started in CI on every change (R11: the first run found a startup failure the static review had missed). Before that, reviewed statically (R7): the Compose files resolved with the example environment; settings and application objects of all 8 application roles built with exactly the variables and secrets Compose gives them; every image tag resolved in its registry; nginx, Prometheus, RabbitMQ, Docker DNS, Grafana and Mailpit behaviour checked against their sources. The one certain startup failure (Prometheus) and 14 further findings are fixed |
 | Compose configuration | Every `NEXUSFLOW_*` variable in the Compose files is a real setting; every mounted secret is generated; settings refuse insecure production values |
 | Images | Non-root and read-only for the platform's own containers; no capabilities, `no-new-privileges` and memory limits everywhere (the exceptions of upstream images are named in the Compose header); built and scanned in CI; pinned by digest |
 | Networks | Only nginx publishes ports (admin UIs on 127.0.0.1); internal networks everywhere else; egress only for the pools that need it, without inter-container traffic |
@@ -93,12 +103,12 @@ with evidence and the remaining gaps, is in [ASVS.md](ASVS.md).
 | Health | HTTP probes for the APIs; event-loop heartbeats for workers and beat |
 | Operations | Backups (encrypted; the restore procedure tested against PostgreSQL with the production roles, and end to end in CI), key rotation procedures, runbooks, audit anchoring |
 
-**Not verified in the development environment:** the stack itself was never
-started there (no Docker). CI's end-to-end job builds the images, starts the
-stack with the demo overlay behind TLS, runs the end-to-end suite, then backs the
-stack up, changes it, restores it and verifies the audit chains; its first run,
-and a clean-host dry run, are the gate before any production use. The release
-workflow has not run either.
+**Verified in CI, not yet on a customer-like host:** there is no Docker in the
+development environment. CI's end-to-end job builds the images, starts the stack
+with the demo overlay behind TLS, runs the end-to-end suite, backs the stack up,
+changes it, restores it and verifies the audit chains, and scans every API
+operation with OWASP ZAP; it passes. A clean-host dry run remains the gate before
+production use, and the release workflow has not run yet.
 
 ## 6. Specification coverage
 
@@ -116,8 +126,8 @@ below.
 ## 7. Known limitations and roadmap
 
 **Before a production deployment**
-1. Get the first CI run green, including the end-to-end job and its backup and
-   restore, and do a clean-host dry run.
+1. Do a clean-host dry run (CI already runs the full stack, its backup and
+   restore, and a DAST scan on every change).
 2. Commission an independent penetration test.
 3. Publish the first signed release (tag `v0.1.0`) and deploy it by digest.
 

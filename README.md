@@ -18,16 +18,17 @@ is authorized, tenant-isolated, idempotent and audited.
 | Concern | What NexusFlow does |
 |---|---|
 | **Tenant isolation** | PostgreSQL row-level security (`FORCE`d) enforced on a non-`BYPASSRLS` role, plus explicit `org_id` filters in every query. Cross-tenant IDs return `404`. |
-| **Authentication** | Argon2id passwords, 10-minute EdDSA access tokens, rotating refresh tokens with reuse detection, TOTP with replay prevention, progressive lockout, sign-in risk assessment (new device, new network, success after failures), and scoped API keys hashed with a server-side pepper. |
+| **Authentication** | Argon2id passwords (breached passwords refused), 10-minute EdDSA access tokens, rotating refresh tokens with reuse detection, TOTP with replay prevention, progressive lockout, sign-in risk assessment (new device, new network, success after failures), a list of one's sessions with instant revocation, and scoped API keys hashed with a server-side pepper. Organizations can confine sessions and API keys to their own networks (IP allowlists). |
 | **Authorization** | Five roles (owner, admin, analyst, operator, viewer) and 38 permissions, checked at the route and again in the service. |
 | **SSRF** | Every outbound request passes a URL policy and a connect-time IP check against every DNS answer. Redirects are re-validated, bodies are size-capped and the decompressor is bounded. |
 | **Hostile content** | Web pages and uploaded files are parsed only in a **sandbox** worker that has no database, no storage and no secrets. Its only credential is a per-run HMAC ticket. |
 | **AI safety** | Offline analysis by default. External AI runs only when the tenant opts in, and never for datasets classified `restricted`. PII and credentials are redacted, prompts are spotlighted, a read-only tool gateway enforces permissions and a budget, and output is strictly validated. |
 | **Data classification** | Enforced, not decorative: restricted data never leaves the platform - no external AI, and alert messages carry no record keys or values. |
 | **Encryption at rest** | Beyond disk encryption, the application encrypts the values of `sensitive` fields (records, history, change diffs), staged raw payloads, uploads and reports with AES-256-GCM under rotatable keys, each bound to its tenant and row or file - a stolen dump or backup reveals none of them, and a moved ciphertext fails closed. |
-| **Audit** | Append-only SHA-256 hash chains per tenant plus a platform chain, written only through a `SECURITY DEFINER` function. `UPDATE`/`DELETE`/`TRUNCATE` are blocked by triggers; every chain is verifiable and its head is anchored to external logs hourly. |
+| **Audit** | Append-only SHA-256 hash chains per tenant plus a platform chain, written only through a `SECURITY DEFINER` function. `UPDATE`/`DELETE`/`TRUNCATE` are blocked by triggers; every chain is verified daily (a break pages the operators) and its head is anchored to external logs hourly. |
 | **Automation control** | A service token per n8n workflow, a per-tenant freeze and a global operator kill switch. One request ID follows a request into every job it causes. |
-| **Supply chain** | Hash-locked dependencies (`uv.lock`), SHA-pinned CI actions, images pinned by digest, pip-audit, Bandit, Semgrep, CodeQL, Gitleaks, Trivy plus an SBOM for both images, and release images signed with cosign and attested with build provenance. |
+| **Supply chain** | Hash-locked dependencies (`uv.lock`), SHA-pinned CI actions audited by zizmor, images pinned by digest, pip-audit, Bandit, Semgrep, CodeQL, Gitleaks, Trivy plus an SBOM for both images, and release images signed with cosign and attested with build provenance. |
+| **Tested as deployed** | Every CI run starts the whole stack behind its TLS edge, runs the end-to-end suite, backs the stack up, changes it, restores it and verifies the audit chains, then scans every API operation with OWASP ZAP (passive DAST; any Medium or High alert fails the build). |
 
 ## Architecture at a glance
 
@@ -142,23 +143,27 @@ tests/             unit, integration (real PostgreSQL), security and end-to-end 
 
 ## Status and honest limitations
 
-A complete, tested reference implementation: 1,440 tests (unit,
+A complete, tested reference implementation: 1,592 tests (unit,
 integration against a real PostgreSQL, security, and a walkthrough over real
-HTTP) pass with 87 % line and branch coverage, plus 11 end-to-end tests for a
-running stack; every quality gate is green - Ruff, mypy `--strict`, import-linter,
-Bandit, pip-audit, the n8n workflow lint, and the configuration and image-digest
-drift checks. Know the following before you deploy it:
+HTTP) pass with 87 % line and branch coverage, plus 13 end-to-end tests that CI
+runs against the full stack; every quality gate is green - Ruff, mypy `--strict`,
+import-linter, Bandit, pip-audit, zizmor, the n8n workflow lint, and the
+configuration and image-digest drift checks. A self-assessed mapping to OWASP ASVS
+5.0 is in [ASVS.md](docs/ASVS.md). Know the following before you deploy it:
 
 * **Reviews were AI-assisted**, not independent: adversarial code review,
   due-diligence and traceability audits, and test-driven reviews, all carried out
   with Claude Code. Every finding and its fix is in
   [SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md). No third-party penetration test
   has been done.
-* **The container stack was not run in the development environment** (no Docker
-  there); its startup was reviewed statically instead. CI builds and scans both
-  images, runs the end-to-end suite against the full Compose stack behind the TLS
-  edge and tests a backup and restore; check the latest run's result on the
-  repository before relying on it. Do a clean-host dry run first.
+* **The full stack runs in CI, not yet on a customer-like host.** There is no
+  Docker in the development environment. Every CI run builds and scans both images,
+  starts the whole Compose stack behind the TLS edge, runs the end-to-end suite,
+  backs the stack up, changes it, restores it and verifies the audit chains, and
+  scans every API operation with OWASP ZAP. The first such run found three
+  deployment defects that the static startup review had missed - all fixed (R11 in
+  [SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md)). Do a clean-host dry run before
+  production.
 * A real n8n and a real Chromium are not exercised by the tests. The n8n
   workflows are generated and linted; the browser's guard and pinning egress
   proxy are tested. The platform runs fully without n8n (`internal` mode, the
