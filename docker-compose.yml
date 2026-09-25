@@ -92,7 +92,7 @@ services:
   # ------------------------------------------------------------------ edge
   nginx:
     <<: *hardened
-    image: ${NGINX_IMAGE:-nginxinc/nginx-unprivileged:1.30-alpine@sha256:4714e0b1b2577eaa1a6131d07c958b67f0eb68e6d0521e90c6e5287db8cf0bc5}
+    image: ${NGINX_IMAGE:-nginxinc/nginx-unprivileged:1.30-alpine-slim@sha256:307ca0bded4dda86dade6f5bd2a2551601bec9bac3fd73a21613fabcd9eca66a}
     tmpfs: ["/tmp:size=32m,noexec,nosuid,nodev"]
     ports:
       # IPv4 only: an IPv6 client would reach nginx through Docker's userland

@@ -367,7 +367,7 @@ images and Trivy scans every third-party image the stack runs; the few findings
 that no upstream release fixes yet, and that cannot be reached here, are listed
 with their reasons in `.trivyignore.yaml` (see SECURITY.md). Override an image on
 purpose with its variable, digest included, e.g.
-`NGINX_IMAGE=nginxinc/nginx-unprivileged:1.30-alpine@sha256:<digest>`.
+`NGINX_IMAGE=nginxinc/nginx-unprivileged:1.30-alpine-slim@sha256:<digest>`.
 
 ## 11. Upgrades
 

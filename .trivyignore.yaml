@@ -2,16 +2,66 @@
 # checked again (Trivy reports it once more after `expired_at`). Policy
 # (SECURITY.md, "Third-party images"): upgrade the image first
 # (make pin-images); an entry is only for a finding that the newest upstream
-# release still carries AND that cannot be reached in this deployment.
+# release of the line in use still carries AND that cannot be reached in this
+# deployment.
 vulnerabilities:
+  # gRPC-Go: denial of service against a gRPC *server* (malformed requests;
+  # memory exhaustion through fragmented HTTP/2 DATA frames). Prometheus and
+  # Alertmanager serve no gRPC: both link gRPC-Go only for their optional OTLP
+  # trace exporter, a client (tracing/tracing.go in each repository), and
+  # tracing is not configured here. Prometheus stays on its long-term-support
+  # line (3.13); 3.15 already ships gRPC-Go 1.83.2. Drop these entries once
+  # the releases in use ship 1.83.2 or later.
   - id: CVE-2026-84445
     paths:
       - bin/alertmanager
       - bin/amtool
+      - bin/prometheus
+      - bin/promtool
     statement: >-
-      prom/alertmanager v0.34.1, the newest release, links gRPC-Go 1.83.1 only
-      for its optional OTLP trace exporter - a client (tracing/tracing.go). It
-      serves no gRPC, so a malformed-request denial of service against a gRPC
-      server cannot reach it, and tracing is not configured here. Drop this
-      entry once a release ships gRPC-Go 1.83.2 or later.
+      Server-side gRPC denial of service; Prometheus 3.13.3 and Alertmanager
+      0.34.1 (the newest of their lines) use gRPC only as a trace-export
+      client, which is not configured.
     expired_at: 2026-11-30
+  - id: CVE-2026-84304
+    paths:
+      - bin/prometheus
+      - bin/promtool
+    statement: >-
+      Server-side gRPC memory exhaustion; Prometheus 3.13.3 serves no gRPC
+      (trace-export client only, not configured).
+    expired_at: 2026-11-30
+
+  # Grafana 12.4.11, the newest release of the maintained 12.4 line, reached
+  # by operators only (SSH tunnel), with the Prometheus data source alone.
+  - id: CVE-2026-14456
+    purls:
+      - pkg:apk/alpine/libcrypto3
+    paths:
+      - grafana/grafana
+    statement: >-
+      OpenSSL denial of service. Grafana is a Go program and terminates TLS
+      with Go's own library; no process in the container uses OpenSSL.
+    expired_at: 2026-10-31
+  - id: CVE-2026-43871
+    paths:
+      - usr/share/grafana/bin/grafana
+    statement: >-
+      Apache Thrift decoding loop, reachable only through a Jaeger, Zipkin or
+      Tempo data source; only the Prometheus data source is provisioned, and
+      only administrators could add another.
+    expired_at: 2026-10-31
+  - id: CVE-2026-21728
+    paths:
+      - usr/share/grafana/bin/grafana
+    statement: >-
+      A Tempo server issue in the Tempo packages Grafana links for its Tempo
+      data source, which is not configured.
+    expired_at: 2026-10-31
+  - id: CVE-2026-28377
+    paths:
+      - usr/share/grafana/bin/grafana
+    statement: >-
+      Tempo's S3 credential disclosure concerns a Tempo server; Grafana links
+      Tempo packages only for its Tempo data source, which is not configured.
+    expired_at: 2026-10-31

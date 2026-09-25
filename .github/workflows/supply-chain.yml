@@ -51,6 +51,10 @@ jobs:
     needs: third-party-images
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # n8n is optional (a Compose profile) and ships its own dependency tree,
+    # whose findings only n8n can fix: its scan is reported, not a failure of
+    # the run (SECURITY.md, "Third-party images").
+    continue-on-error: ${{ startsWith(matrix.image, 'n8nio/n8n:') }}
     strategy:
       fail-fast: false
       matrix:

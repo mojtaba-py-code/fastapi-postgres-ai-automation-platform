@@ -135,7 +135,10 @@ week, and a weekly job scans every third-party image the stack runs as it is
 the image. Only when the newest upstream release still carries it *and* it cannot
 be reached in this deployment is it accepted, in
 [`.trivyignore.yaml`](.trivyignore.yaml), with its reason and the date by which it
-is checked again.
+is checked again. n8n is the exception: optional, and shipping a large dependency
+tree of its own, its image regularly carries findings only n8n can fix. They are
+reported every week without failing the run; enable n8n only when you use it
+(it is a Compose profile) and keep it on its current release.
 
 ## Review status
 
