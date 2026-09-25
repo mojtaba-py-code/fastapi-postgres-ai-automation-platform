@@ -65,7 +65,11 @@ rejected with `422 invalid_cursor`.
 **Idempotency**: `POST /sources/{id}/runs`, `POST /workflows/{id}/runs`,
 `POST /intelligence/analyses` and `POST /reports` accept an `Idempotency-Key` header
 (8 to 128 characters of `[A-Za-z0-9._:-]`). A repeat with the same key returns
-`200` with the original resource instead of `202` with a new one.
+`200` with the original resource instead of `202` with a new one. A key belongs to
+the request it started: sending it with a different request (another source,
+workflow, dataset or report period) answers `409 idempotency_key_reused`. Keys are
+honoured for `retention.idempotency_keys_hours` (24 by default) and released
+within a day after that.
 
 **Rate limits** (defaults, per principal unless noted):
 
@@ -170,7 +174,7 @@ headers = {
 
 | Response | Meaning |
 |---|---|
-| `202 {"status": "accepted", "run_id": …}` | Queued for processing |
+| `202 {"status": "accepted", "run_id": …, "truncated": false}` | Queued for processing; `truncated: true` means items beyond the source's `max_items` were not taken |
 | `200 {"status": "duplicate"}` | Already received **and stored**; safe to stop retrying |
 | `401 invalid_signature` | Bad signature, stale timestamp or unknown endpoint (indistinguishable) |
 | `409 delivery_in_progress` | An earlier attempt with this delivery id has not finished; retry later with the same id |
