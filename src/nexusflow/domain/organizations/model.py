@@ -47,6 +47,10 @@ class OrganizationSettings(BaseModel):
                 network = ipaddress.ip_network(raw.strip(), strict=False)
             except ValueError as exc:
                 raise ValueError(f"invalid network: {raw[:60]!r}") from exc
+            mapped = getattr(network.network_address, "ipv4_mapped", None)
+            if mapped is not None and network.prefixlen >= 96:
+                # Clients are matched as IPv4 (see allows_ip): so are such networks.
+                network = ipaddress.ip_network(f"{mapped}/{network.prefixlen - 96}")
             if network.prefixlen == 0:
                 raise ValueError("0.0.0.0/0 and ::/0 would allow everyone; leave the list empty")
             networks.add(network)

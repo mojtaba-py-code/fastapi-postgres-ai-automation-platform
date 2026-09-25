@@ -66,6 +66,17 @@ def test_an_ipv4_client_seen_through_an_ipv6_socket_is_matched_as_ipv4() -> None
     assert not policy.allows_ip("::ffff:198.51.100.9")
 
 
+def test_an_ipv4_network_written_in_ipv6_notation_is_stored_as_ipv4() -> None:
+    # Copied from a log of an IPv6 socket: it must match IPv4 clients, not nothing.
+    policy = _policy("::ffff:203.0.113.0/120", "::ffff:198.51.100.7")
+
+    assert policy.allowed_ip_ranges == ["198.51.100.7/32", "203.0.113.0/24"]
+    assert policy.allows_ip("203.0.113.9")
+    assert policy.allows_ip("::ffff:198.51.100.7")
+    with pytest.raises(ValidationError, match="allow everyone"):
+        _policy("::ffff:0.0.0.0/96")  # all of IPv4
+
+
 @pytest.mark.parametrize("unknown", [None, "", "unknown", "203.0.113.1, 10.0.0.1", "not-an-ip"])
 def test_an_unknown_address_is_refused_once_a_list_exists(unknown: str | None) -> None:
     # Fails closed: a request whose origin cannot be established is not let in.

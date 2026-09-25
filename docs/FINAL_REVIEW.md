@@ -77,12 +77,12 @@ with evidence and the remaining gaps, is in [ASVS.md](ASVS.md).
 
 | Layer | Tests | What they exercise |
 |---|---|---|
-| Unit | 1,348 | Crypto, tokens, SSRF guard, log redaction, network allowlists, the edge configuration (nginx), alert rules against the exported metrics, the DAST gate, script modes in git, all adapters (scraping, robots.txt, collectors, senders, AI provider, ClamAV, n8n client), the core chain (detection, alert rules, offline analysis, property-based tests), pipeline stages, reports and analytics, sign-in risk, request correlation, hostile uploads (hand-built zip bombs, traversal, macros, XXE, sparse sheets), the rate limiter, TLS client configuration, worker policy and liveness, n8n generator and lint, configuration and broker consistency |
+| Unit | 1,349 | Crypto, tokens, SSRF guard, log redaction, network allowlists, the edge configuration (nginx), alert rules against the exported metrics, the DAST gate, script modes in git, all adapters (scraping, robots.txt, collectors, senders, AI provider, ClamAV, n8n client), the core chain (detection, alert rules, offline analysis, property-based tests), pipeline stages, reports and analytics, sign-in risk, request correlation, hostile uploads (hand-built zip bombs, traversal, macros, XXE, sparse sheets), the rate limiter, TLS client configuration, worker policy and liveness, n8n generator and lint, configuration and broker consistency |
 | Integration | 147 | Real PostgreSQL with production roles (RLS really enforced): identity and sign-in risk, database security, the business API and change analytics, the core chain end to end with the real worker handlers, crash recovery, data lifecycle, workflows, request correlation, backup and restore (`pg_dump`/`pg_restore` with the production roles), the CLI, and the demo walkthrough over real HTTP |
 | Security | 97 | Authentication, authorization, an IDOR sweep over every resource route, API-key lifecycle, login locking, session management, network allowlists (members, API keys, sign-in, anti-lockout, operator recovery), every rate-limit scope and its failure policy, hostile uploads through the API, input handling, headers, error leakage |
 | End to end | 13 | The business scenario and the edge's security properties (headers on every response, JSON errors, hidden paths, body limits, tenant isolation) against the running Compose stack (CI), followed by a backup, restore and audit verification and a DAST scan; skipped without a stack |
 
-* The last full run: 1,592 passed (the 13 end-to-end tests run in CI against the
+* The last full run: 1,593 passed (the 13 end-to-end tests run in CI against the
   stack); line and branch coverage 87 %, with a CI floor of 80 %.
 * Defects found by writing tests were pinned as strict expected failures first,
   then fixed.

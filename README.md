@@ -143,7 +143,7 @@ tests/             unit, integration (real PostgreSQL), security and end-to-end 
 
 ## Status and honest limitations
 
-A complete, tested reference implementation: 1,592 tests (unit,
+A complete, tested reference implementation: 1,593 tests (unit,
 integration against a real PostgreSQL, security, and a walkthrough over real
 HTTP) pass with 87 % line and branch coverage, plus 13 end-to-end tests that CI
 runs against the full stack; every quality gate is green - Ruff, mypy `--strict`,
