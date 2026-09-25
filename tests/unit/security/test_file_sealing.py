@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import os
+import time
 from collections.abc import AsyncIterator, Callable
+from datetime import timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -124,10 +126,48 @@ async def test_a_file_copied_under_another_key_does_not_open(tmp_path: Path) -> 
         await _read(storage, copy)
 
 
-async def test_files_written_before_sealing_still_read(tmp_path: Path) -> None:
+async def test_a_file_without_the_sealed_header_is_refused(tmp_path: Path) -> None:
+    # Every file the platform stores is sealed (no release stored plaintext), so a
+    # file without the header was put there by someone else: it is never served.
     key = _key()
-    await LocalFileStorage(tmp_path).save_bytes(key, b"legacy plaintext")
-    assert await _read(_storage(tmp_path), key) == b"legacy plaintext"
+    await LocalFileStorage(tmp_path).save_bytes(key, b"SKU,Title\r\nA-1,Planted\r\n")
+    with pytest.raises(DecryptionError):
+        await _read(_storage(tmp_path), key)
+    with pytest.raises(DecryptionError):
+        async with _storage(tmp_path).plaintext(key):
+            pass
+
+
+async def test_a_sealed_file_replaced_by_plaintext_is_refused(tmp_path: Path) -> None:
+    storage = _storage(tmp_path)
+    key = f"reports/{ORG}/{uuid4()}.json"
+    await storage.save_bytes(key, b'{"genuine": true}')
+    storage.local_path(key).write_bytes(b'{"forged": true}')  # write access to the volume
+    with pytest.raises(DecryptionError):
+        await _read(storage, key)
+
+
+async def test_without_a_sealer_files_are_stored_and_read_as_they_are(tmp_path: Path) -> None:
+    storage, key = LocalFileStorage(tmp_path), _key()
+    await storage.save_bytes(key, b"plain")
+    assert await _read(storage, key) == b"plain"
+
+
+async def test_stale_plaintext_copies_are_purged(tmp_path: Path) -> None:
+    storage = _storage(tmp_path)
+    key = _key()
+    await storage.save_bytes(key, b"SKU\r\nA-1\r\n")
+    async with storage.plaintext(key) as abandoned:  # a worker killed while scanning...
+        stale = abandoned.with_name("left-behind.csv")
+        stale.write_bytes(abandoned.read_bytes())
+    hour_ago = time.time() - 3700
+    os.utime(stale, (hour_ago, hour_ago))
+    async with storage.plaintext(key) as in_use:  # ...and a scan in progress
+        assert await storage.purge_scratch(older_than=timedelta(hours=1)) == 1
+        assert in_use.exists()
+    assert not stale.exists()
+    assert await storage.purge_scratch(older_than=timedelta(0)) == 0
+    assert await LocalFileStorage(tmp_path / "empty").purge_scratch() == 0
 
 
 async def test_a_sealed_file_never_opens_without_a_sealer(tmp_path: Path) -> None:

@@ -9,7 +9,11 @@
 * Size limits are enforced while streaming, not from ``Content-Length``.
 * With a ``FileSealer`` every file is encrypted at rest (streaming AES-256-GCM,
   ``infrastructure.security.files``); size and SHA-256 describe the plaintext.
-  Files written before sealing was enabled are still read as they are.
+  A file without the sealed header is refused (fail closed): no release ever
+  stored files unencrypted, so such a file was put there by someone else.
+* Plaintext copies for inspection live in ``.scratch`` only while they are
+  used; copies a killed process left behind are purged at start-up and by the
+  retention job (:meth:`LocalFileStorage.purge_scratch`).
 
 Swap for an S3-compatible implementation of the same port in cloud deployments.
 """
@@ -22,8 +26,10 @@ import os
 import re
 import secrets
 import shutil
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -36,12 +42,14 @@ _KEY = re.compile(
     r"^(uploads|reports)/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/"
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(csv|xlsx|json|pdf)$"
 )
+SCRATCH_MAX_AGE = timedelta(hours=1)
 
 
 class LocalFileStorage:
     def __init__(self, root: Path, sealer: FileSealer | None = None) -> None:
         self._root = root.resolve()
         self._sealer = sealer
+        self._scratch = self._root / ".scratch"
 
     def local_path(self, key: str) -> Path:
         if not _KEY.fullmatch(key):
@@ -98,7 +106,10 @@ class LocalFileStorage:
                     if plain:
                         yield plain
                 return
-            if head:  # written before sealing was enabled
+            if self._sealer is not None:
+                # Fail closed: a planted or swapped plaintext file is never served.
+                raise DecryptionError(internal_detail="stored file is not sealed")
+            if head:
                 yield head
             while chunk := await asyncio.to_thread(handle.read, chunk_size):
                 yield chunk
@@ -109,7 +120,7 @@ class LocalFileStorage:
     async def plaintext(self, key: str) -> AsyncIterator[Path]:
         """A private (0600) plaintext copy under ``.scratch``, removed on exit."""
         self.local_path(key)  # validates the key
-        scratch = self._root / ".scratch"
+        scratch = self._scratch
         await asyncio.to_thread(self._prepare_dir, scratch)
         temp = scratch / f"{secrets.token_hex(16)}{Path(key).suffix}"
         fd = await asyncio.to_thread(os.open, temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -120,6 +131,12 @@ class LocalFileStorage:
             yield temp
         finally:
             await asyncio.to_thread(temp.unlink, missing_ok=True)
+
+    async def purge_scratch(self, *, older_than: timedelta = SCRATCH_MAX_AGE) -> int:
+        """Remove plaintext copies older than ``older_than`` - left behind by a
+        process killed while it inspected a file. Copies in use are younger:
+        inspection and scanning take seconds, never an hour."""
+        return await asyncio.to_thread(_remove_older_than, self._scratch, older_than)
 
     async def rewrap(self, org_id: UUID, *, limit: int) -> int:
         """Re-wrap the file keys of up to ``limit`` of a tenant's files under the
@@ -175,3 +192,16 @@ class LocalFileStorage:
 
 def _files_in(directory: Path) -> list[Path]:
     return sorted(p for p in directory.iterdir() if p.is_file()) if directory.is_dir() else []
+
+
+def _remove_older_than(directory: Path, age: timedelta) -> int:
+    cutoff = time.time() - age.total_seconds()
+    removed = 0
+    for path in _files_in(directory):
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+        except FileNotFoundError:
+            continue  # removed meanwhile by its owner
+    return removed

@@ -425,8 +425,9 @@ async def _each_tenant(c: Container, work: Callable[[UUID], Awaitable[Any]], tas
 async def apply_retention(deps: WorkerDeps, msg: Empty) -> None:
     await _each_tenant(deps.container, deps.container.maintenance.apply_retention, "retention")
     purged = await deps.container.maintenance.apply_platform_retention()
-    if purged:
-        _log.info("platform_retention", dead_letters=purged)
+    scratch = await deps.container.maintenance.purge_scratch()
+    if purged or scratch:
+        _log.info("platform_retention", dead_letters=purged, scratch_files=scratch)
 
 
 async def reap_stuck_work(deps: WorkerDeps, msg: Empty) -> None:

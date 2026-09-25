@@ -106,6 +106,10 @@ def create_app(
         )
         for warning in settings.security_warnings():
             _log.warning("security_posture", warning=warning)
+        if mode == "public":  # the public API inspects uploads through plaintext copies
+            scratch = await built.storage.purge_scratch()
+            if scratch:
+                _log.warning("stale_plaintext_copies_removed", count=scratch)
         _log.info("api_started", mode=mode, version=__version__)
         try:
             yield

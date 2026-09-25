@@ -39,6 +39,10 @@ class FileStorage(Protocol):
         """A private plaintext copy of a stored file, removed on exit."""
         ...
 
+    async def purge_scratch(self) -> int:
+        """Remove plaintext copies a killed process left behind; returns how many."""
+        ...
+
     def stream(self, key: str, *, chunk_size: int = 64 * 1024) -> AsyncIterator[bytes]: ...
 
     async def rewrap(self, org_id: UUID, *, limit: int) -> int:

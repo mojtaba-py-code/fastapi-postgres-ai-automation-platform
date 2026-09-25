@@ -135,6 +135,10 @@ class MaintenanceService:
             await uow.commit()
         return purged
 
+    async def purge_scratch(self) -> int:
+        """Remove plaintext copies of stored files a killed process left behind."""
+        return await self._storage.purge_scratch()
+
     async def reap(self, org_id: UUID) -> MaintenanceReport:
         """Recover work stuck by crashed workers (idempotent re-queue)."""
         now = self._clock.now()
