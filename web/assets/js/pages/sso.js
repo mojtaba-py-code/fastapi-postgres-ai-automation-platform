@@ -11,6 +11,7 @@ import {
   confirmDialog,
   copyButton,
   definitionList,
+  errorMessage,
   field,
   form,
   h,
@@ -156,7 +157,7 @@ function scimSection(app) {
       ),
     );
   };
-  render().catch((error) => mount(body, notice(error.message, { kind: "danger" })));
+  render().catch((error) => mount(body, notice(errorMessage(error), { kind: "danger" })));
   return section(
     "SCIM provisioning",
     { description: "Let your identity provider create, update and deactivate members (viewer or analyst; never owners). Tokens work on /scim/v2 only, for this organization." },

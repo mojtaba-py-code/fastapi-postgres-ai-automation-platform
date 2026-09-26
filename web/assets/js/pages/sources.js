@@ -8,6 +8,7 @@ import {
   button,
   confirmDialog,
   definitionList,
+  errorMessage,
   field,
   form,
   h,
@@ -307,6 +308,6 @@ function endpointsSection(app, source) {
         ),
     );
   };
-  render().catch((error) => mount(body, notice(error.message, { kind: "danger" })));
+  render().catch((error) => mount(body, notice(errorMessage(error), { kind: "danger" })));
   return section("Endpoints", { description: "Senders post signed deliveries here. Unsigned, stale or replayed deliveries are refused." }, body);
 }

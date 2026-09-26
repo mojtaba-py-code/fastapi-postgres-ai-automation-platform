@@ -14,6 +14,7 @@ import {
   confirmDialog,
   copyButton,
   definitionList,
+  errorMessage,
   field,
   form,
   formDialog,
@@ -147,7 +148,7 @@ function passkeysSection(app) {
       ),
     );
   };
-  render().catch((error) => mount(body, notice(error.message, { kind: "danger" })));
+  render().catch((error) => mount(body, notice(errorMessage(error), { kind: "danger" })));
 
   const add = passkeysSupported()
     ? button("Add a passkey", async () => {
@@ -318,7 +319,7 @@ function sessionsTab(app) {
       ),
     );
   };
-  render().catch((error) => mount(body, notice(error.message, { kind: "danger" })));
+  render().catch((error) => mount(body, notice(errorMessage(error), { kind: "danger" })));
   return section(
     "Signed-in sessions",
     {

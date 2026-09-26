@@ -79,6 +79,14 @@ def test_no_script_turns_data_into_html_or_code(path: Path) -> None:
 
 
 @pytest.mark.parametrize("path", SCRIPTS, ids=lambda path: path.name)
+def test_failures_are_shown_with_the_consoles_guidance(path: Path) -> None:
+    # errorMessage() says what to do (rate limits, passkey policies, a lost
+    # connection); a section that showed error.message told a person only that
+    # the edge had had "too many requests".
+    assert not re.search(r"notice\(\s*error\.message\b", _code(path)), path.name
+
+
+@pytest.mark.parametrize("path", SCRIPTS, ids=lambda path: path.name)
 def test_scripts_import_only_the_consoles_own_modules(path: Path) -> None:
     for target in re.findall(
         r"""^\s*(?:import|export)\b[^;]*?from\s+["']([^"']+)["']""",

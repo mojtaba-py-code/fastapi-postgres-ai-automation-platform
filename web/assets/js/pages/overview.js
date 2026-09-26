@@ -5,7 +5,7 @@ import { changeVolumeChart } from "../chart.js";
 import { projectChoice } from "../choices.js";
 import { formatNumber, humanize } from "../format.js";
 import { href } from "../router.js";
-import { badge, button, deferred, emptyState, h, link, mount, notice, pageHeader, section, select, table, time } from "../ui.js";
+import { badge, button, deferred, emptyState, errorMessage, h, link, mount, notice, pageHeader, section, select, table, time } from "../ui.js";
 
 const PAGE = 200;
 
@@ -100,7 +100,7 @@ function activity(app) {
           analytics.trend_note && h("p", { class: "muted" }, analytics.trend_note),
         );
       } catch (error) {
-        mount(chart, notice(error.message, { kind: "danger" }));
+        mount(chart, notice(errorMessage(error), { kind: "danger" }));
       } finally {
         chart.classList.remove("refreshing");
       }
@@ -108,7 +108,7 @@ function activity(app) {
     chooser.addEventListener("change", load);
     mount(body, h("div", { class: "toolbar" }, chooser), chart);
     await load();
-  })().catch((error) => mount(body, notice(error.message, { kind: "danger" })));
+  })().catch((error) => mount(body, notice(errorMessage(error), { kind: "danger" })));
   return container;
 }
 

@@ -10,6 +10,7 @@ import {
   deferred,
   definitionList,
   emptyState,
+  errorMessage,
   field,
   form,
   h,
@@ -226,7 +227,7 @@ function insightsSection(app, dataset) {
         : emptyState("No analyses yet.", app.can("insights:generate") ? "Ask for one: the platform summarises the dataset's recent changes." : null),
     );
   };
-  refresh().catch((error) => mount(body, notice(error.message, { kind: "danger" })));
+  refresh().catch((error) => mount(body, notice(errorMessage(error), { kind: "danger" })));
   return section(
     "AI analyses",
     {
