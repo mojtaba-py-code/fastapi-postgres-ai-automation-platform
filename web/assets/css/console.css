@@ -281,6 +281,7 @@ legend { font-weight: 600; padding: 0 4px; }
 .table td .button, .card-header .button { margin-block: -7px; }
 .table tbody tr:hover { background: color-mix(in srgb, var(--surface-2) 60%, transparent); }
 .table .actions { text-align: right; white-space: nowrap; }
+.table time { white-space: nowrap; } /* "2 weeks ago" on one line */
 .table.compact td, .table.compact th { padding: 6px 10px; }
 .table-more { display: flex; justify-content: center; padding: 12px; }
 .table .json { max-height: 160px; }
