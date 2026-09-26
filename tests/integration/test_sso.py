@@ -932,7 +932,7 @@ class TestMfa:
         reasons = [json.loads(row["metadata"])["reason"] for row in refusals]
         assert reasons == ["signature_invalid"] * container.settings.security.lockout_threshold
 
-    async def test_a_sso_sign_in_leaves_the_failure_counter_as_it_is(
+    async def test_only_the_accounts_own_second_factor_resets_the_failure_counter(
         self, api: httpx2.AsyncClient, network: FakeNetwork, admin_conn: asyncpg.Connection
     ) -> None:
         domain = fresh_domain()
@@ -945,17 +945,15 @@ class TestMfa:
         wrong = await _passkey_step(api, token, authenticator, tamper="signature")
         expect_error(wrong, 401, "mfa_failed")
         assert await _failures_of(admin_conn, alice.email) == 1  # the platform's step counts
+        # A provider's sign-in proves none of the account's factors, so it resets
+        # nothing - here another organization's, which does not require MFA.
+        other = FakeIdp()
+        other_slug = await ready(await signup(api), network, other, domain)
+        session_of(api, await sign_in(api, other, other_slug, email=alice.email), alice.email)
+        assert await _failures_of(admin_conn, alice.email) == 1
+        # The account's own second factor completes a sign-in: the count starts afresh.
         token = (await sign_in(api, idp, slug, email=alice.email)).json()["mfa_token"]
         assert (await _passkey_step(api, token, authenticator)).status_code == 200
-        # A completed single sign-on is no proof the guessing stopped: it resets nothing.
-        assert await _failures_of(admin_conn, alice.email) == 1
-        # A completed password sign-in does.
-        login = await api.post(
-            "/api/v1/auth/login", json={"email": alice.email, "password": PASSWORD}
-        )
-        assert login.status_code == 200, login.text
-        completed = await _passkey_step(api, login.json()["mfa_token"], authenticator)
-        assert completed.status_code == 200, completed.text
         assert await _failures_of(admin_conn, alice.email) == 0
 
 

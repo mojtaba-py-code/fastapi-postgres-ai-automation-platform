@@ -627,7 +627,7 @@ class AuthService:
             )
             await uow.commit()
             raise refusal.error from None
-        return await self.complete_sso_sign_in(
+        tokens = await self.complete_sso_sign_in(
             uow,
             user=user,
             org_id=org_id,
@@ -639,6 +639,11 @@ class AuthService:
             new_account=False,
             mfa_method=mfa_method,
         )
+        # The account's own second factor was proved: a completed sign-in, so
+        # the failure count starts afresh, as after a password sign-in (R13-6) -
+        # only now, after the sign-in's risk assessment has seen the failures.
+        user.register_successful_login(now)
+        return tokens
 
     async def sso_mfa_challenge(
         self, uow: UnitOfWork, user: User, org_id: UUID, now: datetime
@@ -675,12 +680,12 @@ class AuthService:
         organization. Sign-in risk and the new-device notice work as for a
         password (not for an account created by this very sign-in).
 
-        The account's failure counter is left as it is - neither obeyed nor
-        reset: a provider's sign-in is no proof that someone guessing the
-        password or the second factor stopped (a completed password sign-in
-        resets it). The platform's own second factor after a single sign-on
-        does count: a wrong code or a refused passkey adds to the counter, and
-        a locked account cannot complete it. ``uow`` is scoped to ``org_id``."""
+        A provider's sign-in leaves the account's failure counter as it is -
+        neither obeyed nor reset: it proves none of the account's own factors.
+        The platform's own second factor after a single sign-on does count: a
+        wrong code or a refused passkey adds to the counter, a locked account
+        cannot complete it, and completing it starts the count afresh, as a
+        completed password sign-in does. ``uow`` is scoped to ``org_id``."""
         assessment = None if new_account else await self._assess_login(uow, user, meta, now)
         user.last_login_at = now
         user.updated_at = now
