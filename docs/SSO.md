@@ -190,9 +190,12 @@ A session opened by single sign-on is **bound to that organization**:
   and the personal-data export (which covers every organization) is refused
   (`403 sso_session_restricted`); password changes, MFA and account deletion still
   need the account's password;
-* it ends when the member leaves the organization (a refresh revokes it), when the
-  organization removes or replaces its provider, and on every per-request check the
-  platform already makes (session, membership, role, organization status, network).
+* it stops working when the member leaves the organization (every request checks
+  the membership, and the next refresh revokes the session - if the member is added
+  back before that refresh, it works again, as a password session would); it ends
+  when the organization removes or replaces its provider; and it is subject to every
+  per-request check the platform already makes (session, membership, role,
+  organization status, network).
 
 So one tenant's identity provider never opens another tenant's data, whatever it
 asserts - even for a person who belongs to both.
@@ -286,7 +289,8 @@ How it behaves:
 * **Deprovisioning**: `active: false` - or `DELETE /Users/{id}` - removes the
   membership and revokes the member's API keys in the organization, exactly like
   removing a member; the member's sessions lose the organization at once (every
-  request checks the membership) and sessions its provider opened end. The account
+  request checks the membership), so a session its provider opened can reach
+  nothing more - and its next refresh revokes it. The account
   itself is **never deleted** (it may belong to other organizations). `active: true`
   makes the person a member again, with `default_role`. `DELETE` also removes the
   entry (`GET` answers `404` afterwards).
