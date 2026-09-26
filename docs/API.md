@@ -34,10 +34,12 @@ Other authentication endpoints:
 * sign-out: `/auth/logout`, `/auth/logout-all`;
 * passwords: `/auth/password/change`, `/auth/password/reset-request`,
   `/auth/password/reset`;
-* MFA: `/auth/mfa/enroll`, `/auth/mfa/confirm`, `/auth/mfa/disable` (turns every
-  second factor off: the authenticator app, all passkeys and the recovery codes -
-  for a member of an organization that requires passkeys, only from a session that
-  signed in with one: `403 passkey_session_required`);
+* MFA: `/auth/mfa/enroll`, `/auth/mfa/confirm` (for a member of an organization
+  that requires passkeys who has one, only from a session that signed in with one:
+  `403 passkey_session_required`), `/auth/mfa/disable` (turns every second factor
+  off: the authenticator app, all passkeys and the recovery codes - for a member of
+  an organization that requires passkeys, only from a session that signed in with
+  one: `403 passkey_session_required`);
 * organizations: `/auth/switch-organization`, `/auth/invitations/accept`;
 * single sign-on: `/auth/sso/start`, `/auth/sso/callback`.
 

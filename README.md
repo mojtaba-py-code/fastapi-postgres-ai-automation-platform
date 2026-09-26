@@ -165,7 +165,8 @@ tests/             unit, integration (real PostgreSQL), security and end-to-end 
 
 A complete, tested reference implementation: 2,531 tests (unit,
 integration against a real PostgreSQL, security, and a walkthrough over real
-HTTP) pass with 89 % line and branch coverage, plus 26 end-to-end tests and a
+HTTP) pass with 90 % line and branch coverage (each platform skips one
+platform-specific test), plus 26 end-to-end tests and a
 real-browser run of the web console (passkeys included) that CI runs against the
 full stack, and the console's 36 Node tests; every quality gate is green - Ruff, mypy `--strict`,
 import-linter, Bandit, pip-audit, zizmor, the n8n workflow lint, and the

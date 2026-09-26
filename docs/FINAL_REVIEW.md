@@ -98,8 +98,12 @@ and the remaining gaps, is in [ASVS.md](ASVS.md).
 | End to end | 26 | The business scenario, the monitoring stack, the edge's security properties (headers on every response, JSON errors, hidden paths, body limits, tenant isolation) and the web console through the edge (its document, policy, headers and assets) against the running Compose stack (CI), followed by a backup, restore and audit verification and a DAST scan; skipped without a stack |
 | Web console | 36 + a browser run | Node's own runner: the API client (token refresh, errors, no cookies), routing and entry points, the session store, WebAuthn conversions, the QR encoder, page helpers. In CI, a real Chromium drives the console against the stack - sign-up from the e-mailed link, the main pages, and passkeys through the browser's own WebAuthn with a virtual authenticator - failing on any console error, CSP violation or failed request |
 
-* The last full run: 2,531 passed (the 26 end-to-end tests and the browser run
-  in CI against the stack); line and branch coverage 89 %, with a CI floor of 80 %.
+* The last full runs: 2,530 of the 2,531 passed on Linux (CI) and on Windows
+  alike, each skipping one platform-specific test - on CI's runner the backup
+  round trip, whose PostgreSQL client tools are older than the server (the
+  end-to-end job backs the stack up and restores it instead), on Windows the
+  POSIX file modes. The 26 end-to-end tests and the browser run pass in CI against
+  the stack. Line and branch coverage 90 % (CI), with a CI floor of 80 %.
 * Defects found by writing tests were pinned as strict expected failures first,
   then fixed.
 * Not covered by automated tests: the workflows running inside a real n8n (CI
