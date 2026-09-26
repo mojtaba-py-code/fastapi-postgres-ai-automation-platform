@@ -173,6 +173,8 @@ jobs:
           touch secrets/vault_secret_id secrets/vault_ca.pem
           $COMPOSE -f docker-compose.vault.yml config --quiet
           rm secrets/vault_secret_id secrets/vault_ca.pem
+      - name: The single sign-on overlay is valid
+        run: $COMPOSE -f docker-compose.sso.yml config --quiet
       - name: Edge configuration is valid (nginx -t)
         run: $COMPOSE run --rm --no-deps --entrypoint nginx nginx -t
       - name: Start the stack
