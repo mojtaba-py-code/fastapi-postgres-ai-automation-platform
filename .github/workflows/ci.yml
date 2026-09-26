@@ -257,10 +257,13 @@ jobs:
           # Safe mode (-S): every operation is requested as a signed-in owner and the
           # responses are scanned passively - no attack payloads. The gate fails on
           # any alert of Medium risk or higher that is not accepted with a reason.
+          # A fixed proxy port (-P) below the host's ephemeral range: left to pick
+          # one, ZAP chose an ephemeral port and bound it only after downloading
+          # add-on updates, by which time an outgoing connection could hold it.
           docker run --rm --network host -v "$ZAP_DIR:/zap/wrk:rw" \
             -e ZAP_AUTH_HEADER_VALUE="Bearer $token" -e ZAP_AUTH_HEADER_SITE=localhost \
             "$ZAP_IMAGE" zap-api-scan.py -t openapi.json -f openapi -O https://localhost -S -I \
-            -r zap-report.html -J zap-report.json
+            -P 18080 -r zap-report.html -J zap-report.json
           python3 scripts/zap_gate.py "$ZAP_DIR/zap-report.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: ${{ !cancelled() }}
