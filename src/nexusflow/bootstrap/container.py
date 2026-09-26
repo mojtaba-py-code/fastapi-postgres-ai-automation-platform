@@ -31,6 +31,7 @@ from nexusflow.domain.identity.auth_service import AuthPolicy, AuthService
 from nexusflow.domain.identity.authenticator import Authenticator
 from nexusflow.domain.identity.password_policy import PasswordPolicy
 from nexusflow.domain.identity.privacy import PrivacyService
+from nexusflow.domain.identity.provisioning import ProvisioningService
 from nexusflow.domain.identity.security_emails import SecurityEmailService
 from nexusflow.domain.identity.service_accounts import ServiceAccountService
 from nexusflow.domain.identity.sso_service import SsoPolicy, SsoService
@@ -126,6 +127,7 @@ class Container:
     security_emails: SecurityEmailService
     service_accounts: ServiceAccountService
     sso: SsoService
+    provisioning: ProvisioningService
     closers: list[Callable[[], Awaitable[None]]] = field(default_factory=list)
 
     async def aclose(self) -> None:
@@ -459,6 +461,9 @@ def build_container(
             uow_factory=uow_factory, clock=clock, audit=audit, token_hasher=token_hasher
         ),
         sso=sso,
+        provisioning=ProvisioningService(
+            uow_factory=uow_factory, clock=clock, audit=audit, token_hasher=token_hasher
+        ),
     )
     container.closers.append(engine.dispose)
     container.closers.append(http_client.aclose)

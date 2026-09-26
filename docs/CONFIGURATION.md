@@ -280,6 +280,7 @@ Default rules. `NEXUSFLOW_RATE_LIMITS__RULES` is a JSON object merged over these
 | `external_api.integration` | 60 | 60 | allow (fail open) |
 | `notifications.channel` | 30 | 60 | allow (fail open) |
 | `sandbox.gateway` | 600 | 60 | allow (fail open) |
+| `scim.token` | 600 | 60 | reject (fail closed) |
 | `webhook.endpoint` | 120 | 60 | reject (fail closed) |
 | `webhook.ip` | 600 | 60 | reject (fail closed) |
 

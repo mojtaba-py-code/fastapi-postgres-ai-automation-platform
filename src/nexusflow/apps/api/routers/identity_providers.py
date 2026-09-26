@@ -1,17 +1,23 @@
-"""/api/v1/organizations/current/sso - an organization's identity provider
-(OpenID Connect).
+"""/api/v1/organizations/current/sso and /scim-tokens - an organization's
+identity provider (OpenID Connect) and its SCIM provisioning tokens.
 
 Configuration needs an owner's or administrator's signed-in session (never an
-API key). The client secret is write-only: never returned.
+API key); SCIM tokens are managed by owners only. The client secret and the
+tokens are write-only: never returned (a new token is shown once).
 """
 
 from __future__ import annotations
+
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Response, status
 
 from nexusflow.apps.api.dependencies import ContainerDep, CurrentPrincipal, Meta, require
 from nexusflow.apps.api.schemas.common import ERROR_RESPONSES
 from nexusflow.apps.api.schemas.sso import (
+    CreateScimTokenRequest,
+    ScimTokenCreatedResponse,
+    ScimTokenResponse,
     SsoConfigurationRequest,
     SsoConfigurationResponse,
     SsoDomainCheckResponse,
@@ -103,3 +109,46 @@ async def verify_sso_domains(
         configuration=_configuration(view),
         checks=[SsoDomainCheckResponse(domain=c.domain, result=c.result) for c in checks],
     )
+
+
+# ------------------------------------------------------------ SCIM tokens
+
+
+@router.post(
+    "/scim-tokens",
+    response_model=ScimTokenCreatedResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a SCIM provisioning token (owners; shown once)",
+)
+async def create_scim_token(
+    body: CreateScimTokenRequest, principal: CurrentPrincipal, container: ContainerDep, meta: Meta
+) -> ScimTokenCreatedResponse:
+    created = await container.provisioning.create_token(
+        principal, name=body.name, expires_in_days=body.expires_in_days, meta=meta
+    )
+    base = ScimTokenResponse.model_validate(created.token)
+    return ScimTokenCreatedResponse(**base.model_dump(), token=created.secret)
+
+
+@router.get(
+    "/scim-tokens",
+    response_model=list[ScimTokenResponse],
+    summary="SCIM provisioning tokens (owners)",
+)
+async def list_scim_tokens(
+    principal: CurrentPrincipal, container: ContainerDep
+) -> list[ScimTokenResponse]:
+    tokens = await container.provisioning.list_tokens(principal)
+    return [ScimTokenResponse.model_validate(token) for token in tokens]
+
+
+@router.delete(
+    "/scim-tokens/{token_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Revoke a SCIM provisioning token (owners)",
+)
+async def revoke_scim_token(
+    token_id: UUID, principal: CurrentPrincipal, container: ContainerDep, meta: Meta
+) -> Response:
+    await container.provisioning.revoke_token(principal, token_id, meta)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

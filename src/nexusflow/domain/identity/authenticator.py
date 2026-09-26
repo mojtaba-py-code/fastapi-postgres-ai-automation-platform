@@ -16,7 +16,11 @@ from nexusflow.core.clock import Clock
 from nexusflow.core.errors import AuthenticationError, PermissionDeniedError
 from nexusflow.domain.authorization.principal import Principal, PrincipalType
 from nexusflow.domain.authorization.roles import permissions_for, role_covers
-from nexusflow.domain.identity.api_keys import CredentialKind, parse_credential
+from nexusflow.domain.identity.api_keys import (
+    CREDENTIAL_PREFIXES,
+    CredentialKind,
+    parse_credential,
+)
 from nexusflow.domain.identity.sso import satisfies_sso, sso_required_error
 from nexusflow.domain.identity.tokens import TokenCodec
 from nexusflow.domain.organizations.model import OrganizationSettings, network_not_allowed
@@ -67,13 +71,18 @@ class Authenticator:
         single sign-on it did not use), it yields the *account* (no
         organization, no permissions) instead of refusing - otherwise a member
         without MFA could never set it up.
+
+        SCIM tokens are never accepted here: they work on ``/scim/v2`` only
+        (:meth:`authenticate_scim`).
         """
         parsed = parse_credential(credential)
         if parsed is not None:
             if parsed.kind is CredentialKind.API_KEY:
                 return await self._authenticate_api_key(parsed.prefix, parsed.full_token, client_ip)
-            return await self._authenticate_service(parsed.prefix, parsed.full_token)
-        if credential.startswith(("nxf_", "nxs_")):
+            if parsed.kind is CredentialKind.SERVICE_TOKEN:
+                return await self._authenticate_service(parsed.prefix, parsed.full_token)
+            raise _unauthenticated()  # a SCIM token: provisioning only, never this API
+        if credential.startswith(CREDENTIAL_PREFIXES):
             raise _unauthenticated()  # malformed/garbled key: fail before any DB access
         return await self._authenticate_access_token(credential, client_ip, mfa_setup)
 
@@ -132,6 +141,44 @@ class Authenticator:
                 session_id=session.id,
                 label=user.email,
                 sso_org_id=session.sso_org_id,
+            )
+
+    async def authenticate_scim(self, credential: str, *, client_ip: str | None) -> Principal:
+        """A SCIM token: its organization's provisioning API, nothing else.
+
+        The organization's network allowlist applies as for API keys: add the
+        identity provider's provisioning addresses to it (docs/SSO.md)."""
+        parsed = parse_credential(credential)
+        if parsed is None or parsed.kind is not CredentialKind.SCIM_TOKEN:
+            raise _unauthenticated()
+        now = self._clock.now()
+        async with self._uow_factory(TenantScope.auth()) as uow:
+            token = await uow.scim_tokens.find_by_prefix(parsed.prefix)
+            if (
+                token is None
+                or not self._hasher.verify(parsed.full_token, token.token_hash)
+                or not token.is_usable(now)
+            ):
+                raise _unauthenticated()
+            await uow.switch_tenant(token.org_id)
+            organization = await uow.organizations.get(token.org_id)
+            if organization is None or not organization.is_active:
+                raise _unauthenticated()
+            _require_allowed_network(
+                organization.policy,
+                client_ip,
+                org_id=organization.id,
+                credential=f"scim:{parsed.prefix}",
+            )
+            if token.last_used_at is None or now - token.last_used_at > _LAST_USED_RESOLUTION:
+                token.last_used_at = now  # throttled write: at most every few minutes
+                await uow.commit()
+            return Principal(
+                type=PrincipalType.SCIM,
+                id=token.id,
+                org_id=token.org_id,
+                role=None,
+                label=f"scim:{token.name}",
             )
 
     async def _authenticate_api_key(

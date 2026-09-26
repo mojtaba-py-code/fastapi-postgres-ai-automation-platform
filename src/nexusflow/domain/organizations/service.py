@@ -312,6 +312,12 @@ class OrganizationService:
             revoked = await uow.api_keys.revoke_created_by(
                 org_id, membership.user_id, now=self._clock.now()
             )
+            # The organization's directory (SCIM) sees the person as inactive
+            # now; its identity provider re-activates them only on purpose.
+            entry = await uow.scim_users.get_by_user(org_id, membership.user_id)
+            if entry is not None and entry.active:
+                entry.active = False
+                entry.updated_at = self._clock.now()
             await self._audit.record(
                 uow.audit,
                 action=AuditAction.MEMBER_REMOVED,

@@ -1,6 +1,7 @@
-"""Format of machine credentials (tenant API keys and platform service tokens).
+"""Format of machine credentials (tenant API keys, SCIM and platform service tokens).
 
     nxf_<prefix>_<secret><checksum>    tenant API key
+    nxp_<prefix>_<secret><checksum>    SCIM provisioning token (one organization, /scim/v2 only)
     nxs_<prefix>_<secret><checksum>    platform service token (n8n workflows)
 
 * ``prefix`` (12 chars, lowercase base32) is a non-secret lookup handle.
@@ -23,13 +24,16 @@ from enum import StrEnum
 _PREFIX_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567"
 _PREFIX_LENGTH = 12
 _CHECKSUM_LENGTH = 6
-_PATTERN = re.compile(r"^(nxf|nxs)_([a-z2-7]{12})_([A-Za-z0-9_-]{43})([A-Za-z0-9_-]{6})$")
+_PATTERN = re.compile(r"^(nxf|nxs|nxp)_([a-z2-7]{12})_([A-Za-z0-9_-]{43})([A-Za-z0-9_-]{6})$")
 _MAX_LENGTH = 80
+# Every prefix above: a garbled credential of any kind fails before the database.
+CREDENTIAL_PREFIXES = ("nxf_", "nxs_", "nxp_")
 
 
 class CredentialKind(StrEnum):
     API_KEY = "nxf"
     SERVICE_TOKEN = "nxs"  # noqa: S105 - a token *type prefix*, not a secret  # nosec B105
+    SCIM_TOKEN = "nxp"  # noqa: S105 - a token *type prefix*, not a secret  # nosec B105
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,7 +68,7 @@ def generate_credential(kind: CredentialKind) -> GeneratedCredential:
 
 
 def looks_like_credential(token: str) -> bool:
-    return token.startswith(("nxf_", "nxs_"))
+    return token.startswith(CREDENTIAL_PREFIXES)
 
 
 def parse_credential(token: str) -> ParsedCredential | None:

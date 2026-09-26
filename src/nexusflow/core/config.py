@@ -299,6 +299,8 @@ def _default_rate_limits() -> dict[str, RateLimitRule]:
         # finishing calls the identity provider.
         "auth.sso.start": RateLimitRule(limit=30, period_seconds=60, fail_closed=True),
         "auth.sso.callback": RateLimitRule(limit=30, period_seconds=60, fail_closed=True),
+        # SCIM provisioning, per token (an identity provider's initial sync is bursty).
+        "scim.token": RateLimitRule(limit=600, period_seconds=60, fail_closed=True),
         "api.read": RateLimitRule(limit=600, period_seconds=60),
         "api.write": RateLimitRule(limit=120, period_seconds=60),
         "api.export": RateLimitRule(limit=20, period_seconds=3600, fail_closed=True),

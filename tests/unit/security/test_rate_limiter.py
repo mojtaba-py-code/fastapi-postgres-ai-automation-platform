@@ -44,6 +44,7 @@ FAIL_CLOSED_SCOPES = {
     "auth.password_change",
     "auth.sso.start",
     "auth.sso.callback",
+    "scim.token",
     "api.export",
     "api.ai",
     "webhook.endpoint",

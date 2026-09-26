@@ -1,9 +1,10 @@
-"""Schemas for single sign-on (OpenID Connect)."""
+"""Schemas for single sign-on (OpenID Connect) and SCIM token management."""
 
 from __future__ import annotations
 
 from datetime import datetime
 from typing import Literal
+from uuid import UUID
 
 from pydantic import Field
 
@@ -83,3 +84,27 @@ class SsoDomainCheckResponse(ResponseModel):
 class SsoDomainVerificationResponse(ResponseModel):
     configuration: SsoConfigurationResponse
     checks: list[SsoDomainCheckResponse]
+
+
+# ------------------------------------------------------------ SCIM tokens
+
+
+class CreateScimTokenRequest(RequestModel):
+    name: str = Field(min_length=1, max_length=100)
+    expires_in_days: int = Field(default=365, ge=1, le=365)
+
+
+class ScimTokenResponse(ResponseModel):
+    id: UUID
+    name: str
+    prefix: str = Field(validation_alias="token_prefix")
+    created_at: datetime
+    expires_at: datetime
+    last_used_at: datetime | None
+    revoked_at: datetime | None
+
+
+class ScimTokenCreatedResponse(ScimTokenResponse):
+    token: str = Field(
+        description="Shown exactly once: store it in the identity provider's SCIM settings."
+    )
