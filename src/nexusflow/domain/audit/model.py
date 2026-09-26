@@ -60,8 +60,14 @@ class AuditAction(StrEnum):
     MFA_ENABLED = "auth.mfa.enabled"
     MFA_DISABLED = "auth.mfa.disabled"
     MFA_RECOVERY_USED = "auth.mfa.recovery_code_used"
+    # An operator removed an account's second factors (it lost them): in the
+    # platform's trail and each of the account's organizations'.
+    MFA_RESET = "auth.mfa.reset"
     # Passkeys (WebAuthn): a failed passkey sign-in is MFA_FAILED, with its reason.
     WEBAUTHN_REGISTERED = "auth.webauthn.registered"
+    # A passkey-bound account's first passkey, registered from a session that did
+    # not sign in with one: in each binding organization's own trail.
+    WEBAUTHN_REGISTERED_WITHOUT_PASSKEY = "auth.webauthn.registered_without_passkey"
     WEBAUTHN_REGISTRATION_FAILED = "auth.webauthn.registration_failed"
     WEBAUTHN_RENAMED = "auth.webauthn.renamed"
     WEBAUTHN_REMOVED = "auth.webauthn.removed"

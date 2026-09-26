@@ -22,6 +22,14 @@ class UserStatus(StrEnum):
     DELETED = "deleted"
 
 
+class MfaMethod(StrEnum):
+    """The platform's second factor a session passed."""
+
+    TOTP = "totp"
+    RECOVERY_CODE = "recovery_code"
+    WEBAUTHN = "webauthn"  # a passkey: the phishing-resistant one
+
+
 @dataclass(eq=False, kw_only=True)
 class User:
     id: UUID
@@ -126,6 +134,17 @@ class UserSession:
     mfa_verified: bool = False
     # Opened by this organization's identity provider: valid for it only.
     sso_org_id: UUID | None = None
+    # The platform's second factor the session passed: at sign-in, or TOTP by
+    # confirming it in this session. None: none - or only an identity
+    # provider's MFA, or a session older than this record. Never set on a
+    # session that is not ``mfa_verified``.
+    mfa_method: MfaMethod | None = None
+
+    @property
+    def signed_in_with_passkey(self) -> bool:
+        """What an organization that requires passkeys asks of a session.
+        Registering a passkey in a session does not make it one."""
+        return self.mfa_method is MfaMethod.WEBAUTHN
 
     def is_valid(self, now: datetime) -> bool:
         return self.revoked_at is None and self.expires_at > now

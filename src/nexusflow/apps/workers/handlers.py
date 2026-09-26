@@ -322,7 +322,11 @@ async def send_security_email(deps: WorkerDeps, msg: SecurityEmailMessage) -> No
         else None
     )
     await deps.container.security_emails.send_notification(
-        user_id=msg.user_id, template=msg.template, sign_in=sign_in
+        user_id=msg.user_id,
+        template=msg.template,
+        sign_in=sign_in,
+        member_id=msg.member_id,
+        org_id=msg.org_id,
     )
 
 

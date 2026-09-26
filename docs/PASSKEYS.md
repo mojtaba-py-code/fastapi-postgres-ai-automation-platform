@@ -27,7 +27,7 @@ From a signed-in session (never with an API key):
    `PublicKeyCredentialCreationOptionsJSON`:
    * `challenge`: 32 random bytes, valid for five minutes, answerable once, bound to
      this account *and* this session;
-   * `rp`: the relying party ID and name (section 4);
+   * `rp`: the relying party ID and name (section 5);
    * `user.id`: 64 random bytes, one per account - never the account's ID or e-mail
      address (`user.name` and `user.displayName` are the e-mail address and name,
      which the authenticator may show);
@@ -58,7 +58,8 @@ the user handle: public data only.
 
 The **first** second factor of an account turns MFA on and returns ten single-use
 recovery codes, shown once. The session that registered the passkey counts as
-having passed MFA, so an organization that requires MFA opens at once. The
+having passed MFA, so an organization that requires MFA opens at once (one that
+requires passkeys does not: that takes a sign-in with the passkey, section 4). The
 registration is audited (`auth.webauthn.registered`, and `auth.mfa.enabled` for the
 first factor) and e-mailed to the account's address ("A passkey was added").
 A refused registration answers `422 passkey_rejected` with the reason in
@@ -97,7 +98,8 @@ are accepted: they offer no counter to compare.
 
 A successful passkey completes the sign-in exactly as a correct TOTP code does: an
 MFA-verified session, the failure counters reset, `auth.login.succeeded` (with
-`mfa_method: "webauthn"`), and the sign-in risk assessment. A refused one answers
+`mfa_method: "webauthn"`), and the sign-in risk assessment - except that the
+session is recorded as a passkey session (section 4). A refused one answers
 the same generic `401 mfa_failed` whatever the reason, counts toward the account
 lockout like a wrong code, and is audited as `auth.mfa.failed` with
 `method: "webauthn"` and the reason.
@@ -106,9 +108,11 @@ The same two steps finish a **single sign-on** whose organization requires MFA i
 identity provider did not provide: the callback answers with an `mfa_token` and lists
 `webauthn` among its `methods`, and the passkey opens a session bound to that
 organization, as a TOTP code would - audited as `auth.sso.succeeded` with
-`mfa_method: "webauthn"`, never as a password sign-in, and resetting no failure
-counter; a refused passkey counts toward the lockout there too ([SSO.md](SSO.md),
-section 6).
+`mfa_method: "webauthn"`, never as a password sign-in; it starts the failure count
+afresh as a completed password sign-in does, and a refused passkey counts toward the
+lockout there too ([SSO.md](SSO.md), sections 4 and 6). Where the organization
+requires passkeys, the callback always asks, and only a passkey finishes it
+(section 4).
 
 ## 3. Managing passkeys
 
@@ -125,6 +129,9 @@ Another account's passkey is `404`. Rules that keep MFA meaningful:
   removing one and setting up TOTP answer `403 mfa_session_required` otherwise. A
   stolen session or API key, even with the password, cannot add a factor of its own
   or take one away.
+* **An account bound to passkeys** - a member of an organization that requires them
+  (section 4) - adds and removes passkeys, and turns MFA off, only from a session that
+  signed in with one of its passkeys (`403 passkey_session_required`).
 * **Never from a single sign-on session.** A session an organization's identity
   provider opened neither lists nor changes second factors (`403
   sso_session_restricted`), even when it counts as MFA-verified for that
@@ -138,7 +145,74 @@ Another account's passkey is `404`. Rules that keep MFA meaningful:
   app, every passkey and the recovery codes, and ends every session. (An account with
   passkeys only uses a recovery code here.)
 
-## 4. Relying party settings
+## 4. Organizations that require passkeys
+
+MFA alone still lets a phished TOTP or recovery code in. An organization can
+require its members to **sign in with a passkey**:
+`PATCH /api/v1/organizations/current {"settings": {"require_passkey": true}}`.
+
+* **Every session records the second factor it signed in with**, `mfa_method`:
+  `totp`, `recovery_code` or `webauthn` (a passkey). It is `null` after a sign-in
+  without one, after an identity provider's MFA, and for every session opened
+  before the record existed (migration 0012). Confirming TOTP in a session that has
+  none records `totp`; **registering a passkey does not make a session a passkey
+  session** - only signing in with one does. `GET /api/v1/users/me/sessions` lists
+  it; a refresh keeps the session, and so its factor.
+* Such an organization admits only sessions whose `mfa_method` is `webauthn`. Any
+  other session is refused `403 passkey_required` on every request, when signing
+  in *naming* the organization (which its trail shows: `auth.login.failed`, reason
+  `passkey_required`) and when switching to it. A passkey sign-in is MFA too, so
+  this covers `require_mfa`; the two settings stay independent.
+* A sign-in that merely defaults to such an organization opens in it as in one that
+  requires MFA: its requests are refused, but the MFA set-up endpoints
+  (`/auth/mfa/enroll`, `/confirm`, `/auth/webauthn/register/*`,
+  `/auth/webauthn/credentials*`) answer for the account - so a member can register
+  their first passkey (below).
+* **Its members' accounts are bound to passkeys.** While an account belongs to an
+  active organization that requires passkeys, its passkeys are added or removed, and
+  MFA turned off, only from a session that signed in with one of its passkeys
+  (`403 passkey_session_required`, "Add passkeys from a session that signed in with
+  one of your passkeys."). A session that passed a TOTP or recovery code - what a
+  phishing site can relay - changes none of them. Setting up TOTP and using recovery
+  codes are unaffected: neither opens such an organization.
+* **The first passkey** of such an account - a new member's, or one whose factors an
+  operator reset - is registered from the session it has (under the rule of section
+  3: once the account has a second factor, a session that passed one). Each binding
+  organization's own trail shows it (`auth.webauthn.registered_without_passkey`,
+  with the member and the factor that session passed), and its owners and
+  administrators are e-mailed, naming the member by address: unexpected, they remove
+  the member at once.
+* **Turning it on** needs a session that signed in with a passkey: from any other
+  session, or with an API key, it is refused (`422 would_lock_you_out`) - the change
+  would shut the caller out, and an API key (which it does not affect) shows no one
+  can still sign in. Turning it off is always allowed - with an API key too, the way
+  out should passkeys become unavailable on the deployment (section 5). Both are
+  audited (`org.updated`).
+* **API keys** are not sessions: the policy does not apply to them, as `require_mfa`
+  does not. Scopes and the network allowlist confine them.
+* **Single sign-on**: the provider's MFA never counts here, trusted or not. The
+  callback always asks for the platform's step, offering a passkey only, and only a
+  passkey completes it; a TOTP or recovery code is refused (`403 passkey_required`),
+  and a person without a passkey gets nowhere ([SSO.md](SSO.md), section 6).
+
+**Recovery** when every passkey is lost: a TOTP or recovery code still signs the
+member in, but that session reaches neither the organization nor the passkeys. An
+operator checks who they are outside the platform, then runs
+`nexusflow user reset-second-factors --email <address> --reason <ticket>`: it
+removes the account's passkeys, authenticator app and recovery codes and ends every
+session; it is audited with the reason in the platform's trail and each of the
+account's organizations' (`auth.mfa.reset`), and e-mailed to the account. The member
+signs in with the password and registers a first passkey again - announced as above.
+
+**What remains.** The first passkey: an account that has none yet registers it from
+whatever session it has, so someone who phishes such an account's password (and a
+code, if it has TOTP) before its owner registers one can register theirs. It is
+announced, not prevented - the organization's trail shows it and its administrators
+are e-mailed. `require_passkey` guarantees that every session reaching the
+organization signed in with a passkey, and that only such a session changes a
+member's passkeys once they have one.
+
+## 5. Relying party settings
 
 | Setting | Default | |
 |---|---|---|
@@ -167,17 +241,21 @@ Another account's passkey is `404`. Rules that keep MFA meaningful:
   bound to the ID it was created for. Keep it stable; people then sign in with
   TOTP or a recovery code and register again.
 
-## 5. Recovery
+## 6. Recovery
 
 * **A lost passkey**: sign in with another passkey, TOTP or a recovery code, then
-  remove the lost passkey and register a new one.
+  remove the lost passkey and register a new one. Where an organization requires
+  passkeys, see section 4.
 * **Recovery codes**: ten single-use codes are issued when the first second factor
   is set up (and replaced when TOTP is set up). Each signs in once in place of a TOTP
   code or a passkey, is audited and e-mailed.
-* There is deliberately no operator command that removes a person's second factor:
-  it would be a way around MFA. Keep the recovery codes safe.
+* An operator removes a person's second factors only on a recovery request checked
+  outside the platform (`nexusflow user reset-second-factors`, section 4): it is a
+  way around MFA by design, so it takes a reason, is audited in the platform's and
+  every organization's trail, and is e-mailed to the account. Keep the recovery
+  codes safe.
 
-## 6. Design decisions
+## 7. Design decisions
 
 * **Challenges live in Redis**, stored by `SET` with a TTL and taken with `GETDEL`:
   a challenge is answered at most once however many answers race for it, and
@@ -195,6 +273,10 @@ Another account's passkey is `404`. Rules that keep MFA meaningful:
   changed, only the whole passkey removed.
 * `users.mfa_enabled` means "a second factor is set up" (TOTP, passkeys or both);
   a TOTP secret implies it (migration 0010 inverted the check constraint).
+* `user_sessions.mfa_method` (migration 0012) names a session's factor; check
+  constraints allow the three values only, and a value only on an MFA-verified
+  session. Sessions opened before it have none, so requiring passkeys asks everyone
+  to sign in with one again.
 * **Rate limits** (fail closed): `auth.webauthn.sign_in`, 20 per 5 minutes per client
   address, for the sign-in step; `auth.webauthn.manage`, 30 per 15 minutes per
   person, for registering and managing.
@@ -207,13 +289,16 @@ Another account's passkey is `404`. Rules that keep MFA meaningful:
   bounded size, depth and item count, nothing after the item. It does not insist on
   the shortest encoding or on key order, which not every client produces.
 
-## 7. Limitations
+## 8. Limitations
 
 * **No attestation verification.** Only the `none` attestation format is accepted:
   the platform does not verify who made an authenticator and cannot restrict
   registration to certain models (an AAGUID without attestation proves nothing and
   is not stored). An authenticator that answers `attestation: "none"` with a
   self-attestation (`packed` without a certificate) is refused.
+* **The first passkey** of an account bound to passkeys comes from a session that did
+  not sign in with one (it has none): announced to the organization, not prevented
+  (section 4).
 * **User verification is required**: an authenticator without a PIN or biometric
   check cannot be registered.
 * **Second factor only**: signing in without a password (discoverable credentials,
@@ -229,7 +314,7 @@ Another account's passkey is `404`. Rules that keep MFA meaningful:
   the session list (`DELETE /api/v1/users/me/sessions/{id}`) or with
   `POST /api/v1/auth/logout-all`.
 
-## 8. Tests
+## 9. Tests
 
 `tests/support/webauthn.py` is a software authenticator: it builds real `none`
 attestation objects and signs real assertions with P-256, Ed25519 and RSA-2048 keys
@@ -237,4 +322,9 @@ from `cryptography`, and lets a test break any part of a response. The unit test
 (`tests/unit/security/test_webauthn_verifier.py`, `test_cbor.py`) refuse one defect
 at a time and check the reason; `tests/security/test_passkeys.py` runs registration,
 sign-in, management, organizations that require MFA, recovery and erasure end to end
-through the API.
+through the API, and `tests/security/test_passkey_policy.py` organizations that
+require passkeys: every enforcement point, the setting's lock-out guard, the recorded
+factor, the recovery path and single sign-on (`tests/integration/test_migration_0012.py`
+takes its migration down and up). `tests/security/test_passkey_bound_accounts.py`
+covers accounts bound to passkeys: what a session that passed a code cannot change,
+the first passkey's announcement, and the operator reset.

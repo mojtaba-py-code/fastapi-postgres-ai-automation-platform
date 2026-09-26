@@ -2,8 +2,9 @@
 
 Platform operations that must never be reachable from the tenant API live
 here: service accounts for n8n, the global automation kill switch, sign-up
-links, key re-wrapping, audit verification, migrations and configuration
-checks. Every state-changing command is written to the platform audit chain.
+links, data-subject requests, resetting a person's lost second factors, key
+re-wrapping, audit verification, migrations and configuration checks. Every
+state-changing command is written to the platform audit chain.
 
 Output is JSON (one document per command) so it can be scripted. Secrets are
 printed exactly once - when a service token or a sign-up link is issued - and
@@ -226,6 +227,22 @@ async def user_erase(c: Container, args: argparse.Namespace) -> dict[str, Any]:
     """An erasure request received outside the platform (GDPR art. 17)."""
     user_id = await c.privacy.erase_for(args.email, reason=args.reason, meta=CLI_META)
     return {"user_id": user_id, "erased": True}
+
+
+async def user_reset_second_factors(c: Container, args: argparse.Namespace) -> dict[str, Any]:
+    """A person who lost every passkey - or every second factor - cannot get
+    back into an organization that requires passkeys: once their identity is
+    checked outside the platform, remove their second factors and end their
+    sessions. Audited with the reason in the platform's trail and each of
+    their organizations'; their next first passkey is announced to those
+    organizations' administrators."""
+    reset = await c.auth.reset_second_factors(email=args.email, reason=args.reason, meta=CLI_META)
+    return {
+        "user_id": reset.user_id,
+        "passkeys_removed": reset.webauthn_removed,
+        "authenticator_app_removed": reset.totp_removed,
+        "sessions_ended": True,
+    }
 
 
 # -------------------------------------------------------- keys and audit
@@ -568,9 +585,9 @@ def _people_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -
     issue.add_argument("--email", required=True)
     issue.set_defaults(handler=signup_issue)
 
-    person = sub.add_parser("user", help="data-subject requests").add_subparsers(
-        dest="action", required=True
-    )
+    person = sub.add_parser(
+        "user", help="data-subject requests and account recovery"
+    ).add_subparsers(dest="action", required=True)
     export = person.add_parser("export", help="a person's copy of their data (JSON)")
     export.add_argument("--email", required=True)
     export.set_defaults(handler=user_export)
@@ -580,6 +597,13 @@ def _people_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -
     erase.add_argument("--email", required=True)
     erase.add_argument("--reason", required=True)
     erase.set_defaults(handler=user_erase)
+    reset = person.add_parser(
+        "reset-second-factors",
+        help="remove a person's passkeys, authenticator app and recovery codes (they lost them)",
+    )
+    reset.add_argument("--email", required=True)
+    reset.add_argument("--reason", required=True, help="the ticket: how their identity was checked")
+    reset.set_defaults(handler=user_reset_second_factors)
 
 
 async def _run(settings: Settings, handler: Command, args: argparse.Namespace) -> dict[str, Any]:

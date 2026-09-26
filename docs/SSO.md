@@ -184,7 +184,7 @@ Refusals answer as little as possible: everything about the state, the binding o
 the token is `401 sso_failed` ("Single sign-on failed. Start again."). Actionable
 ones have their own code: `403 sso_email_not_verified`, `403 sso_domain_not_allowed`,
 `403 sso_account_not_managed`, `403 sso_access_revoked`, `403 ip_not_allowed` (the network allowlist, checked before
-anything is created), `403 mfa_required`, `403 org_inactive`, `503 sso_unavailable`.
+anything is created), `403 mfa_required`, `403 passkey_required`, `403 org_inactive`, `503 sso_unavailable`.
 Every refusal of a well-formed callback is audited with a reason (`auth.sso.failed`),
 in the organization's trail - or the platform's when the state is unknown.
 
@@ -260,6 +260,25 @@ When the organization does not require MFA, a single sign-on does not ask for th
 platform's second factor even if the person set one up: the provider authenticates
 them, and the session reaches that organization only (section 5).
 
+**An organization that requires passkeys** (`require_passkey`,
+[PASSKEYS.md](PASSKEYS.md), section 4) never counts the provider's MFA, whatever
+`trust_idp_mfa` and `amr` say:
+
+* after the provider, the callback always answers `{mfa_required, mfa_token,
+  expires_in, methods: ["webauthn"]}`, and only a passkey
+  (`POST /auth/mfa/webauthn/begin`, then `/verify`) completes it, into a session
+  bound to the organization that counts as a passkey sign-in;
+* a TOTP or recovery code sent to `/auth/mfa/verify` is checked, used up and refused
+  (`403 passkey_required`, audited as `auth.sso.failed` with reason
+  `passkey_required`, `step: mfa` and the factor);
+* a person without a passkey is refused at the callback (`403 passkey_required`),
+  before anything is created. Accounts created by single sign-on have no password and
+  so cannot register one (section 5): in such an organization, only people whose
+  account has a password and a passkey registered from a password sign-in get in
+  through the provider;
+* sessions opened before the policy - also those the provider's MFA verified - are
+  refused until their people sign in again with a passkey.
+
 ## 7. Requiring single sign-on
 
 With `sso_required: true`, members reach the organization **only with a session its
@@ -274,7 +293,8 @@ without it.
   back when the provider is down or misconfigured. Nobody else does (administrators
   included). Owners who might need it set up TOTP or a passkey beforehand from a
   password sign-in: the MFA enrolment and passkey registration endpoints accept such
-  a session even where single sign-on is required.
+  a session even where single sign-on is required. Where the organization also
+  requires passkeys, the break-glass sign-in must use one.
 * It needs a verified domain, and is refused when it would lock the caller out
   (`422 would_lock_you_out`): turn it on from a session the provider opened, or as an
   owner with MFA. It is set only through this configuration, never through
@@ -366,6 +386,7 @@ the *Secret Token* to the SCIM token, and map `userPrincipalName` or `mail` to
 | Privilege escalation through the provider | JIT and SCIM grant `viewer` or `analyst` only; roles and groups from SCIM ignored; existing members keep their role |
 | Bypassing `sso_required` | Enforced on every request, at sign-in naming the organization and at switching; owners' break-glass needs the platform's MFA |
 | A provider's session (with a known password) reaching the account itself | A bound session cannot export the account's data, change its password or second factors, or delete it - the provider's MFA never stands in for the account's own second factor |
+| A provider's weaker MFA where the organization requires passkeys | The provider's MFA never counts there; only the platform's passkey step completes the sign-in |
 
 Audit events: `sso.configured`, `sso.updated`, `sso.removed`, `sso.domain_verified`,
 `auth.sso.succeeded` (with `mfa`, `idp_mfa`, and `mfa_method` when the platform's

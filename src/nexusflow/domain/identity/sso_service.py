@@ -655,6 +655,15 @@ class SsoService:
                 access = await resolve_sso_access(
                     uow, org_id=org_id, user_id=user.id, client_ip=meta.ip
                 )
+                if access.organization.policy.require_passkey:
+                    # Only a passkey opens it: the provider's MFA, trusted or
+                    # not, never stands in for one. The platform's passkey
+                    # step, then a bound session (refused without a passkey).
+                    challenge = await self._auth.sso_mfa_challenge(
+                        uow, user, org_id, now, passkey_only=True
+                    )
+                    await uow.commit()
+                    return challenge
                 if access.organization.policy.require_mfa and not idp_mfa:
                     if not user.mfa_enabled:
                         raise SsoRefusal(

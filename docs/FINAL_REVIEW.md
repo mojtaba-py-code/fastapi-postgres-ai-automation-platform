@@ -150,8 +150,9 @@ below.
 4. Single sign-on and provisioning: OpenID Connect and SCIM 2.0 are in
    ([SSO.md](SSO.md)) but not yet tried against real identity providers (Okta,
    Microsoft Entra ID, Google Workspace); no SAML, no front- or back-channel logout.
-   Passkeys still need an interop pass with real browsers and authenticators, and
-   organizations cannot yet require them specifically.
+   Passkeys still need an interop pass with real browsers and authenticators;
+   organizations can require them (`require_passkey`), but a member's first
+   passkey can still come from a phished session (announced, not prevented).
 5. The web console covers sign-in, the organization's administration and the
    everyday data flows ([CONSOLE.md](CONSOLE.md)); creating workflows and handling
    dead letters remain API-only, and the console is in English only.

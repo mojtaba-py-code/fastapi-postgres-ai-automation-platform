@@ -68,3 +68,20 @@ async def test_with_smtp_account_mail_is_sent() -> None:
     deps, emails = _deps("smtp.example.com")
     await _send_all(deps)
     assert emails.sent == ["notification", "invitation", "password_reset", "signup_link"]
+
+
+async def test_a_notice_about_a_member_names_the_member_and_the_organization() -> None:
+    deps, _ = _deps("smtp.example.com")
+    received: list[dict[str, Any]] = []
+
+    async def send_notification(**kwargs: Any) -> None:
+        received.append(kwargs)
+
+    deps.container.security_emails = SimpleNamespace(send_notification=send_notification)
+    member_id, org_id = uuid4(), uuid4()
+    message = SecurityEmailMessage(
+        user_id=uuid4(), template="member_first_passkey", member_id=member_id, org_id=org_id
+    )
+    await handlers.send_security_email(deps, message)
+    [kwargs] = received
+    assert (kwargs["member_id"], kwargs["org_id"]) == (member_id, org_id)

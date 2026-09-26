@@ -18,6 +18,7 @@ from pydantic import (
 
 from nexusflow.apps.api.schemas.common import RequestModel, ResponseModel
 from nexusflow.domain.authorization.roles import Permission, Role
+from nexusflow.domain.identity.model import MfaMethod
 from nexusflow.domain.identity.webauthn import b64url, b64url_decode
 from nexusflow.domain.organizations.model import OrganizationSettings, OrganizationStatus
 
@@ -350,6 +351,10 @@ class SessionResponse(ResponseModel):
     device: str = Field(description='A coarse client description, e.g. "Firefox on Windows".')
     ip: str | None
     mfa_verified: bool
+    mfa_method: MfaMethod | None = Field(
+        description="The platform's second factor the session passed (webauthn: a passkey); "
+        "null for none - or an identity provider's MFA, or a session from before it was recorded."
+    )
     created_at: datetime
     last_used_at: datetime
     expires_at: datetime
@@ -396,6 +401,10 @@ class OrganizationSettingsPatch(RequestModel):
     """
 
     require_mfa: bool | None = None
+    # Only sessions that signed in with a passkey reach the organization (API
+    # keys are not affected). Turning it on needs such a session - otherwise
+    # 422 would_lock_you_out.
+    require_passkey: bool | None = None
     # Networks (CIDR, IPv4 or IPv6) the organization may be reached from, by
     # members and API keys alike; null or [] allows every network. A change
     # that would exclude the caller's own address is refused.

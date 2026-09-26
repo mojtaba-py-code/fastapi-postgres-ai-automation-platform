@@ -36,7 +36,9 @@ Details are in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) and
   a rotated token revokes the whole session family and notifies the user.
 * Second factors: passkeys (WebAuthn), which a phishing site cannot relay, and
   authenticator apps (TOTP, replay rejected), with single-use recovery codes.
-  Organizations can require MFA. Passkey ceremonies are verified strictly (user
+  Organizations can require MFA, or passkeys specifically (then only sessions that
+  signed in with a passkey reach them, and only such a session changes a member's
+  passkeys). Passkey ceremonies are verified strictly (user
   verification, exact origins and relying party, allowlisted algorithms,
   single-use challenges, counters that must move forward); the runtime role
   cannot change a stored passkey's key. Wrong passwords and wrong second factors

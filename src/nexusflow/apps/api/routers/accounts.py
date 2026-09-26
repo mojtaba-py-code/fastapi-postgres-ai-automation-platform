@@ -100,6 +100,7 @@ async def my_sessions(
             device=describe_client(session.user_agent),
             ip=session.ip,
             mfa_verified=session.mfa_verified,
+            mfa_method=session.mfa_method,
             created_at=session.created_at,
             last_used_at=session.last_used_at,
             expires_at=session.expires_at,

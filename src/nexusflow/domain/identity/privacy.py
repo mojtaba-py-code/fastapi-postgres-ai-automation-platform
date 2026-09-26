@@ -219,6 +219,7 @@ class PrivacyService:
                     "device": describe_client(s.user_agent),
                     "user_agent": s.user_agent,
                     "mfa_verified": s.mfa_verified,
+                    "mfa_method": s.mfa_method.value if s.mfa_method is not None else None,
                     "single_sign_on_organization_id": str(s.sso_org_id) if s.sso_org_id else None,
                 }
                 for s in sessions
