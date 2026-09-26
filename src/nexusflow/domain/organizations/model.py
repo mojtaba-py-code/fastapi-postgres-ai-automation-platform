@@ -24,6 +24,15 @@ def network_not_allowed(internal_detail: str | None = None) -> PermissionDeniedE
     )
 
 
+def passkey_required() -> PermissionDeniedError:
+    """The refusal of an organization that requires passkeys (the same everywhere)."""
+    return PermissionDeniedError(
+        "This organization requires signing in with a passkey. Register one "
+        "(POST /api/v1/auth/webauthn/register/begin) if you have none, then sign in with it.",
+        code="passkey_required",
+    )
+
+
 class OrganizationStatus(StrEnum):
     ACTIVE = "active"
     SUSPENDED = "suspended"
@@ -36,6 +45,10 @@ class OrganizationSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     require_mfa: bool = False
+    # Members' sessions reach the organization only if they signed in with a
+    # passkey (the phishing-resistant second factor) - MFA too, so this covers
+    # require_mfa. API keys are not sessions: it does not apply to them.
+    require_passkey: bool = False
     # Members reach the organization only through its identity provider (a
     # single sign-on session for it); owners keep a password + MFA way in.
     # Set only through the SSO configuration, never through a settings update.

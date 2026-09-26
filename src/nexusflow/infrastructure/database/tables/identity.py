@@ -24,7 +24,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 
 from nexusflow.domain.audit.model import ActorType, AuditResult
 from nexusflow.domain.authorization.roles import Role
-from nexusflow.domain.identity.model import UserStatus
+from nexusflow.domain.identity.model import MfaMethod, UserStatus
 from nexusflow.domain.organizations.model import OrganizationStatus
 from nexusflow.domain.shared.outbox import TaskName
 from nexusflow.infrastructure.database.metadata import enum_check, metadata
@@ -94,7 +94,13 @@ user_sessions = Table(
     # Migration 0011: opened by this organization's identity provider - valid
     # for it only (gone with the organization).
     Column("sso_org_id", Uuid, ForeignKey("organizations.id", ondelete="CASCADE")),
+    # Migration 0012: the platform's second factor the session passed (NULL:
+    # none, an identity provider's MFA, or older than the column) - what an
+    # organization that requires passkeys looks at. It implies mfa_verified.
+    Column("mfa_method", StrEnumType(MfaMethod, 20)),
     Index("ix_user_sessions_expires_at", "expires_at"),  # identity retention
+    enum_check("mfa_method", MfaMethod, nullable=True),
+    CheckConstraint("mfa_method IS NULL OR mfa_verified", name="mfa_method_verified"),
 )
 
 refresh_tokens = Table(

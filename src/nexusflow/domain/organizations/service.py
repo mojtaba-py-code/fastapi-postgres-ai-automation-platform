@@ -89,6 +89,11 @@ class OrganizationService:
     ) -> Organization:
         """``settings`` is a *partial* update merged into the current policy.
 
+        A change that would shut the caller out is refused
+        (``would_lock_you_out``): a network allowlist without the caller's
+        address, or requiring passkeys from anything but a session that signed
+        in with one. Lifting either is always allowed.
+
         ``automation_frozen`` is not accepted here: freezing has its own audited,
         reason-carrying operation, so a routine settings change can never lift
         an incident freeze as a side effect. Neither is ``sso_required``: it
@@ -137,6 +142,20 @@ class OrganizationService:
                         "The network allowlist must include the address you are using.",
                         code="would_lock_you_out",
                     )
+                if merged.require_passkey and not before.require_passkey:
+                    # Only from a session that signed in with a passkey: any
+                    # other would shut itself out, and an API key (which the
+                    # policy does not reach) shows no one can still sign in.
+                    session = (
+                        await uow.sessions.get(principal.session_id)
+                        if principal.session_id is not None
+                        else None
+                    )
+                    if session is None or not session.signed_in_with_passkey:
+                        raise InvalidInputError(
+                            "Requiring passkeys would lock you out: sign in with a passkey first.",
+                            code="would_lock_you_out",
+                        )
                 org.update_policy(merged, now)
                 changes["settings"] = {
                     key: value

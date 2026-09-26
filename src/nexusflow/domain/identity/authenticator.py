@@ -23,7 +23,11 @@ from nexusflow.domain.identity.api_keys import (
 )
 from nexusflow.domain.identity.sso import satisfies_sso, sso_required_error
 from nexusflow.domain.identity.tokens import TokenCodec
-from nexusflow.domain.organizations.model import OrganizationSettings, network_not_allowed
+from nexusflow.domain.organizations.model import (
+    OrganizationSettings,
+    network_not_allowed,
+    passkey_required,
+)
 from nexusflow.domain.shared.security import TokenHasher
 from nexusflow.domain.shared.unit_of_work import TenantScope, UnitOfWorkFactory
 
@@ -68,9 +72,10 @@ class Authenticator:
 
         ``mfa_setup`` is for the MFA enrolment endpoints only: where the
         session's organization requires MFA the session has not passed (or
-        single sign-on it did not use), it yields the *account* (no
-        organization, no permissions) instead of refusing - otherwise a member
-        without MFA could never set it up.
+        single sign-on it did not use, or a passkey it did not sign in with),
+        it yields the *account* (no organization, no permissions) instead of
+        refusing - otherwise a member without MFA (or without a passkey) could
+        never set it up.
 
         SCIM tokens are never accepted here: they work on ``/scim/v2`` only
         (:meth:`authenticate_scim`).
@@ -123,6 +128,11 @@ class Authenticator:
                 if mfa_setup:
                     return account  # an owner may still set up MFA for the way back in
                 raise sso_required_error()
+            # A passkey session is MFA-verified too: this covers require_mfa.
+            if policy.require_passkey and not session.signed_in_with_passkey:
+                if mfa_setup:
+                    return account  # register a passkey, then sign in with it
+                raise passkey_required()
             if policy.require_mfa and not session.mfa_verified:
                 if mfa_setup:
                     return account
@@ -198,6 +208,8 @@ class Authenticator:
             organization = await uow.organizations.get(key.org_id)
             if organization is None or not organization.is_active:
                 raise _unauthenticated()
+            # A key is no session: require_mfa and require_passkey do not apply
+            # to it (the network allowlist does).
             _require_allowed_network(
                 organization.policy,
                 client_ip,

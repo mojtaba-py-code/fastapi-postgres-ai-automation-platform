@@ -1,8 +1,9 @@
 """Migration 0011 (single sign-on and SCIM) goes down and up again cleanly.
 
-A fresh database of its own: migrated to the head, taken back to 0010 (the
-new tables, the session column and the widened audit actor check are gone;
-0010's passkeys stay) and forward again.
+A fresh database of its own: migrated to the head and taken back to 0011 (below
+any later migration), then to 0010 (the new tables, the session column and the
+widened audit actor check are gone; 0010's passkeys stay) and forward to 0011
+again.
 """
 
 from __future__ import annotations
@@ -53,6 +54,7 @@ async def test_migration_0011_goes_down_and_up_again() -> None:
     db = await create_database(admin_url)
     url = db.admin_url.rsplit("/", 1)[0] + f"/{db.name}"
     try:
+        await asyncio.to_thread(downgrade, db, "0011")
         tables, column, check, version = await _state(url)
         assert (tables, column, version) == (NEW_TABLES | {"webauthn_credentials"}, True, "0011")
         assert "'scim'" in check
@@ -62,7 +64,7 @@ async def test_migration_0011_goes_down_and_up_again() -> None:
         assert (tables, column, version) == ({"webauthn_credentials"}, False, "0010")
         assert "'scim'" not in check
 
-        await asyncio.to_thread(run_migrations, db, "head")
+        await asyncio.to_thread(run_migrations, db, "0011")
         tables, column, check, version = await _state(url)
         assert (tables, column, version) == (NEW_TABLES | {"webauthn_credentials"}, True, "0011")
         assert "'scim'" in check
