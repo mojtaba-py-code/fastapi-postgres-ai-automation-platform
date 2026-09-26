@@ -72,6 +72,9 @@ class SecurityEmailMessage(Message):
     user_id: UUID
     template: str = Field(pattern=r"^[a-z_]{1,48}$")
     sign_in: SignInMessage | None = None
+    # A notice to an organization's administrators about one of its members.
+    member_id: UUID | None = None
+    org_id: UUID | None = None
 
 
 class InvitationMessage(OrgMessage):

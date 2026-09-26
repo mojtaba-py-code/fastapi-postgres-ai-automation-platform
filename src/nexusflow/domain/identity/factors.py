@@ -6,6 +6,13 @@ factor - only from a session that passed it at sign-in (or that set it up).
 A stolen session or API key, even with the password, cannot add a factor of
 its own to an account that has one, nor take one away. Nor can a session an
 organization's identity provider opened, whatever MFA it reported.
+
+An account **bound to passkeys** - a member of an active organization that
+requires them - is held to more: a phishable factor (a TOTP or recovery
+code) must not mint the passkey that organization asks for. Its passkeys are
+added or removed, and MFA turned off, only from a session that signed in
+with one of its passkeys. Only its very first passkey can be registered
+otherwise (how a member starts), and each binding organization is told.
 """
 
 from __future__ import annotations
@@ -21,6 +28,7 @@ from nexusflow.domain.authorization.principal import Principal
 from nexusflow.domain.identity.login_risk import SignInDetails
 from nexusflow.domain.identity.model import MfaRecoveryCode
 from nexusflow.domain.identity.sso import refuse_sso_session
+from nexusflow.domain.organizations.model import Organization
 from nexusflow.domain.shared.outbox import TaskName, new_message
 from nexusflow.domain.shared.security import TokenHasher
 from nexusflow.domain.shared.unit_of_work import UnitOfWork
@@ -62,8 +70,13 @@ async def queue_security_email(
     now: datetime,
     *,
     sign_in: SignInDetails | None = None,
+    member_id: UUID | None = None,
+    org_id: UUID | None = None,
 ) -> None:
-    """Queue a security notification e-mail (rendered by the mail worker)."""
+    """Queue a security notification e-mail (rendered by the mail worker).
+    ``member_id`` and ``org_id`` name, for a notice to an organization's
+    administrators, the member and organization it is about (IDs only: the
+    mail worker looks them up)."""
     payload: JSONObject = {"user_id": str(user_id), "template": template}
     if sign_in is not None:
         payload["sign_in"] = {
@@ -71,7 +84,36 @@ async def queue_security_email(
             "ip": sign_in.ip,
             "client": sign_in.client,
         }
+    if member_id is not None:
+        payload["member_id"] = str(member_id)
+    if org_id is not None:
+        payload["org_id"] = str(org_id)
     await uow.outbox.add(new_message(TaskName.SEND_SECURITY_EMAIL, payload, org_id=None, now=now))
+
+
+async def passkey_bound_organizations(uow: UnitOfWork, user_id: UUID) -> list[Organization]:
+    """The organizations that bind the account to passkeys: the active ones it
+    belongs to that require them. ``uow`` is scoped to the account (a member
+    reads their own memberships and organizations)."""
+    bound: list[Organization] = []
+    for org_id in await uow.memberships.list_org_ids_for_user(user_id):
+        organization = await uow.organizations.get(org_id)
+        if (
+            organization is not None
+            and organization.is_active
+            and organization.policy.require_passkey
+        ):
+            bound.append(organization)
+    return bound
+
+
+def passkey_session_required(change: str) -> PermissionDeniedError:
+    """``change`` refused to an account bound to passkeys, from a session that
+    did not sign in with one of its passkeys."""
+    return PermissionDeniedError(
+        f"{change} from a session that signed in with one of your passkeys.",
+        code="passkey_session_required",
+    )
 
 
 def session_of(principal: Principal) -> tuple[UUID, UUID]:

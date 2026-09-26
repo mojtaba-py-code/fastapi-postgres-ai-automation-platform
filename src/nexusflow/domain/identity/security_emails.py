@@ -116,6 +116,32 @@ _TEMPLATES: dict[str, tuple[str, str]] = {
             "are running low, and contact your administrator if this was not you."
         ),
     ),
+    "second_factors_reset": (
+        "Your NexusFlow second factors were reset",
+        (
+            "An operator removed your second factors - authenticator app, passkeys and "
+            "recovery codes - and signed out all your sessions, to let you back into your "
+            "account. Sign in with your password and register a passkey again. If you did "
+            "not ask for this, contact your administrator immediately."
+        ),
+    ),
+}
+
+# Notices to an organization's owners and administrators about one of its
+# members: filled in with the member's (verified) address and the
+# organization's name - never words the member chose.
+_MEMBER_TEMPLATES: dict[str, tuple[str, str]] = {
+    "member_first_passkey": (
+        "A member of {organization} registered their first passkey",
+        (
+            "{member} registered their first passkey, which {organization} requires, from a "
+            "session that did not sign in with one. Every member does this once. If you did "
+            "not expect it of them, someone who knows their password and a code may have "
+            "registered a passkey of their own: remove them from the organization now - "
+            "their access ends at once - and have them reset their password. The "
+            "organization's audit trail shows it as auth.webauthn.registered_without_passkey."
+        ),
+    ),
 }
 
 
@@ -138,8 +164,20 @@ class SecurityEmailService:
         self._base = public_base_url.rstrip("/")
 
     async def send_notification(
-        self, *, user_id: UUID, template: str, sign_in: SignInDetails | None = None
+        self,
+        *,
+        user_id: UUID,
+        template: str,
+        sign_in: SignInDetails | None = None,
+        member_id: UUID | None = None,
+        org_id: UUID | None = None,
     ) -> bool:
+        """A security notice to ``user_id``; for a notice about a member of an
+        organization, ``member_id`` and ``org_id`` name them."""
+        if template in _MEMBER_TEMPLATES:
+            if member_id is None or org_id is None:
+                return False
+            return await self._send_member_notice(user_id, template, member_id, org_id)
         if template not in _TEMPLATES:
             return False
         async with self._uow_factory(TenantScope.auth()) as uow:
@@ -157,6 +195,21 @@ class SecurityEmailService:
                 f"Device: {sign_in.client}\n"
             )
         await self._email.send_email([user.email], subject, text)
+        return True
+
+    async def _send_member_notice(
+        self, user_id: UUID, template: str, member_id: UUID, org_id: UUID
+    ) -> bool:
+        async with self._uow_factory(TenantScope.auth()) as uow:
+            user = await uow.users.get(user_id)
+            member = await uow.users.get(member_id)
+            organization = await uow.organizations.get(org_id)
+        if user is None or not user.is_active or member is None or organization is None:
+            return False
+        subject, body = _MEMBER_TEMPLATES[template]
+        names = {"member": member.email, "organization": organization.name}
+        text = f"Hello {user.full_name},\n\n{body.format(**names)}\n"
+        await self._email.send_email([user.email], subject.format(**names), text)
         return True
 
     async def send_password_reset(self, *, reset_id: UUID) -> bool:

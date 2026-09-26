@@ -7,6 +7,7 @@ tenant - two independent layers against cross-tenant access (IDOR).
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from datetime import datetime
 from uuid import UUID
 
@@ -528,6 +529,15 @@ class SqlMembershipRepository:
             .where(t.memberships.c.org_id == org_id, t.memberships.c.role == Role.OWNER.value)
         )
         return int((await self._s.execute(statement)).scalar_one())
+
+    async def user_ids_with_roles(self, org_id: UUID, roles: Collection[Role]) -> list[UUID]:
+        m = t.memberships
+        statement = (
+            select(m.c.user_id)
+            .where(m.c.org_id == org_id, m.c.role.in_([role.value for role in roles]))
+            .order_by(m.c.created_at, m.c.id)
+        )
+        return list((await self._s.execute(statement)).scalars().all())
 
     async def delete(self, membership: Membership) -> None:
         await self._s.delete(membership)

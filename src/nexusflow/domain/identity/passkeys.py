@@ -13,6 +13,13 @@ this service manages an account's passkeys, always from a signed-in session.
   The last passkey of an account without TOTP cannot be removed: that would
   turn MFA off, which only ``POST /auth/mfa/disable`` does - with the password
   *and* a code, and ending every session.
+* **An account bound to passkeys** (a member of an organization that requires
+  them, ``factors.passkey_bound_organizations``) adds and removes passkeys
+  only from a session that signed in with one of its passkeys - so a phished
+  TOTP or recovery code cannot mint the passkey the organization asks for.
+  Only its very first passkey is registered from another session (how a
+  member starts); each binding organization's own trail shows it, and its
+  owners and administrators are e-mailed.
 * Every change is audited and e-mailed to the account's address.
 * A session an organization's identity provider opened neither lists nor
   changes passkeys (``403 sso_session_restricted``): its MFA speaks for that
@@ -40,14 +47,17 @@ from nexusflow.core.text import clean_text
 from nexusflow.domain.audit.model import AuditAction, AuditResult
 from nexusflow.domain.audit.recorder import AuditRecorder
 from nexusflow.domain.authorization.principal import Principal
+from nexusflow.domain.authorization.roles import Role
 from nexusflow.domain.identity.account_service import PasswordConfirmation
 from nexusflow.domain.identity.factors import (
     factor_session_of,
     generate_recovery_codes,
+    passkey_bound_organizations,
+    passkey_session_required,
     queue_security_email,
     verified_session_required,
 )
-from nexusflow.domain.identity.model import WebAuthnCredential
+from nexusflow.domain.identity.model import UserSession, WebAuthnCredential
 from nexusflow.domain.identity.webauthn import (
     ALGORITHMS,
     CHALLENGE_BYTES,
@@ -65,11 +75,16 @@ from nexusflow.domain.identity.webauthn import (
     b64url,
     b64url_decode,
 )
+from nexusflow.domain.organizations.model import Organization
 from nexusflow.domain.shared.context import RequestMeta
 from nexusflow.domain.shared.security import TokenHasher
-from nexusflow.domain.shared.unit_of_work import TenantScope, UnitOfWorkFactory
+from nexusflow.domain.shared.unit_of_work import TenantScope, UnitOfWork, UnitOfWorkFactory
 
 _DEFAULT_NAME = "Passkey"
+_ADD = "Add passkeys"  # passkey_session_required(...)
+_REMOVE = "Remove passkeys"
+# Who hears of a bound member's first passkey, in each binding organization.
+_TOLD_OF_FIRST_PASSKEYS = (Role.OWNER, Role.ADMIN)
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +168,8 @@ class PasskeyService:
             if user.mfa_enabled and not session.mfa_verified:
                 raise verified_session_required()
             existing = await uow.webauthn_credentials.list_for_user(user_id)
+            if existing and await _binding(uow, user_id, session):
+                raise passkey_session_required(_ADD)
         if len(existing) >= MAX_PASSKEYS_PER_USER:
             raise _too_many_passkeys()
         # One random handle per account (WebAuthn 14.6.1), kept with its passkeys.
@@ -236,8 +253,14 @@ class PasskeyService:
                 raise PermissionDeniedError("This session has ended.", code="session_required")
             if user.mfa_enabled and not session.mfa_verified:
                 raise verified_session_required()
-            if await uow.webauthn_credentials.count_for_user(user_id) >= MAX_PASSKEYS_PER_USER:
+            registered = await uow.webauthn_credentials.count_for_user(user_id)
+            if registered >= MAX_PASSKEYS_PER_USER:
                 raise _too_many_passkeys()
+            # Checked again: an organization may have come to require passkeys
+            # since the options were issued.
+            binding = await _binding(uow, user_id, session)
+            if registered and binding:
+                raise passkey_session_required(_ADD)
             await uow.webauthn_credentials.add(passkey)
             codes: list[str] = []
             if not user.mfa_enabled:
@@ -272,8 +295,53 @@ class PasskeyService:
                 },
             )
             await queue_security_email(uow, user_id, "passkey_added", now)
+            if binding:  # the account's first passkey, from a session without one
+                await self._announce_first_passkey(
+                    uow, principal, session, passkey, binding, meta, now
+                )
             await uow.commit()
         return codes
+
+    async def _announce_first_passkey(
+        self,
+        uow: UnitOfWork,
+        principal: Principal,
+        session: UserSession,
+        passkey: WebAuthnCredential,
+        binding: list[Organization],
+        meta: RequestMeta,
+        now: datetime,
+    ) -> None:
+        """A bound account's first passkey, registered from a session that did
+        not sign in with one: how a member starts - and what whoever phished
+        their password and a code would do. Each binding organization's own
+        trail shows it, and its owners and administrators are e-mailed."""
+        member_id = passkey.user_id
+        factor = session.mfa_method.value if session.mfa_method is not None else None
+        for organization in binding:
+            await uow.switch_tenant(organization.id)
+            await self._audit.record(
+                uow.audit,
+                action=AuditAction.WEBAUTHN_REGISTERED_WITHOUT_PASSKEY,
+                principal=principal,
+                meta=meta,
+                org_id=organization.id,
+                resource_type="webauthn_credential",
+                resource_id=passkey.id,
+                metadata={"user_id": str(member_id), "session_mfa_method": factor},
+            )
+            for recipient in await uow.memberships.user_ids_with_roles(
+                organization.id, _TOLD_OF_FIRST_PASSKEYS
+            ):
+                if recipient != member_id:  # the member is told as the account's owner
+                    await queue_security_email(
+                        uow,
+                        recipient,
+                        "member_first_passkey",
+                        now,
+                        member_id=member_id,
+                        org_id=organization.id,
+                    )
 
     async def _record_refusal(self, principal: Principal, reason: str, meta: RequestMeta) -> None:
         async with self._uow_factory(TenantScope.of(principal)) as uow:
@@ -339,6 +407,8 @@ class PasskeyService:
                 raise NotFoundError()
             if not session.mfa_verified:
                 raise verified_session_required()
+            if await _binding(uow, user_id, session):
+                raise passkey_session_required(_REMOVE)
             remaining = await uow.webauthn_credentials.count_for_user(user_id) - 1
             if remaining == 0 and not user.has_totp:
                 raise ConflictError(
@@ -359,6 +429,14 @@ class PasskeyService:
             )
             await queue_security_email(uow, user_id, "passkey_removed", now)
             await uow.commit()
+
+
+async def _binding(uow: UnitOfWork, user_id: UUID, session: UserSession) -> list[Organization]:
+    """The organizations that hold the account to passkeys - none when this
+    session signed in with one of its passkeys (it may change them)."""
+    if session.signed_in_with_passkey:
+        return []
+    return await passkey_bound_organizations(uow, user_id)
 
 
 def _too_many_passkeys() -> ConflictError:

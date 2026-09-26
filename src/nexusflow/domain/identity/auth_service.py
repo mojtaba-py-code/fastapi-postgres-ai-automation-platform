@@ -32,7 +32,9 @@ Security design notes
   sessions whose second factor was a passkey (``UserSession.mfa_method``):
   checked on every request, at sign-in naming the organization, when
   switching to it, and after a single sign-on - where the provider's MFA never
-  counts and only a passkey completes the platform's step.
+  counts and only a passkey completes the platform's step. Their members turn
+  MFA off only from such a session (``factors``); an operator resets the
+  second factors of a member who lost them all.
 """
 
 from __future__ import annotations
@@ -65,6 +67,8 @@ from nexusflow.domain.identity.factors import (
     factor_session_of,
     generate_recovery_codes,
     normalize_recovery_code,
+    passkey_bound_organizations,
+    passkey_session_required,
     queue_security_email,
     session_of,
     verified_session_required,
@@ -165,6 +169,15 @@ class LoginResult:
 class MfaEnrollment:
     secret: str
     provisioning_uri: str
+
+
+@dataclass(frozen=True, slots=True)
+class SecondFactorReset:
+    """What an operator's reset removed (every session ended with it)."""
+
+    user_id: UUID
+    webauthn_removed: int
+    totp_removed: bool
 
 
 def normalize_email(email: str) -> str:
@@ -1684,8 +1697,10 @@ class AuthService:
         app, every passkey and the recovery codes - with the password and a
         TOTP or recovery code, and end every session. It is the only way MFA
         goes off: removing the last passkey of an account without TOTP is
-        refused instead."""
-        user_id, _ = factor_session_of(principal)
+        refused instead. An account bound to passkeys does it only from a
+        session that signed in with one: otherwise the password and a phished
+        code would wipe its passkeys and open the way to a first one."""
+        user_id, session_id = factor_session_of(principal)
         verified = await self.confirm_password(principal, password, meta, purpose="mfa_disable")
         now = self._clock.now()
         async with self._uow_factory(TenantScope.of(principal)) as uow:
@@ -1696,6 +1711,12 @@ class AuthService:
                 )
             if user.password_hash != verified:  # changed since it was confirmed
                 raise _wrong_password()
+            session = await uow.sessions.get(session_id)
+            if (
+                session is None or not session.signed_in_with_passkey
+            ) and await passkey_bound_organizations(uow, user.id):
+                # Before the code is checked: a refusal uses no recovery code up.
+                raise passkey_session_required("Turn two-factor authentication off")
             if await self._check_second_factor(uow, user, code, now, meta) is None:
                 # A wrong code counts toward lockout as at sign-in.
                 locked = self._register_failure(user, now)
@@ -1712,14 +1733,7 @@ class AuthService:
                     await self._on_lockout(uow, user, meta)
                 await uow.commit()
                 raise InvalidInputError("The verification code is incorrect.", code="invalid_code")
-            user.mfa_enabled = False
-            user.mfa_secret_encrypted = None
-            user.mfa_pending_secret_encrypted = None
-            user.mfa_last_used_step = None
-            user.revoke_all_tokens(now)
-            await uow.recovery_codes.delete_for_user(user.id)
-            removed = await uow.webauthn_credentials.delete_for_user(user.id)
-            await uow.sessions.revoke_all_for_user(user.id, now=now, reason="mfa_disabled")
+            removed = await _remove_second_factors(uow, user, now, reason="mfa_disabled")
             await self._audit.record(
                 uow.audit,
                 action=AuditAction.MFA_DISABLED,
@@ -1731,6 +1745,55 @@ class AuthService:
             )
             await self._notify(uow, user, "mfa_disabled", now)
             await uow.commit()
+
+    async def reset_second_factors(
+        self, *, email: str, reason: str, meta: RequestMeta
+    ) -> SecondFactorReset:
+        """Operator path (``nexusflow user reset-second-factors``): a person
+        who lost every passkey - or every second factor - and so cannot get
+        back in, once the operator has checked who they are outside the
+        platform. Removes the account's passkeys, authenticator app and
+        recovery codes and ends every session, as turning MFA off does;
+        audited with the reason in the platform's trail and each of the
+        account's organizations', and e-mailed to the account. The person then
+        signs in with the password and registers a passkey again - which each
+        organization that requires passkeys is told about."""
+        cleaned = clean_text(reason, max_length=200)
+        if len(cleaned) < 3:
+            raise InvalidInputError("A reason is required.", code="reason_required")
+        now = self._clock.now()
+        async with self._uow_factory(TenantScope.auth()) as uow:
+            found = await uow.users.get_by_email(normalize_email(email))
+        if found is None:
+            raise NotFoundError("No account has this e-mail address.")
+        async with self._uow_factory(TenantScope(user_id=found.id)) as uow:
+            user = await uow.users.get_for_update(found.id)
+            if user is None:
+                raise NotFoundError()
+            totp = user.has_totp
+            removed = await _remove_second_factors(uow, user, now, reason="second_factors_reset")
+            metadata: JSONObject = {
+                "by": "operator",
+                "reason": cleaned,
+                "webauthn_removed": removed,
+                "totp_removed": totp,
+            }
+            # Each organization's own trail shows it (None: the platform's).
+            for org_id in [*await uow.memberships.list_org_ids_for_user(user.id), None]:
+                await uow.switch_tenant(org_id)
+                await self._audit.record(
+                    uow.audit,
+                    action=AuditAction.MFA_RESET,
+                    principal=Principal.system(),
+                    meta=meta,
+                    org_id=org_id,
+                    resource_type="user",
+                    resource_id=user.id,
+                    metadata=metadata,
+                )
+            await self._notify(uow, user, "second_factors_reset", now)
+            await uow.commit()
+        return SecondFactorReset(user_id=user.id, webauthn_removed=removed, totp_removed=totp)
 
     async def confirm_password(
         self, principal: Principal, password: str, meta: RequestMeta, *, purpose: str
@@ -1801,6 +1864,21 @@ class AuthService:
     ) -> None:
         """Queue a security notification e-mail (rendered by the mail worker)."""
         await queue_security_email(uow, user.id, template, now, sign_in=sign_in)
+
+
+async def _remove_second_factors(uow: UnitOfWork, user: User, now: datetime, *, reason: str) -> int:
+    """Remove every second factor of the account - authenticator app,
+    passkeys, recovery codes - so MFA is off, and end every session
+    (``reason``). Returns how many passkeys went."""
+    user.mfa_enabled = False
+    user.mfa_secret_encrypted = None
+    user.mfa_pending_secret_encrypted = None
+    user.mfa_last_used_step = None
+    user.revoke_all_tokens(now)
+    await uow.recovery_codes.delete_for_user(user.id)
+    removed = await uow.webauthn_credentials.delete_for_user(user.id)
+    await uow.sessions.revoke_all_for_user(user.id, now=now, reason=reason)
+    return removed
 
 
 def _password_break_glass(role: Role, mfa_verified: bool) -> bool:

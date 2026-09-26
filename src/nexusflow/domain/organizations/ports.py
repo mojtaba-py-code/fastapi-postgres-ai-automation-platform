@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from typing import Protocol
 from uuid import UUID
 
 from nexusflow.core.pagination import Page, PageRequest
+from nexusflow.domain.authorization.roles import Role
 from nexusflow.domain.organizations.model import (
     Invitation,
     Membership,
@@ -41,6 +43,10 @@ class MembershipRepository(Protocol):
     async def list_views(self, org_id: UUID, page: PageRequest) -> Page[MembershipView]: ...
 
     async def count_owners(self, org_id: UUID) -> int: ...
+
+    async def user_ids_with_roles(self, org_id: UUID, roles: Collection[Role]) -> list[UUID]:
+        """The members of ``org_id`` who have one of ``roles``, longest-standing first."""
+        ...
 
     async def delete(self, membership: Membership) -> None: ...
 
