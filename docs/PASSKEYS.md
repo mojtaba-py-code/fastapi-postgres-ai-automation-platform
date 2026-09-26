@@ -102,6 +102,14 @@ the same generic `401 mfa_failed` whatever the reason, counts toward the account
 lockout like a wrong code, and is audited as `auth.mfa.failed` with
 `method: "webauthn"` and the reason.
 
+The same two steps finish a **single sign-on** whose organization requires MFA its
+identity provider did not provide: the callback answers with an `mfa_token` and lists
+`webauthn` among its `methods`, and the passkey opens a session bound to that
+organization, as a TOTP code would - audited as `auth.sso.succeeded` with
+`mfa_method: "webauthn"`, never as a password sign-in, and resetting no failure
+counter; a refused passkey counts toward the lockout there too ([SSO.md](SSO.md),
+section 6).
+
 ## 3. Managing passkeys
 
 | Request | |
@@ -117,6 +125,11 @@ Another account's passkey is `404`. Rules that keep MFA meaningful:
   removing one and setting up TOTP answer `403 mfa_session_required` otherwise. A
   stolen session or API key, even with the password, cannot add a factor of its own
   or take one away.
+* **Never from a single sign-on session.** A session an organization's identity
+  provider opened neither lists nor changes second factors (`403
+  sso_session_restricted`), even when it counts as MFA-verified for that
+  organization: the provider's MFA speaks for its organization only, the account's
+  second factors guard all of them ([SSO.md](SSO.md), section 5).
 * **The last second factor cannot be removed.** Removing the last passkey of an
   account without TOTP answers `409 last_second_factor`: register another passkey
   or set up TOTP first, or turn MFA off.

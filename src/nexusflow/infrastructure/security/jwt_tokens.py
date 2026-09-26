@@ -137,21 +137,29 @@ class JwtTokenCodec:
     # -------------------------------------------------------------------- mfa
 
     def issue_mfa_challenge(
-        self, *, user_id: UUID, org_id: UUID | None, now: datetime
+        self, *, user_id: UUID, org_id: UUID | None, now: datetime, sso: bool = False
     ) -> IssuedToken:
         claims: dict[str, Any] = {"sub": str(user_id)}
         if org_id is not None:
             claims["org"] = str(org_id)
+        if sso:
+            if org_id is None:
+                raise ValueError("a single sign-on challenge names its organization")
+            claims["sso"] = True
         return self._encode(claims, token_use=_MFA, now=now, ttl=self._mfa_ttl)
 
     def decode_mfa_challenge(self, token: str, *, now: datetime) -> MfaChallengeClaims:
         payload = self._decode(token, token_use=_MFA, now=now)
         org_raw = payload.get("org")
+        sso = payload.get("sso", False)
+        if not isinstance(sso, bool) or (sso and org_raw is None):
+            raise _invalid()
         return MfaChallengeClaims(
             user_id=_uuid_claim(payload, "sub"),
             org_id=_uuid_claim(payload, "org") if org_raw is not None else None,
             challenge_id=str(payload["jti"]),
             expires_at=datetime.fromtimestamp(payload["exp"], tz=now.tzinfo),
+            sso=sso,
         )
 
     # ---------------------------------------------------------------- helpers

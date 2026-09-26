@@ -2,10 +2,11 @@
 
 UK GDPR / GDPR articles 15 and 20 (access and portability) and 17 (erasure).
 The export holds the personal data the platform keeps about the account
-itself - profile, organizations, sessions, passkeys, API keys and the
-account's own actions in its organizations' audit trails. An organization's business data
-belongs to the organization, the controller, which exports it (dataset
-exports), not to the person.
+itself - profile, organizations, sessions, passkeys, identity-provider links,
+directory (SCIM) entries, API keys and the account's own actions in its
+organizations' audit trails. An organization's business data belongs to the
+organization, the controller, which exports it (dataset exports), not to the
+person.
 
 People erase their own account from a signed-in session
 (``AccountService.delete_account``); an operator does it on a request made
@@ -33,6 +34,7 @@ from nexusflow.domain.identity.account_service import erase_user
 from nexusflow.domain.identity.auth_service import normalize_email
 from nexusflow.domain.identity.login_risk import describe_client
 from nexusflow.domain.identity.model import ApiKey, User
+from nexusflow.domain.identity.sso import refuse_sso_session
 from nexusflow.domain.shared.context import RequestMeta
 from nexusflow.domain.shared.unit_of_work import TenantScope, UnitOfWork, UnitOfWorkFactory
 
@@ -63,6 +65,10 @@ class PrivacyService:
             raise PermissionDeniedError(
                 "This action requires a signed-in user session.", code="session_required"
             )
+        # The copy covers every organization of the person: an organization's
+        # identity provider does not hand it out. Sign in with the account's
+        # password (a reset link sets one) - or ask the operator.
+        refuse_sso_session(principal, "export your data")
         document = await self._export(principal.user_id, platform_chain=False)
         async with self._uow_factory(TenantScope(user_id=principal.user_id)) as uow:
             await self._audit.record(
@@ -159,6 +165,8 @@ class PrivacyService:
                 raise NotFoundError()
             sessions = await uow.sessions.list_for_user(user_id, limit=MAX_SESSIONS)
             passkeys = await uow.webauthn_credentials.list_for_user(user_id)
+            identities = await uow.sso_identities.list_for_user(user_id, MAX_SESSIONS)
+            directory = await uow.scim_users.list_for_user(user_id, MAX_SESSIONS)
             org_ids = await uow.memberships.list_org_ids_for_user(user_id)
             organizations: list[JSONValue] = []
             api_keys: list[JSONValue] = []
@@ -211,6 +219,7 @@ class PrivacyService:
                     "device": describe_client(s.user_agent),
                     "user_agent": s.user_agent,
                     "mfa_verified": s.mfa_verified,
+                    "single_sign_on_organization_id": str(s.sso_org_id) if s.sso_org_id else None,
                 }
                 for s in sessions
             ],
@@ -225,6 +234,30 @@ class PrivacyService:
                     "backed_up": p.backed_up,
                 }
                 for p in passkeys
+            ],
+            "identity_provider_links": [
+                {
+                    "organization_id": str(i.org_id),
+                    "issuer": i.issuer,
+                    "subject": i.subject,
+                    "email": i.email,
+                    "linked_at": _when(i.created_at),
+                    "last_sign_in_at": _when(i.last_login_at),
+                }
+                for i in identities
+            ],
+            "directory_entries": [
+                {
+                    "organization_id": str(d.org_id),
+                    "user_name": d.user_name,
+                    "external_id": d.external_id,
+                    "display_name": d.display_name,
+                    "given_name": d.given_name,
+                    "family_name": d.family_name,
+                    "active": d.active,
+                    "created_at": _when(d.created_at),
+                }
+                for d in directory
             ],
             "api_keys": api_keys,
             "activity": activity,

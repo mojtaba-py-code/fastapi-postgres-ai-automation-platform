@@ -32,9 +32,11 @@ from nexusflow.apps.api.routers import (
     auth,
     catalog,
     health,
+    identity_providers,
     intelligence,
     internal,
     sandbox_gateway,
+    scim,
     sources,
     webhooks,
     workflows,
@@ -66,7 +68,9 @@ def _body_limits(settings: Settings, mode: AppMode) -> dict[str, int]:
             )
         }
     return {
-        r"^/api/v1/sources/[^/]+/uploads$": settings.storage.max_upload_bytes + _MULTIPART_OVERHEAD
+        r"^/api/v1/sources/[^/]+/uploads$": settings.storage.max_upload_bytes + _MULTIPART_OVERHEAD,
+        # One SCIM User or PatchOp: far below the default limit.
+        scim.BODY_PATH: min(scim.MAX_BODY_BYTES, settings.app.max_request_body_bytes),
     }
 
 
@@ -167,6 +171,7 @@ _PROTECTED_ROUTERS = (
     accounts.organizations,
     accounts.api_keys,
     accounts.audit,
+    identity_providers.router,
     catalog.projects,
     catalog.datasets,
     catalog.records,
@@ -195,6 +200,8 @@ def _include_public_routes(app: FastAPI) -> None:
         protected.include_router(router)
     v1.include_router(protected)
     app.include_router(v1)
+    # SCIM provisioning: its own token type, rate limit and error schema.
+    app.include_router(scim.router)
 
 
 def _include_internal_routes(app: FastAPI) -> None:

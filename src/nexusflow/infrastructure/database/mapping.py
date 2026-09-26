@@ -14,6 +14,7 @@ from sqlalchemy.orm import registry
 from nexusflow.domain.alerts.model import Alert, AlertRule
 from nexusflow.domain.automation.model import DeadLetter, Workflow, WorkflowRun
 from nexusflow.domain.catalog.model import Dataset, Project
+from nexusflow.domain.identity.directory import DirectoryUser, ScimToken
 from nexusflow.domain.identity.model import (
     ApiKey,
     MfaRecoveryCode,
@@ -25,6 +26,7 @@ from nexusflow.domain.identity.model import (
     UserSession,
     WebAuthnCredential,
 )
+from nexusflow.domain.identity.sso import SsoConnection, SsoIdentity, SsoLoginState
 from nexusflow.domain.integrations.model import Integration
 from nexusflow.domain.intelligence.model import Insight
 from nexusflow.domain.notifications.model import NotificationChannel, NotificationDelivery
@@ -55,6 +57,11 @@ _MAPPINGS: list[tuple[type, Table]] = [
     (Invitation, t.invitations),
     (ApiKey, t.api_keys),
     (ServiceAccount, t.service_accounts),
+    (SsoConnection, t.sso_connections),
+    (SsoLoginState, t.sso_login_states),
+    (SsoIdentity, t.sso_identities),
+    (ScimToken, t.scim_tokens),
+    (DirectoryUser, t.scim_users),
     (OutboxMessage, t.outbox_messages),
     (Project, d.projects),
     (Dataset, d.datasets),

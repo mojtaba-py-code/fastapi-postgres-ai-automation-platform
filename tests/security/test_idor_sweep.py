@@ -96,6 +96,9 @@ async def _tenant_a_resources(owner: ApiSession) -> dict[str, str]:
         "insight": await _created(
             await owner.post("/api/v1/intelligence/analyses", json={"dataset_id": dataset})
         ),
+        "scim_token": await _created(
+            await owner.post("/api/v1/organizations/current/scim-tokens", json={"name": "okta"})
+        ),
     }
 
 
@@ -132,6 +135,7 @@ ATTEMPTS: list[tuple[str, str, dict[str, Any] | None]] = [
     ("GET", "/api/v1/reports/{report}/download", None),
     ("GET", "/api/v1/intelligence/insights/{insight}", None),
     ("POST", "/api/v1/intelligence/analyses", {"dataset_id": "{dataset}"}),
+    ("DELETE", "/api/v1/organizations/current/scim-tokens/{scim_token}", None),
 ]
 
 

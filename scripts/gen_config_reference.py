@@ -54,6 +54,11 @@ SECTION_NOTES: dict[str, str] = {
         "`webauthn_rp_id` names a parent domain of it, and passkey answers are accepted from "
         "that URL's origin plus `webauthn_origins`. See [PASSKEYS.md](PASSKEYS.md)."
     ),
+    "sso": (
+        "Single sign-on (OpenID Connect) and SCIM provisioning. Each organization configures "
+        "its own identity provider; these bound what the platform does with it. See "
+        "[SSO.md](SSO.md)."
+    ),
     "scraping": (
         "Outbound HTTP for collection: SSRF policy, limits, politeness and the browser service."
     ),

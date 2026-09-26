@@ -18,7 +18,7 @@ is authorized, tenant-isolated, idempotent and audited.
 | Concern | What NexusFlow does |
 |---|---|
 | **Tenant isolation** | PostgreSQL row-level security (`FORCE`d) enforced on a non-`BYPASSRLS` role, plus explicit `org_id` filters in every query. Cross-tenant IDs return `404`. |
-| **Authentication** | Sign-up proves the e-mail address first and answers alike for every address (no account enumeration). Argon2id passwords (breached passwords refused), 10-minute EdDSA access tokens, rotating refresh tokens with reuse detection, TOTP with replay prevention and phishing-resistant passkeys (WebAuthn) as second factors, progressive lockout, sign-in risk assessment (new device, new network, success after failures), a list of one's sessions with instant revocation, and scoped API keys hashed with a server-side pepper. Organizations can confine sessions and API keys to their own networks (IP allowlists). |
+| **Authentication** | Sign-up proves the e-mail address first and answers alike for every address (no account enumeration). Argon2id passwords (breached passwords refused), 10-minute EdDSA access tokens, rotating refresh tokens with reuse detection, TOTP with replay prevention and phishing-resistant passkeys (WebAuthn) as second factors, progressive lockout, sign-in risk assessment (new device, new network, success after failures), a list of one's sessions with instant revocation, and scoped API keys hashed with a server-side pepper. Organizations can confine sessions and API keys to their own networks (IP allowlists), and sign their members in through their own OpenID Connect provider (optionally required), with SCIM 2.0 provisioning - trusted only for the e-mail domains they proved they own. |
 | **Authorization** | Five roles (owner, admin, analyst, operator, viewer) and 38 permissions, checked at the route and again in the service. |
 | **SSRF** | Every outbound request passes a URL policy and a connect-time IP check against every DNS answer. Redirects are re-validated, bodies are size-capped and the decompressor is bounded. |
 | **Hostile content** | Web pages and uploaded files are parsed only in a **sandbox** worker that has no database, no storage and no secrets. Its only credential is a per-run HMAC ticket. |
@@ -113,6 +113,7 @@ for the developer workflow.
 | [SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md) | How the code was reviewed, every finding and its fix |
 | [ASVS.md](docs/ASVS.md) | Self-assessed mapping to OWASP ASVS 5.0 (target Level 2), with evidence and gaps |
 | [API.md](docs/API.md) | REST API: authentication, conventions, endpoints, errors |
+| [SSO.md](docs/SSO.md) | Single sign-on (OpenID Connect) and SCIM provisioning: setup, security model, limitations |
 | [CONFIGURATION.md](docs/CONFIGURATION.md) | Every setting, generated from the code |
 | [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Production deployment, secrets, rotation, backups, upgrades |
 | [DEMO.md](docs/DEMO.md) | The ten-minute evaluation and presentation guide |
@@ -172,9 +173,11 @@ configuration and image-digest drift checks. A self-assessed mapping to OWASP AS
   workflows are generated and linted; the browser's guard and pinning egress
   proxy are tested. The platform runs fully without n8n (`internal` mode, the
   default).
-* Single-host reference topology: no high availability, no SSO/SCIM, no admin
-  UI (API only). See [FINAL_REVIEW.md](docs/FINAL_REVIEW.md) for the full list
-  and a roadmap.
+* Single-host reference topology: no high availability, no admin UI (API only).
+  Single sign-on is OpenID Connect only (no SAML), and it needs the public API to
+  reach identity providers (an opt-in Compose overlay); its limitations are in
+  [SSO.md](docs/SSO.md). See [FINAL_REVIEW.md](docs/FINAL_REVIEW.md) for the full
+  list and a roadmap.
 
 ## License
 

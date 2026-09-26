@@ -15,6 +15,8 @@ class PrincipalType(StrEnum):
     API_KEY = "api_key"
     SERVICE = "service"
     SYSTEM = "system"
+    # An organization's SCIM provisioning token (the /scim/v2 API only).
+    SCIM = "scim"
 
 
 class ServiceScope(StrEnum):
@@ -39,6 +41,10 @@ class Principal:
     user_id: UUID | None = None
     session_id: UUID | None = None
     label: str = ""
+    # Set when the session was opened by an organization's identity provider:
+    # it is valid for that organization only, and its account-wide actions
+    # are confined to it (see ``domain.identity.sso``).
+    sso_org_id: UUID | None = None
 
     @classmethod
     def for_user(
@@ -49,6 +55,7 @@ class Principal:
         role: Role | None,
         session_id: UUID | None,
         label: str = "",
+        sso_org_id: UUID | None = None,
     ) -> Principal:
         return cls(
             type=PrincipalType.USER,
@@ -59,6 +66,7 @@ class Principal:
             user_id=user_id,
             session_id=session_id,
             label=label,
+            sso_org_id=sso_org_id,
         )
 
     @classmethod

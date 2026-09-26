@@ -16,21 +16,20 @@ from nexusflow.core.clock import Clock
 from nexusflow.core.errors import AuthenticationError, PermissionDeniedError
 from nexusflow.domain.authorization.principal import Principal, PrincipalType
 from nexusflow.domain.authorization.roles import permissions_for, role_covers
-from nexusflow.domain.identity.api_keys import CredentialKind, parse_credential
+from nexusflow.domain.identity.api_keys import (
+    CREDENTIAL_PREFIXES,
+    CredentialKind,
+    parse_credential,
+)
+from nexusflow.domain.identity.sso import satisfies_sso, sso_required_error
 from nexusflow.domain.identity.tokens import TokenCodec
-from nexusflow.domain.organizations.model import OrganizationSettings
+from nexusflow.domain.organizations.model import OrganizationSettings, network_not_allowed
 from nexusflow.domain.shared.security import TokenHasher
 from nexusflow.domain.shared.unit_of_work import TenantScope, UnitOfWorkFactory
 
+__all__ = ["Authenticator", "network_not_allowed"]
+
 _LAST_USED_RESOLUTION = timedelta(minutes=5)
-
-
-def network_not_allowed(internal_detail: str | None = None) -> PermissionDeniedError:
-    return PermissionDeniedError(
-        "The organization does not allow access from this network.",
-        code="ip_not_allowed",
-        internal_detail=internal_detail,
-    )
 
 
 def _require_allowed_network(
@@ -68,16 +67,22 @@ class Authenticator:
         networks - through its members' sessions and its API keys alike.
 
         ``mfa_setup`` is for the MFA enrolment endpoints only: where the
-        session's organization requires MFA the session has not passed, it
-        yields the *account* (no organization, no permissions) instead of
-        refusing - otherwise a member without MFA could never set it up.
+        session's organization requires MFA the session has not passed (or
+        single sign-on it did not use), it yields the *account* (no
+        organization, no permissions) instead of refusing - otherwise a member
+        without MFA could never set it up.
+
+        SCIM tokens are never accepted here: they work on ``/scim/v2`` only
+        (:meth:`authenticate_scim`).
         """
         parsed = parse_credential(credential)
         if parsed is not None:
             if parsed.kind is CredentialKind.API_KEY:
                 return await self._authenticate_api_key(parsed.prefix, parsed.full_token, client_ip)
-            return await self._authenticate_service(parsed.prefix, parsed.full_token)
-        if credential.startswith(("nxf_", "nxs_")):
+            if parsed.kind is CredentialKind.SERVICE_TOKEN:
+                return await self._authenticate_service(parsed.prefix, parsed.full_token)
+            raise _unauthenticated()  # a SCIM token: provisioning only, never this API
+        if credential.startswith(CREDENTIAL_PREFIXES):
             raise _unauthenticated()  # malformed/garbled key: fail before any DB access
         return await self._authenticate_access_token(credential, client_ip, mfa_setup)
 
@@ -91,32 +96,36 @@ class Authenticator:
             session = await uow.sessions.get(claims.session_id)
             if session is None or session.user_id != claims.user_id or not session.is_valid(now):
                 raise _unauthenticated()
+            # A session an identity provider opened is its organization's only.
+            if session.sso_org_id is not None and claims.org_id != session.sso_org_id:
+                raise _unauthenticated()
             user = await uow.users.get(claims.user_id)
             if user is None or not user.is_active or user.token_version != claims.token_version:
                 raise _unauthenticated()
+            account = Principal.for_user(
+                user_id=user.id,
+                org_id=None,
+                role=None,
+                session_id=session.id,
+                label=user.email,
+                sso_org_id=session.sso_org_id,
+            )
             if claims.org_id is None:
-                return Principal.for_user(
-                    user_id=user.id,
-                    org_id=None,
-                    role=None,
-                    session_id=session.id,
-                    label=user.email,
-                )
+                return account
             membership = await uow.memberships.get(claims.org_id, user.id)
             organization = await uow.organizations.get(claims.org_id)
             if membership is None or organization is None:
                 raise _unauthenticated()
             if not organization.is_active:
                 raise PermissionDeniedError("The organization is not active.", code="org_inactive")
-            if organization.policy.require_mfa and not session.mfa_verified:
+            policy = organization.policy
+            if policy.sso_required and not satisfies_sso(session, organization.id, membership.role):
                 if mfa_setup:
-                    return Principal.for_user(
-                        user_id=user.id,
-                        org_id=None,
-                        role=None,
-                        session_id=session.id,
-                        label=user.email,
-                    )
+                    return account  # an owner may still set up MFA for the way back in
+                raise sso_required_error()
+            if policy.require_mfa and not session.mfa_verified:
+                if mfa_setup:
+                    return account
                 raise PermissionDeniedError(
                     "This organization requires multi-factor authentication: set it up "
                     "(POST /api/v1/auth/mfa/enroll, then /mfa/confirm - or register a "
@@ -124,7 +133,7 @@ class Authenticator:
                     code="mfa_required",
                 )
             _require_allowed_network(
-                organization.policy, client_ip, org_id=organization.id, credential=f"user:{user.id}"
+                policy, client_ip, org_id=organization.id, credential=f"user:{user.id}"
             )
             return Principal.for_user(
                 user_id=user.id,
@@ -132,6 +141,45 @@ class Authenticator:
                 role=membership.role,
                 session_id=session.id,
                 label=user.email,
+                sso_org_id=session.sso_org_id,
+            )
+
+    async def authenticate_scim(self, credential: str, *, client_ip: str | None) -> Principal:
+        """A SCIM token: its organization's provisioning API, nothing else.
+
+        The organization's network allowlist applies as for API keys: add the
+        identity provider's provisioning addresses to it (docs/SSO.md)."""
+        parsed = parse_credential(credential)
+        if parsed is None or parsed.kind is not CredentialKind.SCIM_TOKEN:
+            raise _unauthenticated()
+        now = self._clock.now()
+        async with self._uow_factory(TenantScope.auth()) as uow:
+            token = await uow.scim_tokens.find_by_prefix(parsed.prefix)
+            if (
+                token is None
+                or not self._hasher.verify(parsed.full_token, token.token_hash)
+                or not token.is_usable(now)
+            ):
+                raise _unauthenticated()
+            await uow.switch_tenant(token.org_id)
+            organization = await uow.organizations.get(token.org_id)
+            if organization is None or not organization.is_active:
+                raise _unauthenticated()
+            _require_allowed_network(
+                organization.policy,
+                client_ip,
+                org_id=organization.id,
+                credential=f"scim:{parsed.prefix}",
+            )
+            if token.last_used_at is None or now - token.last_used_at > _LAST_USED_RESOLUTION:
+                token.last_used_at = now  # throttled write: at most every few minutes
+                await uow.commit()
+            return Principal(
+                type=PrincipalType.SCIM,
+                id=token.id,
+                org_id=token.org_id,
+                role=None,
+                label=f"scim:{token.name}",
             )
 
     async def _authenticate_api_key(

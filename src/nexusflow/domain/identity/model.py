@@ -124,6 +124,8 @@ class UserSession:
     ip: str | None = None
     user_agent: str | None = None
     mfa_verified: bool = False
+    # Opened by this organization's identity provider: valid for it only.
+    sso_org_id: UUID | None = None
 
     def is_valid(self, now: datetime) -> bool:
         return self.revoked_at is None and self.expires_at > now

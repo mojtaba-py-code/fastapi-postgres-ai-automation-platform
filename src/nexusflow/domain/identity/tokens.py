@@ -25,6 +25,10 @@ class MfaChallengeClaims:
     org_id: UUID | None
     challenge_id: str
     expires_at: datetime
+    # Issued by a single sign-on for ``org_id`` (the organization requires MFA
+    # its identity provider did not provide): completing it opens a session
+    # bound to that organization, never an ordinary one.
+    sso: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,7 +52,7 @@ class TokenCodec(Protocol):
     def decode_access_token(self, token: str, *, now: datetime) -> AccessTokenClaims: ...
 
     def issue_mfa_challenge(
-        self, *, user_id: UUID, org_id: UUID | None, now: datetime
+        self, *, user_id: UUID, org_id: UUID | None, now: datetime, sso: bool = False
     ) -> IssuedToken: ...
 
     def decode_mfa_challenge(self, token: str, *, now: datetime) -> MfaChallengeClaims: ...

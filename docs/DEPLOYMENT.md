@@ -289,6 +289,16 @@ make demo
   APIs, the pipeline worker and beat have no route off their internal networks:
   run the collector as a service on the `backend` network (and `monitoring`, to
   export onwards), not on the host or the internet.
+* **Single sign-on (OpenID Connect) and SCIM**: the public API finishes each
+  sign-in by calling the organization's identity provider (discovery document,
+  signing keys, token endpoint) and checks domain-ownership TXT records at a
+  DNS-over-HTTPS resolver (`NEXUSFLOW_SSO__DNS_RESOLVER_URL`). The base stack gives
+  the API no internet access; add it with the overlay
+  `docker compose -f docker-compose.yml -f docker-compose.sso.yml up -d`, and apply
+  the egress firewall above to the API as well. Without the overlay single sign-on
+  cannot be configured, and domains can be confirmed only by an operator
+  (`nexusflow sso verify-domain`). See [SSO.md](SSO.md) for the identity-provider
+  setup and the security model.
 
 ## 7. Monitoring
 
@@ -313,11 +323,13 @@ chain) are your external audit anchors: compare them with `nexusflow audit verif
 | What | Procedure | Impact |
 |---|---|---|
 | **JWT signing key** | 1. Generate a new Ed25519 key and set a new `jwt_key_id`. 2. Add the old public key to `jwt_previous_public_keys` so existing tokens validate until they expire. 3. Redeploy. 4. Remove the old public key after the access-token TTL. | None |
-| **KEK** | 1. Add a new key to `encryption_keys` and set `encryption_active_key_id`. 2. Redeploy. 3. Run `nexusflow keys rewrap` until it reports `"ok": true` (it lists what is left per tenant and exits 3 otherwise) - it re-wraps integration and webhook secrets, sealed field values in records, versions and changes, and the keys of stored files; the daily beat job does the same in batches. 4. Remove the old key. MFA secrets are re-encrypted on each user's next MFA sign-in, and staged payloads live only minutes, so keep old KEKs until all users have signed in or MFA was re-enrolled. | None |
+| **KEK** | 1. Add a new key to `encryption_keys` and set `encryption_active_key_id`. 2. Redeploy. 3. Run `nexusflow keys rewrap` until it reports `"ok": true` (it lists what is left per tenant and exits 3 otherwise) - it re-wraps integration and webhook secrets, single sign-on client secrets, sealed field values in records, versions and changes, and the keys of stored files; the daily beat job does the same in batches. 4. Remove the old key. MFA secrets are re-encrypted on each user's next MFA sign-in, and staged payloads live only minutes, so keep old KEKs until all users have signed in or MFA was re-enrolled. | None |
 | **HMAC pepper** | Only after a compromise, see INCIDENT_RESPONSE.md | All API keys, sessions and pending links become invalid |
 | **Service tokens** | `nexusflow service-account rotate --workflow-key <key>`, then update the n8n credential | That workflow fails until updated |
 | **Webhook secrets** | `POST /api/v1/webhook-endpoints/{id}/rotate-secret` (24 h grace) | None |
 | **Integration secrets** | `POST /api/v1/integrations/{id}/rotate` | None |
+| **Single sign-on client secret** | Create a new secret at the identity provider, then `PUT /api/v1/organizations/current/sso` with it | None (a new issuer or client id ends the provider's sessions) |
+| **SCIM tokens** | Create a new token (`POST /api/v1/organizations/current/scim-tokens`), set it at the identity provider, revoke the old one | None |
 | **Database / Redis / RabbitMQ passwords** | Change the role, ACL or definition, update the secret files (including `redis_sandbox_url` and `redis_sandbox_acl` for the sandbox Redis), restart the dependent services | Brief restart |
 
 ### Keys wrapped by Vault (optional)

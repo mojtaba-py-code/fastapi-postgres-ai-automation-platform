@@ -4,7 +4,8 @@ Recovery codes, the security e-mails, and the rule for changing second
 factors: from a signed-in session only, and - once an account has a second
 factor - only from a session that passed it at sign-in (or that set it up).
 A stolen session or API key, even with the password, cannot add a factor of
-its own to an account that has one, nor take one away.
+its own to an account that has one, nor take one away. Nor can a session an
+organization's identity provider opened, whatever MFA it reported.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from nexusflow.core.jsonutil import JSONObject
 from nexusflow.domain.authorization.principal import Principal
 from nexusflow.domain.identity.login_risk import SignInDetails
 from nexusflow.domain.identity.model import MfaRecoveryCode
+from nexusflow.domain.identity.sso import refuse_sso_session
 from nexusflow.domain.shared.outbox import TaskName, new_message
 from nexusflow.domain.shared.security import TokenHasher
 from nexusflow.domain.shared.unit_of_work import UnitOfWork
@@ -81,6 +83,16 @@ def session_of(principal: Principal) -> tuple[UUID, UUID]:
             "This action requires a signed-in user session.", code="session_required"
         )
     return principal.user_id, principal.session_id
+
+
+def factor_session_of(principal: Principal) -> tuple[UUID, UUID]:
+    """:func:`session_of` for listing and changing second factors: never from a
+    session an organization's identity provider opened. Its MFA - the
+    provider's, or the platform's after it - speaks for that organization
+    only, while the account's second factors guard every organization of the
+    person: "a session that passed one" must mean one of the account's own."""
+    refuse_sso_session(principal, "manage your second factors")
+    return session_of(principal)
 
 
 def verified_session_required() -> PermissionDeniedError:

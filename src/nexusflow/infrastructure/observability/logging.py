@@ -51,7 +51,7 @@ _SAFE_KEYS = frozenset(
 )
 _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
-    re.compile(r"nx[fs]_[a-z2-7]{12}_[A-Za-z0-9_-]{40,60}"),
+    re.compile(r"nx[fsp]_[a-z2-7]{12}_[A-Za-z0-9_-]{40,60}"),
     re.compile(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]{8,}"),
     re.compile(r"sk-ant-[A-Za-z0-9_-]{8,}"),
     re.compile(r"xox[abposr]-[A-Za-z0-9-]{8,}"),

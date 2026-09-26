@@ -91,6 +91,9 @@ user_sessions = Table(
     Column("ip", String(45)),
     Column("user_agent", String(256)),
     Column("mfa_verified", Boolean, nullable=False),
+    # Migration 0011: opened by this organization's identity provider - valid
+    # for it only (gone with the organization).
+    Column("sso_org_id", Uuid, ForeignKey("organizations.id", ondelete="CASCADE")),
     Index("ix_user_sessions_expires_at", "expires_at"),  # identity retention
 )
 
@@ -331,4 +334,132 @@ Index(
     "ix_user_sessions_org",
     user_sessions.c.org_id,
     postgresql_where=text("org_id IS NOT NULL"),
+)
+# Migration 0011: SSO sessions are revoked per organization, and deleted with it.
+Index(
+    "ix_user_sessions_sso_org",
+    user_sessions.c.sso_org_id,
+    postgresql_where=text("sso_org_id IS NOT NULL"),
+)
+
+# ------------------------------------------------ single sign-on (migration 0011)
+
+# One OpenID Connect identity provider per organization; the client secret is
+# sealed (AES-256-GCM envelope, bound to the organization and the row).
+sso_connections = Table(
+    "sso_connections",
+    metadata,
+    Column("id", Uuid, primary_key=True),
+    Column("org_id", Uuid, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False),
+    Column("issuer", String(512), nullable=False),
+    Column("client_id", String(255), nullable=False),
+    Column("client_secret_ciphertext", LargeBinary, nullable=False),
+    Column("secret_key_id", String(32), nullable=False),
+    Column("allowed_domains", ARRAY(String(253)), nullable=False),
+    Column("verified_domains", ARRAY(String(253)), nullable=False),
+    Column("default_role", StrEnumType(Role, 20), nullable=False),
+    Column("trust_idp_mfa", Boolean, nullable=False),
+    Column("created_by", Uuid, ForeignKey("users.id", ondelete="SET NULL")),
+    Column("created_at", TS, nullable=False),
+    Column("updated_at", TS, nullable=False),
+    UniqueConstraint("org_id"),
+    CheckConstraint("default_role IN ('viewer', 'analyst')", name="default_role"),
+)
+
+# Started sign-ins (single use, minutes long). Looked up by the keyed hash of
+# their state before the tenant is known: a narrow authentication-context read.
+sso_login_states = Table(
+    "sso_login_states",
+    metadata,
+    Column("id", Uuid, primary_key=True),
+    Column("org_id", Uuid, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False),
+    Column(
+        "connection_id",
+        Uuid,
+        ForeignKey("sso_connections.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("state_hash", String(64), nullable=False),
+    Column("binding_hash", String(64), nullable=False),
+    Column("nonce_hash", String(64), nullable=False),
+    Column("code_verifier_ciphertext", LargeBinary, nullable=False),
+    Column("created_at", TS, nullable=False),
+    Column("expires_at", TS, nullable=False),
+    Column("used_at", TS),
+    UniqueConstraint("state_hash"),
+    Index("ix_sso_login_states_org", "org_id"),
+    Index("ix_sso_login_states_connection", "connection_id"),
+    Index("ix_sso_login_states_expires_at", "expires_at"),
+)
+
+# A person's identity (iss + sub) at an organization's provider, linked to the
+# account; matched first on later sign-ins.
+sso_identities = Table(
+    "sso_identities",
+    metadata,
+    Column("id", Uuid, primary_key=True),
+    Column("org_id", Uuid, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False),
+    Column("user_id", Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("issuer", String(512), nullable=False),
+    Column("subject", String(255), nullable=False),
+    Column("email", String(254), nullable=False),
+    Column("created_at", TS, nullable=False),
+    Column("last_login_at", TS),
+    UniqueConstraint("org_id", "issuer", "subject", name="uq_sso_identities_subject"),
+    UniqueConstraint("org_id", "issuer", "user_id", name="uq_sso_identities_user"),
+    Index("ix_sso_identities_user_id", "user_id"),
+)
+
+# ------------------------------------------------ SCIM provisioning (migration 0011)
+
+scim_tokens = Table(
+    "scim_tokens",
+    metadata,
+    Column("id", Uuid, primary_key=True),
+    Column(
+        "org_id",
+        Uuid,
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    Column("name", String(100), nullable=False),
+    Column("token_prefix", String(12), nullable=False),
+    Column("token_hash", String(64), nullable=False),
+    Column("created_by", Uuid, ForeignKey("users.id", ondelete="SET NULL")),
+    Column("created_at", TS, nullable=False),
+    Column("expires_at", TS, nullable=False),
+    Column("last_used_at", TS),
+    Column("revoked_at", TS),
+    UniqueConstraint("token_prefix"),
+)
+
+# An organization's directory entries (SCIM "User" resources): which account
+# the identity provider manages there, and whether it is active.
+scim_users = Table(
+    "scim_users",
+    metadata,
+    Column("id", Uuid, primary_key=True),
+    Column("org_id", Uuid, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False),
+    Column("user_id", Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("user_name", String(254), nullable=False),
+    Column("external_id", String(255)),
+    Column("display_name", String(120)),
+    Column("given_name", String(120)),
+    Column("family_name", String(120)),
+    Column("formatted_name", String(200)),
+    Column("active", Boolean, nullable=False),
+    Column("created_at", TS, nullable=False),
+    Column("updated_at", TS, nullable=False),
+    UniqueConstraint("org_id", "user_id", name="uq_scim_users_user"),
+    CheckConstraint("user_name = lower(user_name)", name="user_name_lowercase"),
+    Index("ix_scim_users_user_name", "org_id", "user_name"),
+    Index("ix_scim_users_user_id", "user_id"),
+    Index(
+        "uq_scim_users_external_id",
+        "org_id",
+        "external_id",
+        unique=True,
+        postgresql_where=text("external_id IS NOT NULL"),
+    ),
 )

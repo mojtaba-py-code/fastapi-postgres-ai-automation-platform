@@ -14,6 +14,9 @@ this service manages an account's passkeys, always from a signed-in session.
   turn MFA off, which only ``POST /auth/mfa/disable`` does - with the password
   *and* a code, and ending every session.
 * Every change is audited and e-mailed to the account's address.
+* A session an organization's identity provider opened neither lists nor
+  changes passkeys (``403 sso_session_restricted``): its MFA speaks for that
+  organization only, the account's second factors guard all of them.
 """
 
 from __future__ import annotations
@@ -39,9 +42,9 @@ from nexusflow.domain.audit.recorder import AuditRecorder
 from nexusflow.domain.authorization.principal import Principal
 from nexusflow.domain.identity.account_service import PasswordConfirmation
 from nexusflow.domain.identity.factors import (
+    factor_session_of,
     generate_recovery_codes,
     queue_security_email,
-    session_of,
     verified_session_required,
 )
 from nexusflow.domain.identity.model import WebAuthnCredential
@@ -134,7 +137,7 @@ class PasskeyService:
     async def begin_registration(
         self, principal: Principal, *, password: str, meta: RequestMeta
     ) -> CreationOptions:
-        user_id, session_id = session_of(principal)
+        user_id, session_id = factor_session_of(principal)
         rp = self._relying_party()
         verified = await self._confirm_password(
             principal, password, meta, purpose="passkey_registration"
@@ -185,7 +188,7 @@ class PasskeyService:
         name: str | None,
         meta: RequestMeta,
     ) -> PasskeyRegistration:
-        user_id, session_id = session_of(principal)
+        user_id, session_id = factor_session_of(principal)
         rp = self._relying_party()
         now = self._clock.now()
         # Taken whatever happens next: each challenge is answered at most once.
@@ -223,7 +226,7 @@ class PasskeyService:
     async def _store(
         self, principal: Principal, passkey: WebAuthnCredential, meta: RequestMeta, now: datetime
     ) -> list[str]:
-        user_id, session_id = session_of(principal)
+        user_id, session_id = factor_session_of(principal)
         async with self._uow_factory(TenantScope.of(principal)) as uow:
             user = await uow.users.get_for_update(user_id)
             session = await uow.sessions.get_for_update(session_id)
@@ -289,14 +292,14 @@ class PasskeyService:
     # ------------------------------------------------------------- management
 
     async def list_passkeys(self, principal: Principal) -> list[WebAuthnCredential]:
-        user_id, _ = session_of(principal)
+        user_id, _ = factor_session_of(principal)
         async with self._uow_factory(TenantScope.of(principal)) as uow:
             return await uow.webauthn_credentials.list_for_user(user_id)
 
     async def rename(
         self, principal: Principal, passkey_id: UUID, *, name: str, meta: RequestMeta
     ) -> WebAuthnCredential:
-        user_id, _ = session_of(principal)
+        user_id, _ = factor_session_of(principal)
         label = clean_text(name, max_length=MAX_PASSKEY_NAME)
         if not label:
             raise InvalidInputError("A name is required.", code="name_required")
@@ -319,7 +322,7 @@ class PasskeyService:
     async def remove(
         self, principal: Principal, passkey_id: UUID, *, password: str, meta: RequestMeta
     ) -> None:
-        user_id, session_id = session_of(principal)
+        user_id, session_id = factor_session_of(principal)
         verified = await self._confirm_password(
             principal, password, meta, purpose="passkey_removal"
         )

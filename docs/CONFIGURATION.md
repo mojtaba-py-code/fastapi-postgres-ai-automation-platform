@@ -147,6 +147,19 @@ Key material, token lifetimes, password hashing, brute-force protection and the 
 | `NEXUSFLOW_VAULT__RETRIES` | int | `5` | >= 0; <= 20 |
 | `NEXUSFLOW_VAULT__ALLOW_INSECURE_HTTP` | bool | `false` |  |
 
+### `sso`
+
+Single sign-on (OpenID Connect) and SCIM provisioning. Each organization configures its own identity provider; these bound what the platform does with it. See [SSO.md](SSO.md).
+
+| Variable | Type | Default | Constraints |
+|---|---|---|---|
+| `NEXUSFLOW_SSO__STATE_TTL_SECONDS` | int | `600` | >= 120; <= 1800 |
+| `NEXUSFLOW_SSO__METADATA_CACHE_SECONDS` | int | `300` | >= 0; <= 3600 |
+| `NEXUSFLOW_SSO__CLOCK_SKEW_SECONDS` | int | `60` | >= 0; <= 300 |
+| `NEXUSFLOW_SSO__HTTP_TIMEOUT_SECONDS` | float | `10.0` | > 0; <= 30 |
+| `NEXUSFLOW_SSO__MAX_RESPONSE_BYTES` | int | `524288` | >= 16384; <= 4194304 |
+| `NEXUSFLOW_SSO__DNS_RESOLVER_URL` | str | `https://cloudflare-dns.com/dns-query` |  |
+
 ### `scraping`
 
 Outbound HTTP for collection: SSRF policy, limits, politeness and the browser service.
@@ -285,12 +298,15 @@ Default rules. `NEXUSFLOW_RATE_LIMITS__RULES` is a JSON object merged over these
 | `auth.register` | 10 | 3600 | reject (fail closed) |
 | `auth.register.account` | 3 | 3600 | reject (fail closed) |
 | `auth.register.complete` | 60 | 3600 | reject (fail closed) |
+| `auth.sso.callback` | 30 | 60 | reject (fail closed) |
+| `auth.sso.start` | 30 | 60 | reject (fail closed) |
 | `auth.webauthn.manage` | 30 | 900 | reject (fail closed) |
 | `auth.webauthn.sign_in` | 20 | 300 | reject (fail closed) |
 | `automation.service` | 1200 | 60 | allow (fail open) |
 | `external_api.integration` | 60 | 60 | allow (fail open) |
 | `notifications.channel` | 30 | 60 | allow (fail open) |
 | `sandbox.gateway` | 600 | 60 | allow (fail open) |
+| `scim.token` | 600 | 60 | reject (fail closed) |
 | `webhook.endpoint` | 120 | 60 | reject (fail closed) |
 | `webhook.ip` | 600 | 60 | reject (fail closed) |
 

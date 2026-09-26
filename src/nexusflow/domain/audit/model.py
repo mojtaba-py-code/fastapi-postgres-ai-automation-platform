@@ -35,6 +35,7 @@ class ActorType(StrEnum):
     SERVICE = "service"
     SYSTEM = "system"
     ANONYMOUS = "anonymous"
+    SCIM = "scim"  # an organization's SCIM provisioning token
 
 
 class AuditResult(StrEnum):
@@ -83,6 +84,25 @@ class AuditAction(StrEnum):
     ACCOUNT_DELETED = "auth.account_deleted"
     # A person's copy of their data (GDPR art. 15/20), self-service or operator.
     PERSONAL_DATA_EXPORTED = "privacy.data_exported"
+    # single sign-on (OpenID Connect), per organization
+    SSO_CONFIGURED = "sso.configured"
+    SSO_UPDATED = "sso.updated"
+    SSO_REMOVED = "sso.removed"
+    SSO_DOMAIN_VERIFIED = "sso.domain_verified"
+    SSO_LOGIN_SUCCEEDED = "auth.sso.succeeded"
+    SSO_LOGIN_FAILED = "auth.sso.failed"
+    SSO_IDENTITY_LINKED = "auth.sso.identity_linked"
+    SSO_JIT_USER_CREATED = "auth.sso.jit_user_created"
+    SSO_JIT_MEMBERSHIP_CREATED = "auth.sso.jit_membership_created"
+    # SCIM provisioning, per organization
+    SCIM_TOKEN_CREATED = "scim.token_created"  # noqa: S105 - event name  # nosec B105
+    SCIM_TOKEN_REVOKED = "scim.token_revoked"  # noqa: S105 - event name  # nosec B105
+    SCIM_USER_CREATED = "scim.user_created"
+    SCIM_USER_UPDATED = "scim.user_updated"
+    SCIM_USER_DEACTIVATED = "scim.user_deactivated"
+    SCIM_USER_REACTIVATED = "scim.user_reactivated"
+    SCIM_USER_DELETED = "scim.user_deleted"
+    SCIM_REQUEST_REFUSED = "scim.request_refused"
     # organization & membership
     ORG_CREATED = "org.created"
     ORG_UPDATED = "org.updated"

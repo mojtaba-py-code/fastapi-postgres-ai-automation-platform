@@ -21,6 +21,13 @@ Security design notes
 * **Second factors**: an authenticator app (TOTP), passkeys (WebAuthn), or
   both; recovery codes stand in for either. A wrong code or a refused passkey
   counts toward the same lockout as a wrong password.
+* **Single sign-on** (``sso_service``) ends here too: :meth:`complete_sso_sign_in`
+  opens a session bound to the identity provider's organization. Such a
+  session never switches organizations, and its account-wide actions (the
+  session list, "log out everywhere") are confined to that organization.
+  When the organization requires MFA its provider did not provide, the
+  platform's own second factor (TOTP, a passkey or a recovery code) completes
+  a challenge marked ``sso``, into the same bound session.
 """
 
 from __future__ import annotations
@@ -50,6 +57,7 @@ from nexusflow.domain.authorization.principal import Principal
 from nexusflow.domain.authorization.roles import Role
 from nexusflow.domain.identity.authenticator import network_not_allowed
 from nexusflow.domain.identity.factors import (
+    factor_session_of,
     generate_recovery_codes,
     normalize_recovery_code,
     queue_security_email,
@@ -74,7 +82,15 @@ from nexusflow.domain.identity.model import (
 from nexusflow.domain.identity.passkeys import descriptor, passkeys_unavailable
 from nexusflow.domain.identity.password_policy import PasswordPolicy
 from nexusflow.domain.identity.ports import TotpVerifier
-from nexusflow.domain.identity.tokens import TokenCodec
+from nexusflow.domain.identity.sso import (
+    SsoRefusal,
+    record_sso_failure,
+    refuse_sso_session,
+    resolve_sso_access,
+    satisfies_sso,
+    sso_required_error,
+)
+from nexusflow.domain.identity.tokens import MfaChallengeClaims, TokenCodec
 from nexusflow.domain.identity.webauthn import (
     CHALLENGE_BYTES,
     CHALLENGE_TTL_SECONDS,
@@ -553,17 +569,161 @@ class AuthService:
             if method is None:
                 await self._refuse_second_factor(uow, user, meta, now)
                 raise AuthenticationError("Verification failed.", code="mfa_failed")
-            tokens = await self._complete_login(
-                uow,
-                user,
-                claims.org_id,
-                meta,
-                now,
-                mfa_verified=True,
-                mfa_method=method,
-            )
+            tokens = await self._complete_second_factor(uow, user, claims, meta, now, method)
             await uow.commit()
         return tokens
+
+    async def _complete_second_factor(
+        self,
+        uow: UnitOfWork,
+        user: User,
+        claims: MfaChallengeClaims,
+        meta: RequestMeta,
+        now: datetime,
+        method: str,
+    ) -> TokenPair:
+        """The sign-in a proved second factor completes - by code (TOTP or a
+        recovery code) or by passkey alike: an ordinary one after the password
+        step, or, for a challenge a single sign-on issued, a session bound to
+        that organization (never an ordinary one)."""
+        if claims.sso:
+            if claims.org_id is None:  # never issued so: the codec refuses it
+                raise AuthenticationError("Verification failed.", code="mfa_failed")
+            return await self._complete_sso_step_up(
+                uow, user, claims.org_id, meta, now, mfa_method=method
+            )
+        return await self._complete_login(
+            uow, user, claims.org_id, meta, now, mfa_verified=True, mfa_method=method
+        )
+
+    async def _complete_sso_step_up(
+        self,
+        uow: UnitOfWork,
+        user: User,
+        org_id: UUID,
+        meta: RequestMeta,
+        now: datetime,
+        *,
+        mfa_method: str,
+    ) -> TokenPair:
+        """Everything a single sign-on checks when it opens a session, checked
+        again: minutes may have passed since the identity provider answered."""
+        await uow.switch_tenant(org_id)
+        try:
+            access = await resolve_sso_access(
+                uow, org_id=org_id, user_id=user.id, client_ip=meta.ip
+            )
+        except SsoRefusal as refusal:
+            # The factor was used (replay protection stays); the refusal is audited.
+            await record_sso_failure(
+                self._audit,
+                uow,
+                org_id=org_id,
+                reason=refusal.reason,
+                meta=meta,
+                user_id=user.id,
+                membership=refusal.membership,
+                metadata={"step": "mfa", "mfa_method": mfa_method},
+            )
+            await uow.commit()
+            raise refusal.error from None
+        return await self.complete_sso_sign_in(
+            uow,
+            user=user,
+            org_id=org_id,
+            role=access.membership.role,
+            meta=meta,
+            now=now,
+            mfa_verified=True,
+            idp_mfa=False,
+            new_account=False,
+            mfa_method=mfa_method,
+        )
+
+    async def sso_mfa_challenge(
+        self, uow: UnitOfWork, user: User, org_id: UUID, now: datetime
+    ) -> LoginResult:
+        """The platform's second factor after a single sign-on (the organization
+        requires MFA its identity provider did not provide), with the ways it
+        can be proved, as after the password step. Only :meth:`verify_mfa` and
+        :meth:`verify_passkey_sign_in` complete it, into a session bound to
+        ``org_id``. The caller commits."""
+        challenge = self._codec.issue_mfa_challenge(
+            user_id=user.id, org_id=org_id, now=now, sso=True
+        )
+        return LoginResult(
+            mfa_challenge=challenge.token,
+            mfa_challenge_expires_in=challenge.expires_in,
+            mfa_methods=await self._mfa_methods(uow, user),
+        )
+
+    async def complete_sso_sign_in(
+        self,
+        uow: UnitOfWork,
+        *,
+        user: User,
+        org_id: UUID,
+        role: Role,
+        meta: RequestMeta,
+        now: datetime,
+        mfa_verified: bool,
+        idp_mfa: bool,
+        new_account: bool,
+        mfa_method: str | None = None,
+    ) -> TokenPair:
+        """Open a session an identity provider authenticated: bound to its
+        organization. Sign-in risk and the new-device notice work as for a
+        password (not for an account created by this very sign-in).
+
+        The account's failure counter is left as it is - neither obeyed nor
+        reset: a provider's sign-in is no proof that someone guessing the
+        password or the second factor stopped (a completed password sign-in
+        resets it). The platform's own second factor after a single sign-on
+        does count: a wrong code or a refused passkey adds to the counter, and
+        a locked account cannot complete it. ``uow`` is scoped to ``org_id``."""
+        assessment = None if new_account else await self._assess_login(uow, user, meta, now)
+        user.last_login_at = now
+        user.updated_at = now
+        principal = Principal.for_user(
+            user_id=user.id, org_id=org_id, role=role, session_id=None, sso_org_id=org_id
+        )
+        metadata: JSONObject = {"mfa": mfa_verified, "idp_mfa": idp_mfa, "new_account": new_account}
+        if mfa_method is not None:
+            metadata["mfa_method"] = mfa_method  # the platform's: totp, recovery_code, webauthn
+        if assessment is not None:
+            metadata["risk"] = assessment.risk.value
+            metadata["signals"] = list(assessment.signals)
+        await self._audit.record(
+            uow.audit,
+            action=AuditAction.SSO_LOGIN_SUCCEEDED,
+            principal=principal,
+            meta=meta,
+            resource_type="user",
+            resource_id=user.id,
+            metadata=metadata,
+        )
+        if assessment is not None and assessment.risk is not LoginRisk.FAMILIAR:
+            suspicious = assessment.risk is LoginRisk.SUSPICIOUS
+            await self._audit.record(
+                uow.audit,
+                action=AuditAction.LOGIN_SUSPICIOUS if suspicious else AuditAction.LOGIN_NEW_DEVICE,
+                principal=principal,
+                meta=meta,
+                resource_type="user",
+                resource_id=user.id,
+                metadata={"signals": list(assessment.signals), "via": "sso"},
+            )
+            await self._notify(
+                uow,
+                user,
+                "suspicious_login" if suspicious else "new_device_login",
+                now,
+                sign_in=sign_in_details(at=now, ip=meta.ip, user_agent=meta.user_agent),
+            )
+        tokens = await self._start_session(
+            uow, user, org_id, meta, now, mfa_verified=mfa_verified, sso_org_id=org_id
+        )
+        return replace(tokens, login_risk=assessment.risk if assessment is not None else None)
 
     async def _refuse_second_factor(
         self,
@@ -654,7 +814,8 @@ class AuthService:
     async def begin_passkey_sign_in(
         self, *, challenge_token: str, meta: RequestMeta
     ) -> RequestOptions:
-        """Options to sign in with a passkey, once the password step issued a
+        """Options to sign in with a passkey, once the password step - or a
+        single sign-on that needs the platform's second factor - issued a
         challenge token. The WebAuthn challenge is bound to that token, lives
         at most five minutes (never beyond the token) and is single-use."""
         support, rp = self._passkey_support()
@@ -691,7 +852,9 @@ class AuthService:
     ) -> TokenPair:
         """Finish a sign-in with a passkey: exactly like a correct TOTP code
         (MFA-verified session, counters reset, audit, risk assessment) - and a
-        refused passkey counts toward the lockout like a wrong code."""
+        refused passkey counts toward the lockout like a wrong code. For a
+        challenge a single sign-on issued, also exactly like a TOTP code: a
+        session bound to that organization, the failure counter left as it is."""
         support, rp = self._passkey_support()
         now = self._clock.now()
         claims = self._codec.decode_mfa_challenge(challenge_token, now=now)
@@ -708,15 +871,7 @@ class AuthService:
                     uow, user, meta, now, {"method": "webauthn", "reason": rejected.reason}
                 )
                 raise AuthenticationError("Verification failed.", code="mfa_failed") from None
-            tokens = await self._complete_login(
-                uow,
-                user,
-                claims.org_id,
-                meta,
-                now,
-                mfa_verified=True,
-                mfa_method="webauthn",
-            )
+            tokens = await self._complete_second_factor(uow, user, claims, meta, now, "webauthn")
             await uow.commit()
         return tokens
 
@@ -785,7 +940,9 @@ class AuthService:
         mfa_verified: bool,
         mfa_method: str | None = None,
     ) -> TokenPair:
-        org_id, role = await self._resolve_login_org(uow, user, requested_org, meta)
+        org_id, role = await self._resolve_login_org(
+            uow, user, requested_org, meta, mfa_verified=mfa_verified
+        )
         # Before the success resets the failure counters the assessment looks at.
         assessment = await self._assess_login(uow, user, meta, now)
         user.register_successful_login(now)
@@ -829,14 +986,22 @@ class AuthService:
         return replace(tokens, login_risk=assessment.risk)
 
     async def _resolve_login_org(
-        self, uow: UnitOfWork, user: User, requested: UUID | None, meta: RequestMeta
+        self,
+        uow: UnitOfWork,
+        user: User,
+        requested: UUID | None,
+        meta: RequestMeta,
+        *,
+        mfa_verified: bool,
     ) -> tuple[UUID | None, Role | None]:
         """The organization the new session opens in.
 
         An organization's network allowlist is enforced here too: signing in to
         it by name from elsewhere is refused; when it was only the default, the
         session starts without an organization - the account stays reachable,
-        the organization's data does not.
+        the organization's data does not. An organization that requires single
+        sign-on is treated the same way, except for its owners signing in with
+        password and MFA (the break-glass way in).
         """
         if requested is not None:
             await uow.switch_tenant(requested)
@@ -844,6 +1009,23 @@ class AuthService:
             org = await uow.organizations.get(requested) if membership else None
             if membership is None or org is None or not org.is_active:
                 raise AuthenticationError(_INVALID_CREDENTIALS, code="invalid_credentials")
+            if org.policy.sso_required and not _password_break_glass(membership.role, mfa_verified):
+                # A correct password aimed past the identity provider: the
+                # organization's trail shows it.
+                await self._audit.record(
+                    uow.audit,
+                    action=AuditAction.LOGIN_FAILED,
+                    principal=None,
+                    meta=meta,
+                    result=AuditResult.DENIED,
+                    org_id=requested,
+                    actor_id=user.id,
+                    resource_type="organization",
+                    resource_id=requested,
+                    metadata={"reason": "sso_required", "mfa": mfa_verified},
+                )
+                await uow.commit()
+                raise sso_required_error()
             if not org.policy.allows_ip(meta.ip):
                 await self._record_network_denied(uow, user.id, membership, meta, via="sign_in")
                 await uow.commit()
@@ -856,6 +1038,12 @@ class AuthService:
         org = await uow.organizations.get(membership.org_id)
         if org is not None and not org.policy.allows_ip(meta.ip):
             await self._record_network_denied(uow, user.id, membership, meta, via="sign_in")
+            return None, None
+        if (
+            org is not None
+            and org.policy.sso_required
+            and not _password_break_glass(membership.role, mfa_verified)
+        ):
             return None, None
         return membership.org_id, membership.role
 
@@ -908,6 +1096,7 @@ class AuthService:
         now: datetime,
         *,
         mfa_verified: bool,
+        sso_org_id: UUID | None = None,
     ) -> TokenPair:
         session = UserSession(
             id=uuid7(),
@@ -919,6 +1108,7 @@ class AuthService:
             ip=meta.ip,
             user_agent=meta.user_agent,
             mfa_verified=mfa_verified,
+            sso_org_id=sso_org_id,
         )
         await uow.sessions.add(session)
         return await self._issue_tokens(uow, user, session, now)
@@ -1010,6 +1200,12 @@ class AuthService:
             if session.org_id is not None:
                 await uow.switch_tenant(session.org_id)
                 membership = await uow.memberships.get(session.org_id, user.id)
+                if membership is None and session.sso_org_id is not None:
+                    # An identity provider's session is worth nothing outside its
+                    # organization: it ends with the membership.
+                    session.revoke(now, "membership_removed")
+                    await uow.commit()
+                    raise invalid
                 if membership is None:
                     session.org_id = None
                 else:
@@ -1075,11 +1271,15 @@ class AuthService:
             await uow.commit()
 
     async def list_sessions(self, principal: Principal) -> list[UserSession]:
-        """The caller's live sign-in sessions, most recently used first."""
+        """The caller's live sign-in sessions, most recently used first. From a
+        session an identity provider opened: that organization's ones only."""
         user_id = _require_session(principal)
         async with self._uow_factory(TenantScope.of(principal)) as uow:
             return await uow.sessions.list_active_for_user(
-                user_id, now=self._clock.now(), limit=_MAX_LISTED_SESSIONS
+                user_id,
+                now=self._clock.now(),
+                limit=_MAX_LISTED_SESSIONS,
+                sso_org_id=principal.sso_org_id,
             )
 
     async def revoke_session(
@@ -1090,8 +1290,12 @@ class AuthService:
         now = self._clock.now()
         async with self._uow_factory(TenantScope.of(principal)) as uow:
             session = await uow.sessions.get_for_update(session_id)
-            if session is None or session.user_id != user_id:
-                raise NotFoundError()  # another user's session does not exist for you
+            if (
+                session is None
+                or session.user_id != user_id
+                or (principal.sso_org_id is not None and session.sso_org_id != principal.sso_org_id)
+            ):
+                raise NotFoundError()  # another user's (or organization's) session does not exist
             session.revoke(now, "revoked_by_user")
             await self._audit.record(
                 uow.audit,
@@ -1105,14 +1309,19 @@ class AuthService:
             await uow.commit()
 
     async def logout_everywhere(self, principal: Principal, meta: RequestMeta) -> None:
+        """End every session of the account - or, from a session an identity
+        provider opened, every session that provider opened for the account."""
         user_id = _require_user(principal)
         now = self._clock.now()
         async with self._uow_factory(TenantScope.of(principal)) as uow:
             user = await uow.users.get_for_update(user_id)
             if user is None:
                 raise NotFoundError()
-            user.revoke_all_tokens(now)
-            await uow.sessions.revoke_all_for_user(user.id, now=now, reason="logout_all")
+            if principal.sso_org_id is None:
+                user.revoke_all_tokens(now)
+            await uow.sessions.revoke_all_for_user(
+                user.id, now=now, reason="logout_all", sso_org_id=principal.sso_org_id
+            )
             await self._audit.record(
                 uow.audit,
                 action=AuditAction.LOGOUT_ALL,
@@ -1120,6 +1329,7 @@ class AuthService:
                 meta=meta,
                 resource_type="user",
                 resource_id=user.id,
+                metadata={"sso_only": principal.sso_org_id is not None},
             )
             await uow.commit()
 
@@ -1137,8 +1347,16 @@ class AuthService:
             session = await uow.sessions.get_for_update(principal.session_id)
             if membership is None or org is None or user is None or session is None:
                 raise NotFoundError()
+            if session.sso_org_id is not None and session.sso_org_id != org_id:
+                raise PermissionDeniedError(
+                    "This session was opened by an organization's identity provider and "
+                    "reaches that organization only: sign in again for another one.",
+                    code="sso_session_bound",
+                )
             if not org.is_active:
                 raise PermissionDeniedError("The organization is not active.", code="org_inactive")
+            if org.policy.sso_required and not satisfies_sso(session, org_id, membership.role):
+                raise sso_required_error()
             if org.policy.require_mfa and not session.mfa_verified:
                 raise PermissionDeniedError(
                     "This organization requires multi-factor authentication.", code="mfa_required"
@@ -1168,6 +1386,8 @@ class AuthService:
         self, principal: Principal, *, current_password: str, new_password: str, meta: RequestMeta
     ) -> TokenPair:
         user_id = _require_user(principal)
+        # The password is the account's, for every organization of the person.
+        refuse_sso_session(principal, "change your password")
         now = self._clock.now()
         # 1. Read, then hash outside any row lock (hashing is deliberately slow).
         async with self._uow_factory(TenantScope.of(principal)) as uow:
@@ -1304,7 +1524,7 @@ class AuthService:
     async def begin_mfa_enrollment(
         self, principal: Principal, *, password: str, meta: RequestMeta
     ) -> MfaEnrollment:
-        user_id = _require_session(principal)
+        user_id, _ = factor_session_of(principal)
         verified = await self.confirm_password(principal, password, meta, purpose="mfa_enrollment")
         now = self._clock.now()
         async with self._uow_factory(TenantScope.of(principal)) as uow:
@@ -1336,7 +1556,7 @@ class AuthService:
     ) -> list[str]:
         """Activate the authenticator app and return one-time recovery codes
         (shown exactly once; they replace any earlier ones)."""
-        user_id = _require_session(principal)
+        user_id, _ = factor_session_of(principal)
         now = self._clock.now()
         async with self._uow_factory(TenantScope.of(principal)) as uow:
             user = await uow.users.get_for_update(user_id)
@@ -1381,7 +1601,7 @@ class AuthService:
         TOTP or recovery code, and end every session. It is the only way MFA
         goes off: removing the last passkey of an account without TOTP is
         refused instead."""
-        user_id = _require_session(principal)
+        user_id, _ = factor_session_of(principal)
         verified = await self.confirm_password(principal, password, meta, purpose="mfa_disable")
         now = self._clock.now()
         async with self._uow_factory(TenantScope.of(principal)) as uow:
@@ -1497,6 +1717,13 @@ class AuthService:
     ) -> None:
         """Queue a security notification e-mail (rendered by the mail worker)."""
         await queue_security_email(uow, user.id, template, now, sign_in=sign_in)
+
+
+def _password_break_glass(role: Role, mfa_verified: bool) -> bool:
+    """Owners who passed the platform's own MFA reach an organization that
+    requires single sign-on without it - the way back in when the identity
+    provider is down or misconfigured. Nobody else does."""
+    return role is Role.OWNER and mfa_verified
 
 
 def _require_session(principal: Principal) -> UUID:

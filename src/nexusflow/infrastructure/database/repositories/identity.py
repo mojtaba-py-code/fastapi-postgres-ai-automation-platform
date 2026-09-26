@@ -17,6 +17,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nexusflow.core.errors import ConflictError
 from nexusflow.core.pagination import Page, PageRequest
 from nexusflow.domain.authorization.roles import Role
+from nexusflow.domain.identity.directory import (
+    DirectoryFilter,
+    DirectoryFilterField,
+    DirectoryUser,
+    ScimToken,
+)
 from nexusflow.domain.identity.model import (
     ApiKey,
     MfaRecoveryCode,
@@ -28,6 +34,7 @@ from nexusflow.domain.identity.model import (
     UserSession,
     WebAuthnCredential,
 )
+from nexusflow.domain.identity.sso import SsoConnection, SsoIdentity, SsoLoginState
 from nexusflow.domain.organizations.model import (
     Invitation,
     Membership,
@@ -103,7 +110,7 @@ class SqlSessionRepository:
         return list((await self._s.execute(statement)).scalars().all())
 
     async def list_active_for_user(
-        self, user_id: UUID, *, now: datetime, limit: int
+        self, user_id: UUID, *, now: datetime, limit: int, sso_org_id: UUID | None = None
     ) -> list[UserSession]:
         s = t.user_sessions
         statement = (
@@ -112,10 +119,18 @@ class SqlSessionRepository:
             .order_by(s.c.last_used_at.desc())
             .limit(limit)
         )
+        if sso_org_id is not None:
+            statement = statement.where(s.c.sso_org_id == sso_org_id)
         return list((await self._s.execute(statement)).scalars().all())
 
     async def revoke_all_for_user(
-        self, user_id: UUID, *, now: datetime, reason: str, except_session: UUID | None = None
+        self,
+        user_id: UUID,
+        *,
+        now: datetime,
+        reason: str,
+        except_session: UUID | None = None,
+        sso_org_id: UUID | None = None,
     ) -> int:
         statement = (
             update(t.user_sessions)
@@ -124,7 +139,19 @@ class SqlSessionRepository:
         )
         if except_session is not None:
             statement = statement.where(t.user_sessions.c.id != except_session)
+        if sso_org_id is not None:
+            statement = statement.where(t.user_sessions.c.sso_org_id == sso_org_id)
         result = await self._s.execute(statement.execution_options(synchronize_session=False))
+        return int(getattr(result, "rowcount", 0) or 0)
+
+    async def revoke_sso_sessions(self, org_id: UUID, *, now: datetime, reason: str) -> int:
+        s = t.user_sessions
+        result = await self._s.execute(
+            update(s)
+            .where(s.c.sso_org_id == org_id, s.c.revoked_at.is_(None))
+            .values(revoked_at=now, revoke_reason=reason)
+            .execution_options(synchronize_session=False)
+        )
         return int(getattr(result, "rowcount", 0) or 0)
 
     async def list_for_user(self, user_id: UUID, *, limit: int) -> list[UserSession]:
@@ -414,6 +441,10 @@ class SqlOrganizationRepository:
         )
         return bool((await self._s.execute(statement)).scalar_one())
 
+    async def get_by_slug(self, slug: str) -> Organization | None:
+        statement = select(Organization).where(t.organizations.c.slug == slug)
+        return (await self._s.execute(statement)).scalar_one_or_none()
+
     async def list_for_user(self, user_id: UUID) -> list[OrganizationView]:
         o, m = t.organizations, t.memberships
         statement = (
@@ -558,3 +589,271 @@ class SqlInvitationRepository:
             id_column=t.invitations.c.id,
             key=lambda i: (i.created_at, i.id),
         )
+
+
+# ------------------------------------------------------------ single sign-on
+
+
+class SqlSsoConnectionRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._s = session
+
+    async def add(self, connection: SsoConnection) -> None:
+        self._s.add(connection)
+        try:
+            await self._s.flush()
+        except IntegrityError as exc:  # one connection per organization
+            raise ConflictError(
+                "Single sign-on is already configured.",
+                code="duplicate",
+                internal_detail=str(exc.orig)[:300],
+            ) from exc
+
+    async def get_for_org(self, org_id: UUID, *, for_update: bool = False) -> SsoConnection | None:
+        statement = select(SsoConnection).where(t.sso_connections.c.org_id == org_id)
+        if for_update:
+            statement = statement.with_for_update().execution_options(populate_existing=True)
+        return (await self._s.execute(statement)).scalar_one_or_none()
+
+    async def delete(self, connection: SsoConnection) -> None:
+        await self._s.delete(connection)
+        await self._s.flush()
+
+    async def needing_rewrap(
+        self, org_id: UUID, active_key_id: str, limit: int
+    ) -> list[SsoConnection]:
+        c = t.sso_connections
+        statement = (
+            select(SsoConnection)
+            .where(c.c.org_id == org_id, c.c.secret_key_id != active_key_id)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+        return list((await self._s.execute(statement)).scalars().all())
+
+    async def count_needing_rewrap(self, org_id: UUID, active_key_id: str) -> int:
+        c = t.sso_connections
+        statement = (
+            select(func.count())
+            .select_from(c)
+            .where(c.c.org_id == org_id, c.c.secret_key_id != active_key_id)
+        )
+        return int((await self._s.execute(statement)).scalar_one())
+
+
+class SqlSsoLoginStateRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._s = session
+
+    async def add(self, state: SsoLoginState) -> None:
+        self._s.add(state)
+        await self._s.flush()
+
+    async def find_by_hash(self, state_hash: str) -> SsoLoginState | None:
+        statement = select(SsoLoginState).where(t.sso_login_states.c.state_hash == state_hash)
+        return (await self._s.execute(statement)).scalar_one_or_none()
+
+    async def consume(self, org_id: UUID, state_id: UUID, *, now: datetime) -> bool:
+        s = t.sso_login_states
+        result = await self._s.execute(
+            update(s)
+            .where(
+                s.c.org_id == org_id,
+                s.c.id == state_id,
+                s.c.used_at.is_(None),
+                s.c.expires_at > now,
+            )
+            .values(used_at=now)
+            .returning(s.c.id)
+            .execution_options(synchronize_session=False)
+        )
+        return result.first() is not None
+
+    async def delete_for_org(self, org_id: UUID) -> int:
+        result = await self._s.execute(
+            delete(t.sso_login_states)
+            .where(t.sso_login_states.c.org_id == org_id)
+            .execution_options(synchronize_session=False)
+        )
+        return int(getattr(result, "rowcount", 0) or 0)
+
+    async def purge_expired(self, before: datetime, *, limit: int) -> int:
+        return await _purge_expired(self._s, t.sso_login_states, before, limit)
+
+
+class SqlSsoIdentityRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._s = session
+
+    async def add(self, identity: SsoIdentity) -> None:
+        self._s.add(identity)
+        try:
+            await self._s.flush()
+        except IntegrityError as exc:  # a concurrent sign-in linked it first
+            raise ConflictError(
+                "The identity is already linked.",
+                code="identity_conflict",
+                internal_detail=str(exc.orig)[:300],
+            ) from exc
+
+    async def find_by_subject(self, org_id: UUID, issuer: str, subject: str) -> SsoIdentity | None:
+        i = t.sso_identities
+        statement = select(SsoIdentity).where(
+            i.c.org_id == org_id, i.c.issuer == issuer, i.c.subject == subject
+        )
+        return (await self._s.execute(statement)).scalar_one_or_none()
+
+    async def find_for_user(self, org_id: UUID, issuer: str, user_id: UUID) -> SsoIdentity | None:
+        i = t.sso_identities
+        statement = select(SsoIdentity).where(
+            i.c.org_id == org_id, i.c.issuer == issuer, i.c.user_id == user_id
+        )
+        return (await self._s.execute(statement)).scalar_one_or_none()
+
+    async def delete_for_org(self, org_id: UUID) -> int:
+        result = await self._s.execute(
+            delete(t.sso_identities)
+            .where(t.sso_identities.c.org_id == org_id)
+            .execution_options(synchronize_session=False)
+        )
+        return int(getattr(result, "rowcount", 0) or 0)
+
+    async def delete_for_user(self, user_id: UUID) -> int:
+        result = await self._s.execute(
+            delete(t.sso_identities)
+            .where(t.sso_identities.c.user_id == user_id)
+            .execution_options(synchronize_session=False)
+        )
+        return int(getattr(result, "rowcount", 0) or 0)
+
+    async def list_for_user(self, user_id: UUID, limit: int) -> list[SsoIdentity]:
+        i = t.sso_identities
+        statement = (
+            select(SsoIdentity)
+            .where(i.c.user_id == user_id)
+            .order_by(i.c.created_at.desc())
+            .limit(limit)
+        )
+        return list((await self._s.execute(statement)).scalars().all())
+
+
+# ------------------------------------------------------------ SCIM provisioning
+
+
+class SqlScimTokenRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._s = session
+
+    async def add(self, token: ScimToken) -> None:
+        self._s.add(token)
+        await self._s.flush()
+
+    async def get(self, org_id: UUID, token_id: UUID) -> ScimToken | None:
+        s = t.scim_tokens
+        statement = select(ScimToken).where(s.c.org_id == org_id, s.c.id == token_id)
+        return (await self._s.execute(statement)).scalar_one_or_none()
+
+    async def find_by_prefix(self, prefix: str) -> ScimToken | None:
+        statement = select(ScimToken).where(t.scim_tokens.c.token_prefix == prefix)
+        return (await self._s.execute(statement)).scalar_one_or_none()
+
+    async def list_for_org(self, org_id: UUID) -> list[ScimToken]:
+        s = t.scim_tokens
+        statement = (
+            select(ScimToken)
+            .where(s.c.org_id == org_id)
+            .order_by(s.c.created_at.desc(), s.c.id.desc())
+            .limit(200)
+        )
+        return list((await self._s.execute(statement)).scalars().all())
+
+
+# Past this offset a SCIM page is empty anyway; larger values would not fit OFFSET.
+_MAX_OFFSET = 2_000_000_000
+
+
+class SqlDirectoryUserRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._s = session
+
+    async def add(self, user: DirectoryUser) -> None:
+        self._s.add(user)
+        try:
+            await self._s.flush()
+        except IntegrityError as exc:  # the same person or externalId, provisioned at once
+            raise ConflictError(
+                "The user is already provisioned.",
+                code="uniqueness",
+                internal_detail=str(exc.orig)[:300],
+            ) from exc
+
+    async def get(
+        self, org_id: UUID, record_id: UUID, *, for_update: bool = False
+    ) -> DirectoryUser | None:
+        u = t.scim_users
+        statement = select(DirectoryUser).where(u.c.org_id == org_id, u.c.id == record_id)
+        if for_update:
+            statement = statement.with_for_update().execution_options(populate_existing=True)
+        return (await self._s.execute(statement)).scalar_one_or_none()
+
+    async def get_by_user(self, org_id: UUID, user_id: UUID) -> DirectoryUser | None:
+        u = t.scim_users
+        statement = select(DirectoryUser).where(u.c.org_id == org_id, u.c.user_id == user_id)
+        return (await self._s.execute(statement)).scalar_one_or_none()
+
+    async def get_by_external_id(self, org_id: UUID, external_id: str) -> DirectoryUser | None:
+        u = t.scim_users
+        statement = select(DirectoryUser).where(
+            u.c.org_id == org_id, u.c.external_id == external_id
+        )
+        return (await self._s.execute(statement)).scalar_one_or_none()
+
+    async def list_page(
+        self,
+        org_id: UUID,
+        *,
+        directory_filter: DirectoryFilter | None,
+        offset: int,
+        limit: int,
+    ) -> tuple[int, list[DirectoryUser]]:
+        u = t.scim_users
+        conditions = [u.c.org_id == org_id]
+        if directory_filter is not None:
+            if directory_filter.field is DirectoryFilterField.EXTERNAL_ID:
+                conditions.append(u.c.external_id == directory_filter.value)
+            else:  # userName and emails.value: the account's address, in any case
+                conditions.append(u.c.user_name == directory_filter.value.lower())
+        counted = await self._s.execute(select(func.count()).select_from(u).where(*conditions))
+        total = int(counted.scalar_one())
+        if limit <= 0 or offset >= total:
+            return total, []
+        statement = (
+            select(DirectoryUser)
+            .where(*conditions)
+            .order_by(u.c.created_at, u.c.id)
+            .offset(min(offset, _MAX_OFFSET))
+            .limit(limit)
+        )
+        return total, list((await self._s.execute(statement)).scalars().all())
+
+    async def delete(self, user: DirectoryUser) -> None:
+        await self._s.delete(user)
+        await self._s.flush()
+
+    async def delete_for_user(self, user_id: UUID) -> int:
+        result = await self._s.execute(
+            delete(t.scim_users)
+            .where(t.scim_users.c.user_id == user_id)
+            .execution_options(synchronize_session=False)
+        )
+        return int(getattr(result, "rowcount", 0) or 0)
+
+    async def list_for_user(self, user_id: UUID, limit: int) -> list[DirectoryUser]:
+        u = t.scim_users
+        statement = (
+            select(DirectoryUser)
+            .where(u.c.user_id == user_id)
+            .order_by(u.c.created_at.desc())
+            .limit(limit)
+        )
+        return list((await self._s.execute(statement)).scalars().all())

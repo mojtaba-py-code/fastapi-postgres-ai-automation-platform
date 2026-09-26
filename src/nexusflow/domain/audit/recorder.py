@@ -27,6 +27,7 @@ _ACTOR_TYPES = {
     PrincipalType.API_KEY: ActorType.API_KEY,
     PrincipalType.SERVICE: ActorType.SERVICE,
     PrincipalType.SYSTEM: ActorType.SYSTEM,
+    PrincipalType.SCIM: ActorType.SCIM,
 }
 
 

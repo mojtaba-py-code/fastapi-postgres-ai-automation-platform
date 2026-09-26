@@ -1,0 +1,22 @@
+# Single sign-on overlay: lets the public API reach identity providers.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.sso.yml up -d
+#
+# Signing in through an organization's identity provider (OpenID Connect) is
+# finished by the public API: it fetches the provider's discovery document and
+# signing keys, redeems the authorization code at the token endpoint, and looks
+# up domain-ownership TXT records at a DNS-over-HTTPS resolver. In the base
+# stack the API has no internet access at all; this overlay adds it to the
+# `egress` network (inter-container traffic disabled there).
+#
+# Every one of those requests goes through the SSRF-guarded client (HTTPS on
+# port 443 only, every DNS answer checked at connect time, size and time
+# limits). Apply the egress firewall of docs/DEPLOYMENT.md (section 1) to it as
+# well. The trade-off - the public API can now open outbound connections - is
+# described in docs/SSO.md ("Deployment"). Without this overlay, organizations
+# cannot configure or use single sign-on (discovery fails); SCIM provisioning
+# needs no outbound access, but depends on single sign-on for verified domains.
+
+services:
+  api:
+    networks: [edge, backend, av, egress]

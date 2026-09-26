@@ -40,8 +40,10 @@ def test_secret_patterns_scrubbed_in_free_text(secret: str) -> None:
     assert secret not in redact_text(text)
 
 
-def test_api_keys_scrubbed() -> None:
-    token = generate_credential(CredentialKind.API_KEY).token
+@pytest.mark.parametrize("kind", list(CredentialKind))
+def test_machine_credentials_scrubbed(kind: CredentialKind) -> None:
+    # API keys, n8n service tokens and SCIM provisioning tokens alike.
+    token = generate_credential(kind).token
     assert token not in redact_text(f"key={token}")
 
 
