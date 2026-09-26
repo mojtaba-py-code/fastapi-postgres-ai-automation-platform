@@ -8,7 +8,9 @@ only), domain verification, just-in-time accounts and memberships, linking an
 existing account and matching it by its subject later, every refusal of the
 callback (state, binding, nonce, signature, algorithm, audience, times,
 unverified or foreign addresses, a subject conflict), MFA from the provider or
-the platform, the network allowlist, and the audit trail of all of it.
+the platform (a TOTP or recovery code, or a passkey - into the same bound
+session, counted toward the lockout when refused), the network allowlist, and
+the audit trail of all of it.
 """
 
 from __future__ import annotations
@@ -55,6 +57,7 @@ from tests.support.oidc import (
     unsigned_token,
     verify,
 )
+from tests.support.webauthn import SoftwareAuthenticator
 
 pytestmark = [pytest.mark.integration, pytest.mark.security]
 
@@ -775,6 +778,7 @@ class TestMfa:
         assert challenge.status_code == 200, challenge.text
         body = challenge.json()
         assert body["mfa_required"] is True and "access_token" not in body
+        assert body["methods"] == ["totp", "recovery_code"]  # as after the password step
         verified = await api.post(
             "/api/v1/auth/mfa/verify", json={"mfa_token": body["mfa_token"], "code": recovery}
         )
@@ -793,6 +797,172 @@ class TestMfa:
             alice.email,
         )
         assert stored == UUID(verified.json()["organization_id"])
+
+    async def test_a_passkey_completes_a_sso_sign_in_into_a_bound_session(
+        self, api: httpx2.AsyncClient, network: FakeNetwork, admin_conn: asyncpg.Connection
+    ) -> None:
+        domain = fresh_domain()
+        alice = await signup(api, email=f"alice@{domain}")
+        authenticator = await _register_passkey(alice)  # her only second factor
+        idp = FakeIdp()
+        slug, org_id = await _requiring_mfa(api, network, idp, domain)
+
+        challenge = await sign_in(api, idp, slug, email=alice.email)
+        assert challenge.status_code == 200, challenge.text
+        body = challenge.json()
+        assert body["mfa_required"] is True and "access_token" not in body
+        assert body["methods"] == ["webauthn", "recovery_code"]  # no authenticator app
+        verified = await _passkey_step(api, body["mfa_token"], authenticator)
+        session = session_of(api, verified, alice.email)
+        assert verified.json()["organization_id"] == str(org_id)
+        assert (await session.get("/api/v1/projects")).status_code == 200
+
+        # Bound to the organization exactly as after a code - never an ordinary session.
+        own_org = str(await org_id_of(alice))
+        switched = await session.post(
+            "/api/v1/auth/switch-organization", json={"organization_id": own_org}
+        )
+        expect_error(switched, 403, "sso_session_bound")
+        stored = await admin_conn.fetchrow(
+            "SELECT sso_org_id, mfa_verified FROM user_sessions WHERE user_id ="
+            " (SELECT id FROM users WHERE email = $1) AND sso_org_id IS NOT NULL",
+            alice.email,
+        )
+        assert (stored["sso_org_id"], stored["mfa_verified"]) == (org_id, True)
+        [success] = await _trail(admin_conn, org_id, alice.email, "auth.sso.succeeded")
+        assert (success["mfa"], success["idp_mfa"], success["mfa_method"]) == (
+            True,
+            False,
+            "webauthn",
+        )
+        assert await _trail(admin_conn, org_id, alice.email, "auth.login.succeeded") == []
+
+    async def test_refused_passkeys_after_a_sso_sign_in_lock_the_account(
+        self,
+        api: httpx2.AsyncClient,
+        network: FakeNetwork,
+        admin_conn: asyncpg.Connection,
+        container: Container,
+    ) -> None:
+        domain = fresh_domain()
+        alice = await signup(api, email=f"alice@{domain}")
+        authenticator = await _register_passkey(alice)
+        idp = FakeIdp()
+        slug, _ = await _requiring_mfa(api, network, idp, domain)
+
+        for _ in range(container.settings.security.lockout_threshold):
+            # A fresh single sign-on each time: the provider's sign-in resets nothing.
+            token = (await sign_in(api, idp, slug, email=alice.email)).json()["mfa_token"]
+            wrong = await _passkey_step(api, token, authenticator, tamper="signature")
+            expect_error(wrong, 401, "mfa_failed")
+        assert await _failures_of(admin_conn, alice.email) == 0  # the counter restarted ...
+        locked = await admin_conn.fetchval(
+            "SELECT locked_until FROM users WHERE email = $1", alice.email
+        )
+        assert locked is not None  # ... because the account is locked
+        # The provider still answers, but its second step is refused - with a
+        # valid passkey too - and so is the password.
+        token = (await sign_in(api, idp, slug, email=alice.email)).json()["mfa_token"]
+        begun = await api.post("/api/v1/auth/mfa/webauthn/begin", json={"mfa_token": token})
+        expect_error(begun, 401, "mfa_failed")
+        password = await api.post(
+            "/api/v1/auth/login", json={"email": alice.email, "password": PASSWORD}
+        )
+        expect_error(password, 401)
+        refusals = await admin_conn.fetch(
+            "SELECT metadata FROM audit_logs WHERE action = 'auth.mfa.failed'"
+            " AND actor_id = (SELECT id FROM users WHERE email = $1)",
+            alice.email,
+        )
+        reasons = [json.loads(row["metadata"])["reason"] for row in refusals]
+        assert reasons == ["signature_invalid"] * container.settings.security.lockout_threshold
+
+    async def test_a_sso_sign_in_leaves_the_failure_counter_as_it_is(
+        self, api: httpx2.AsyncClient, network: FakeNetwork, admin_conn: asyncpg.Connection
+    ) -> None:
+        domain = fresh_domain()
+        alice = await signup(api, email=f"alice@{domain}")
+        authenticator = await _register_passkey(alice)
+        idp = FakeIdp()
+        slug, _ = await _requiring_mfa(api, network, idp, domain)
+
+        token = (await sign_in(api, idp, slug, email=alice.email)).json()["mfa_token"]
+        wrong = await _passkey_step(api, token, authenticator, tamper="signature")
+        expect_error(wrong, 401, "mfa_failed")
+        assert await _failures_of(admin_conn, alice.email) == 1  # the platform's step counts
+        token = (await sign_in(api, idp, slug, email=alice.email)).json()["mfa_token"]
+        assert (await _passkey_step(api, token, authenticator)).status_code == 200
+        # A completed single sign-on is no proof the guessing stopped: it resets nothing.
+        assert await _failures_of(admin_conn, alice.email) == 1
+        # A completed password sign-in does.
+        login = await api.post(
+            "/api/v1/auth/login", json={"email": alice.email, "password": PASSWORD}
+        )
+        assert login.status_code == 200, login.text
+        completed = await _passkey_step(api, login.json()["mfa_token"], authenticator)
+        assert completed.status_code == 200, completed.text
+        assert await _failures_of(admin_conn, alice.email) == 0
+
+
+async def _register_passkey(session: ApiSession) -> SoftwareAuthenticator:
+    """A passkey registered from a password session - the account's second factor."""
+    authenticator = SoftwareAuthenticator()
+    begun = await session.post("/api/v1/auth/webauthn/register/begin", json={"password": PASSWORD})
+    assert begun.status_code == 200, begun.text
+    credential = authenticator.attestation(begun.json()["options"])
+    finished = await session.post(
+        "/api/v1/auth/webauthn/register/finish", json={"name": "Laptop", "credential": credential}
+    )
+    assert finished.status_code == 201, finished.text
+    return authenticator
+
+
+async def _passkey_step(
+    api: httpx2.AsyncClient, mfa_token: str, authenticator: SoftwareAuthenticator, **overrides: Any
+) -> httpx2.Response:
+    """The passkey sign-in step for a challenge, whoever issued it."""
+    begun = await api.post("/api/v1/auth/mfa/webauthn/begin", json={"mfa_token": mfa_token})
+    assert begun.status_code == 200, begun.text
+    credential = authenticator.assertion(begun.json()["options"], **overrides)
+    return await api.post(
+        "/api/v1/auth/mfa/webauthn/verify", json={"mfa_token": mfa_token, "credential": credential}
+    )
+
+
+async def _requiring_mfa(
+    api: httpx2.AsyncClient, network: FakeNetwork, idp: FakeIdp, domain: str
+) -> tuple[str, UUID]:
+    """An organization with single sign-on through ``idp`` that requires MFA its
+    provider does not report. Returns its slug and ID."""
+    owner = await signup(api)
+    slug = await ready(owner, network, idp, domain)
+    org_id = await org_id_of(owner)
+    required = await owner.patch(
+        "/api/v1/organizations/current", json={"settings": {"require_mfa": True}}
+    )
+    assert required.status_code == 200, required.text
+    return slug, org_id
+
+
+async def _trail(
+    admin_conn: asyncpg.Connection, org_id: UUID, email: str, action: str
+) -> list[dict[str, Any]]:
+    """The metadata of ``email``'s entries of ``action`` in the organization's trail."""
+    rows = await admin_conn.fetch(
+        "SELECT metadata FROM audit_logs WHERE org_id = $1 AND action = $2"
+        " AND actor_id = (SELECT id FROM users WHERE email = $3) ORDER BY occurred_at",
+        org_id,
+        action,
+        email,
+    )
+    return [json.loads(row["metadata"]) for row in rows]
+
+
+async def _failures_of(admin_conn: asyncpg.Connection, email: str) -> int:
+    failures: int = await admin_conn.fetchval(
+        "SELECT failed_login_attempts FROM users WHERE email = $1", email
+    )
+    return failures
 
 
 async def org_id_of_admin(admin_conn: asyncpg.Connection, slug: str) -> UUID:
