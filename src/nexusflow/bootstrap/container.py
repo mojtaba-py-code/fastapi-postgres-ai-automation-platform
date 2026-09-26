@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from nexusflow.bootstrap.http import build_http_client, build_url_policy
 from nexusflow.core.clock import Clock, SystemClock
-from nexusflow.core.config import Settings, decode_key_bytes
+from nexusflow.core.config import Settings, decode_key_bytes, webauthn_relying_party
 from nexusflow.core.resilience import CircuitBreaker
 from nexusflow.domain.alerts.service import AlertService
 from nexusflow.domain.audit.recorder import AuditRecorder
@@ -29,10 +29,12 @@ from nexusflow.domain.catalog.service import CatalogService
 from nexusflow.domain.identity.account_service import AccountService
 from nexusflow.domain.identity.auth_service import AuthPolicy, AuthService
 from nexusflow.domain.identity.authenticator import Authenticator
+from nexusflow.domain.identity.passkeys import PasskeyService
 from nexusflow.domain.identity.password_policy import PasswordPolicy
 from nexusflow.domain.identity.privacy import PrivacyService
 from nexusflow.domain.identity.security_emails import SecurityEmailService
 from nexusflow.domain.identity.service_accounts import ServiceAccountService
+from nexusflow.domain.identity.webauthn import PasskeySupport, RelyingParty
 from nexusflow.domain.integrations.service import IntegrationService
 from nexusflow.domain.intelligence.ports import AIProvider
 from nexusflow.domain.intelligence.service import IntelligenceService
@@ -54,6 +56,7 @@ from nexusflow.infrastructure.database.unit_of_work import SqlUnitOfWorkFactory
 from nexusflow.infrastructure.http.client import SafeHttpClient
 from nexusflow.infrastructure.n8n.client import N8nClient
 from nexusflow.infrastructure.notifications.senders import ChannelSender, SmtpEmailTransport
+from nexusflow.infrastructure.redis.challenges import RedisChallengeStore
 from nexusflow.infrastructure.redis.client import (
     FeatureFlags,
     RedisFailureLedger,
@@ -71,6 +74,7 @@ from nexusflow.infrastructure.security.hashing import HmacTokenHasher, SecureTok
 from nexusflow.infrastructure.security.jwt_tokens import JwtKeyRing, JwtTokenCodec
 from nexusflow.infrastructure.security.passwords import Argon2idPasswordHasher
 from nexusflow.infrastructure.security.totp import TotpService
+from nexusflow.infrastructure.security.webauthn import StrictWebAuthnVerifier
 from nexusflow.infrastructure.storage.local import LocalFileStorage
 from nexusflow.infrastructure.storage.scanning import ClamdScanner, NoopScanner
 
@@ -99,6 +103,7 @@ class Container:
     n8n: N8nClient | None
     rest_collector: RestApiCollector
     auth: AuthService
+    passkeys: PasskeyService
     authenticator: Authenticator
     organizations: OrganizationService
     accounts: AccountService
@@ -141,6 +146,25 @@ def build_security(settings: Settings) -> tuple[EnvelopeCipher, HmacTokenHasher,
         sec.jwt_private_key.get_secret_value(), sec.jwt_key_id, sec.jwt_previous_public_keys
     )
     return cipher, hasher, keyring
+
+
+def build_passkey_support(settings: Settings, redis: Redis) -> PasskeySupport:
+    """The passkey relying party (``None`` where passkeys cannot work), the
+    ceremony verifier and the single-use challenge store."""
+    resolved, _ = webauthn_relying_party(settings.app, settings.security)
+    return PasskeySupport(
+        relying_party=(
+            RelyingParty(
+                id=resolved.rp_id,
+                name=settings.security.mfa_issuer,
+                origins=frozenset(resolved.origins),
+            )
+            if resolved is not None
+            else None
+        ),
+        verifier=StrictWebAuthnVerifier(),
+        challenges=RedisChallengeStore(redis, prefix=settings.redis.key_prefix),
+    )
 
 
 def build_ai_provider(settings: Settings) -> AIProvider | None:
@@ -220,6 +244,7 @@ def build_container(
         else None
     )
 
+    passkey_support = build_passkey_support(settings, redis_client)
     auth = AuthService(
         uow_factory=uow_factory,
         clock=clock,
@@ -245,6 +270,7 @@ def build_container(
                 min_length=sec.password_min_length, max_length=sec.password_max_length
             ),
         ),
+        passkeys=passkey_support,
     )
     integrations = IntegrationService(
         uow_factory=uow_factory, clock=clock, audit=audit, cipher=cipher, token_generator=tokens
@@ -307,6 +333,14 @@ def build_container(
             client=http_client, limiter=limiter, rule=rules["external_api.integration"]
         ),
         auth=auth,
+        passkeys=PasskeyService(
+            uow_factory=uow_factory,
+            clock=clock,
+            audit=audit,
+            token_hasher=token_hasher,
+            confirm_password=auth.confirm_password,
+            support=passkey_support,
+        ),
         authenticator=Authenticator(
             uow_factory=uow_factory, clock=clock, token_codec=token_codec, token_hasher=token_hasher
         ),

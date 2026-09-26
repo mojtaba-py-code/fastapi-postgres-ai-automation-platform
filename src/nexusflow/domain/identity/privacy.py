@@ -2,8 +2,8 @@
 
 UK GDPR / GDPR articles 15 and 20 (access and portability) and 17 (erasure).
 The export holds the personal data the platform keeps about the account
-itself - profile, organizations, sessions, API keys and the account's own
-actions in its organizations' audit trails. An organization's business data
+itself - profile, organizations, sessions, passkeys, API keys and the
+account's own actions in its organizations' audit trails. An organization's business data
 belongs to the organization, the controller, which exports it (dataset
 exports), not to the person.
 
@@ -158,6 +158,7 @@ class PrivacyService:
             if user is None:
                 raise NotFoundError()
             sessions = await uow.sessions.list_for_user(user_id, limit=MAX_SESSIONS)
+            passkeys = await uow.webauthn_credentials.list_for_user(user_id)
             org_ids = await uow.memberships.list_org_ids_for_user(user_id)
             organizations: list[JSONValue] = []
             api_keys: list[JSONValue] = []
@@ -212,6 +213,18 @@ class PrivacyService:
                     "mfa_verified": s.mfa_verified,
                 }
                 for s in sessions
+            ],
+            # What describes each passkey; its public key and IDs stay out.
+            "passkeys": [
+                {
+                    "id": str(p.id),
+                    "name": p.name,
+                    "created_at": _when(p.created_at),
+                    "last_used_at": _when(p.last_used_at),
+                    "transports": list(p.transports),
+                    "backed_up": p.backed_up,
+                }
+                for p in passkeys
             ],
             "api_keys": api_keys,
             "activity": activity,

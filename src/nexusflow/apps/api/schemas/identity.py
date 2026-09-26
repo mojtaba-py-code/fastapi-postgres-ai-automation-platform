@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal, Self
 from uuid import UUID
 
-from pydantic import EmailStr, Field
+from pydantic import (
+    BeforeValidator,
+    EmailStr,
+    Field,
+    StringConstraints,
+    WithJsonSchema,
+    model_validator,
+)
 
 from nexusflow.apps.api.schemas.common import RequestModel, ResponseModel
 from nexusflow.domain.authorization.roles import Permission, Role
+from nexusflow.domain.identity.webauthn import b64url, b64url_decode
 from nexusflow.domain.organizations.model import OrganizationSettings, OrganizationStatus
 
 # Passwords are bounded to keep Argon2 work per request bounded (DoS guard) and
@@ -64,6 +73,12 @@ class MfaChallengeResponse(ResponseModel):
     mfa_required: Literal[True] = True
     mfa_token: str
     expires_in: int
+    methods: list[Literal["totp", "webauthn", "recovery_code"]] = Field(
+        default_factory=list,
+        description="How the second factor can be proved: an authenticator app code "
+        "(POST /auth/mfa/verify), a passkey (POST /auth/mfa/webauthn/begin, then /verify) "
+        "or a recovery code (POST /auth/mfa/verify).",
+    )
 
 
 class MfaVerifyRequest(RequestModel):
@@ -109,6 +124,213 @@ class MfaRecoveryCodesResponse(ResponseModel):
 class MfaDisableRequest(RequestModel):
     password: str = Password
     code: str = Field(min_length=6, max_length=32, repr=False)
+
+
+# --------------------------------------------------------------- passkeys
+#
+# Binary WebAuthn values travel as unpadded base64url, as in the JSON forms of
+# WebAuthn Level 3 (PublicKeyCredential.toJSON, parseCreationOptionsFromJSON).
+# Each is bounded before it is decoded and decoded strictly.
+
+
+def _base64url(max_bytes: int) -> Callable[[object], bytes]:
+    max_length = -(-max_bytes * 4 // 3)  # characters of unpadded base64url
+
+    def decode(value: object) -> bytes:
+        if not isinstance(value, str):
+            raise ValueError("must be a base64url string")
+        if not value or len(value) > max_length:
+            raise ValueError(f"must encode 1 to {max_bytes} bytes")
+        data = b64url_decode(value)
+        if not data:
+            raise ValueError(f"must encode 1 to {max_bytes} bytes")
+        return data
+
+    return decode
+
+
+def _base64url_schema(max_bytes: int) -> WithJsonSchema:
+    return WithJsonSchema(
+        {
+            "type": "string",
+            "contentEncoding": "base64url",
+            "maxLength": -(-max_bytes * 4 // 3),
+        }
+    )
+
+
+ClientDataJson = Annotated[bytes, BeforeValidator(_base64url(4096)), _base64url_schema(4096)]
+AttestationObject = Annotated[
+    bytes, BeforeValidator(_base64url(64 * 1024)), _base64url_schema(64 * 1024)
+]
+AuthenticatorData = Annotated[bytes, BeforeValidator(_base64url(4096)), _base64url_schema(4096)]
+Signature = Annotated[bytes, BeforeValidator(_base64url(512)), _base64url_schema(512)]
+UserHandle = Annotated[bytes, BeforeValidator(_base64url(64)), _base64url_schema(64)]
+CredentialId = Annotated[bytes, BeforeValidator(_base64url(1023)), _base64url_schema(1023)]
+PublicKeyInfo = Annotated[bytes, BeforeValidator(_base64url(2048)), _base64url_schema(2048)]
+Transport = Annotated[str, StringConstraints(pattern=r"^[a-z-]{1,32}$")]
+
+
+class PasskeyAttestation(RequestModel):
+    """``AuthenticatorAttestationResponse`` in its JSON form. Only the client
+    data and the attestation object are used; the copies some browsers add
+    (``authenticatorData``, ``publicKey``, ``publicKeyAlgorithm``) are accepted,
+    bounded, and ignored - everything is read from the attestation object."""
+
+    client_data_json: ClientDataJson = Field(alias="clientDataJSON")
+    attestation_object: AttestationObject = Field(alias="attestationObject")
+    transports: list[Transport] = Field(default_factory=list, max_length=8)
+    authenticator_data: AuthenticatorData | None = Field(default=None, alias="authenticatorData")
+    public_key: PublicKeyInfo | None = Field(default=None, alias="publicKey")
+    public_key_algorithm: int | None = Field(
+        default=None, alias="publicKeyAlgorithm", ge=-65536, le=65535
+    )
+
+
+class PasskeyAssertion(RequestModel):
+    """``AuthenticatorAssertionResponse`` in its JSON form."""
+
+    client_data_json: ClientDataJson = Field(alias="clientDataJSON")
+    authenticator_data: AuthenticatorData = Field(alias="authenticatorData")
+    signature: Signature
+    user_handle: UserHandle | None = Field(default=None, alias="userHandle")
+
+
+class _PasskeyCredential(RequestModel):
+    id: str = Field(min_length=1, max_length=1364)
+    raw_id: CredentialId = Field(alias="rawId")
+    type: Literal["public-key"]
+    authenticator_attachment: Literal["platform", "cross-platform"] | None = Field(
+        default=None, alias="authenticatorAttachment"
+    )
+    # No extensions are requested: whatever a client reports is ignored.
+    client_extension_results: dict[str, Any] = Field(
+        default_factory=dict, alias="clientExtensionResults", max_length=16
+    )
+
+    @model_validator(mode="after")
+    def _id_is_raw_id(self) -> Self:
+        if self.id != b64url(self.raw_id):
+            raise ValueError("id must be the base64url form of rawId")
+        return self
+
+
+class PasskeyRegistrationCredential(_PasskeyCredential):
+    response: PasskeyAttestation
+
+
+class PasskeyAssertionCredential(_PasskeyCredential):
+    response: PasskeyAssertion
+
+
+class PasskeyRegistrationRequest(RequestModel):
+    name: str | None = Field(
+        default=None, max_length=64, description='What to call it, e.g. "Work laptop".'
+    )
+    credential: PasskeyRegistrationCredential
+
+
+class PasskeyRenameRequest(RequestModel):
+    name: str = Field(min_length=1, max_length=64)
+
+
+class MfaTokenRequest(RequestModel):
+    mfa_token: str = OpaqueToken
+
+
+class PasskeySignInRequest(RequestModel):
+    mfa_token: str = OpaqueToken
+    credential: PasskeyAssertionCredential
+
+
+class _WebAuthnJson(ResponseModel):
+    """WebAuthn's own JSON members are camelCase (serialized by alias)."""
+
+
+class RelyingPartyEntity(_WebAuthnJson):
+    id: str
+    name: str
+
+
+class PasskeyUserEntity(_WebAuthnJson):
+    id: str = Field(description="A random handle, never the account's ID or e-mail address.")
+    name: str
+    display_name: str = Field(alias="displayName")
+
+
+class CredentialParameters(_WebAuthnJson):
+    type: Literal["public-key"] = "public-key"
+    alg: int
+
+
+class CredentialDescriptorJson(_WebAuthnJson):
+    type: Literal["public-key"] = "public-key"
+    id: str
+    transports: list[str]
+
+
+class AuthenticatorSelection(_WebAuthnJson):
+    resident_key: Literal["preferred"] = Field(default="preferred", alias="residentKey")
+    require_resident_key: Literal[False] = Field(default=False, alias="requireResidentKey")
+    user_verification: Literal["required"] = Field(default="required", alias="userVerification")
+
+
+class PasskeyCreationOptions(_WebAuthnJson):
+    """``PublicKeyCredentialCreationOptionsJSON``."""
+
+    rp: RelyingPartyEntity
+    user: PasskeyUserEntity
+    challenge: str
+    pub_key_cred_params: list[CredentialParameters] = Field(alias="pubKeyCredParams")
+    timeout: int
+    exclude_credentials: list[CredentialDescriptorJson] = Field(alias="excludeCredentials")
+    authenticator_selection: AuthenticatorSelection = Field(alias="authenticatorSelection")
+    attestation: Literal["none"] = "none"
+
+
+class PasskeyRequestOptions(_WebAuthnJson):
+    """``PublicKeyCredentialRequestOptionsJSON``."""
+
+    challenge: str
+    timeout: int
+    rp_id: str = Field(alias="rpId")
+    allow_credentials: list[CredentialDescriptorJson] = Field(alias="allowCredentials")
+    user_verification: Literal["required"] = Field(default="required", alias="userVerification")
+
+
+class PasskeyCreationOptionsResponse(ResponseModel):
+    options: PasskeyCreationOptions = Field(
+        description="For navigator.credentials.create({publicKey: "
+        "PublicKeyCredential.parseCreationOptionsFromJSON(options)})."
+    )
+    expires_in: int
+
+
+class PasskeyRequestOptionsResponse(ResponseModel):
+    options: PasskeyRequestOptions = Field(
+        description="For navigator.credentials.get({publicKey: "
+        "PublicKeyCredential.parseRequestOptionsFromJSON(options)})."
+    )
+    expires_in: int
+
+
+class PasskeyResponse(ResponseModel):
+    id: UUID
+    name: str
+    algorithm: str
+    transports: list[str]
+    backup_eligible: bool = Field(description="The passkey can be synced to other devices.")
+    backed_up: bool = Field(description="The passkey is synced (as last reported).")
+    created_at: datetime
+    last_used_at: datetime | None
+
+
+class PasskeyRegisteredResponse(ResponseModel):
+    passkey: PasskeyResponse
+    recovery_codes: list[str] | None = Field(
+        description="Only when this passkey turned two-factor authentication on: "
+        "single-use recovery codes, shown exactly once."
+    )
 
 
 class SwitchOrganizationRequest(RequestModel):

@@ -51,8 +51,8 @@ async def erase_user(
 ) -> None:
     """Erase a person (GDPR art. 17): leave every organization - refused for the
     sole owner of one - with their API keys revoked, end every session, forget
-    the recovery codes and anonymise the account. The caller records the
-    erasure itself and commits."""
+    the recovery codes and passkeys and anonymise the account. The caller
+    records the erasure itself and commits."""
     for org_id in await uow.memberships.list_org_ids_for_user(user.id):
         await uow.switch_tenant(org_id)
         membership = await uow.memberships.get(org_id, user.id)
@@ -78,6 +78,7 @@ async def erase_user(
     await uow.switch_tenant(None)
     await uow.sessions.revoke_all_for_user(user.id, now=now, reason="account_deleted")
     await uow.recovery_codes.delete_for_user(user.id)
+    await uow.webauthn_credentials.delete_for_user(user.id)
     user.anonymize(now)
 
 
