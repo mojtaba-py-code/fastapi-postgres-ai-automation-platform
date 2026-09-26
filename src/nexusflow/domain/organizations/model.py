@@ -11,7 +11,17 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from nexusflow.core.errors import PermissionDeniedError
 from nexusflow.domain.authorization.roles import Role
+
+
+def network_not_allowed(internal_detail: str | None = None) -> PermissionDeniedError:
+    """The refusal of the organization's network allowlist (the same everywhere)."""
+    return PermissionDeniedError(
+        "The organization does not allow access from this network.",
+        code="ip_not_allowed",
+        internal_detail=internal_detail,
+    )
 
 
 class OrganizationStatus(StrEnum):
@@ -26,6 +36,10 @@ class OrganizationSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     require_mfa: bool = False
+    # Members reach the organization only through its identity provider (a
+    # single sign-on session for it); owners keep a password + MFA way in.
+    # Set only through the SSO configuration, never through a settings update.
+    sso_required: bool = False
     # Networks (CIDR) the organization's data may be reached from - by its
     # users' sessions and its API keys. Empty or unset: from anywhere.
     allowed_ip_ranges: list[str] | None = Field(default=None, max_length=100)

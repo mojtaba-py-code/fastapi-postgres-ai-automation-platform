@@ -53,15 +53,20 @@ from nexusflow.infrastructure.database.repositories.data import (
 )
 from nexusflow.infrastructure.database.repositories.identity import (
     SqlApiKeyRepository,
+    SqlDirectoryUserRepository,
     SqlInvitationRepository,
     SqlMembershipRepository,
     SqlOrganizationRepository,
     SqlPasswordResetRepository,
     SqlRecoveryCodeRepository,
     SqlRefreshTokenRepository,
+    SqlScimTokenRepository,
     SqlServiceAccountRepository,
     SqlSessionRepository,
     SqlSignupRequestRepository,
+    SqlSsoConnectionRepository,
+    SqlSsoIdentityRepository,
+    SqlSsoLoginStateRepository,
     SqlUserRepository,
 )
 from nexusflow.infrastructure.database.repositories.outbox import SqlOutboxRepository
@@ -140,6 +145,11 @@ class SqlUnitOfWork:
     organizations: SqlOrganizationRepository
     memberships: SqlMembershipRepository
     invitations: SqlInvitationRepository
+    sso_connections: SqlSsoConnectionRepository
+    sso_states: SqlSsoLoginStateRepository
+    sso_identities: SqlSsoIdentityRepository
+    scim_tokens: SqlScimTokenRepository
+    scim_users: SqlDirectoryUserRepository
     audit: SqlAuditLogRepository
     outbox: SqlOutboxRepository
     data: SqlDataRepositories
@@ -184,6 +194,11 @@ class SqlUnitOfWork:
         self.organizations = SqlOrganizationRepository(session)
         self.memberships = SqlMembershipRepository(session)
         self.invitations = SqlInvitationRepository(session)
+        self.sso_connections = SqlSsoConnectionRepository(session)
+        self.sso_states = SqlSsoLoginStateRepository(session)
+        self.sso_identities = SqlSsoIdentityRepository(session)
+        self.scim_tokens = SqlScimTokenRepository(session)
+        self.scim_users = SqlDirectoryUserRepository(session)
         self.audit = SqlAuditLogRepository(session)
         self.outbox = SqlOutboxRepository(session)
         self.data = SqlDataRepositories(session)

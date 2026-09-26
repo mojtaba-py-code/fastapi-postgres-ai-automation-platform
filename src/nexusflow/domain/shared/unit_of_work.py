@@ -19,12 +19,17 @@ if TYPE_CHECKING:
     from nexusflow.domain.authorization.principal import Principal
     from nexusflow.domain.identity.ports import (
         ApiKeyRepository,
+        DirectoryUserRepository,
         PasswordResetRepository,
         RecoveryCodeRepository,
         RefreshTokenRepository,
+        ScimTokenRepository,
         ServiceAccountRepository,
         SessionRepository,
         SignupRequestRepository,
+        SsoConnectionRepository,
+        SsoIdentityRepository,
+        SsoLoginStateRepository,
         UserRepository,
     )
     from nexusflow.domain.organizations.ports import (
@@ -92,6 +97,21 @@ class UnitOfWork(Protocol):
 
     @property
     def invitations(self) -> InvitationRepository: ...
+
+    @property
+    def sso_connections(self) -> SsoConnectionRepository: ...
+
+    @property
+    def sso_states(self) -> SsoLoginStateRepository: ...
+
+    @property
+    def sso_identities(self) -> SsoIdentityRepository: ...
+
+    @property
+    def scim_tokens(self) -> ScimTokenRepository: ...
+
+    @property
+    def scim_users(self) -> DirectoryUserRepository: ...
 
     @property
     def audit(self) -> AuditLogRepository: ...

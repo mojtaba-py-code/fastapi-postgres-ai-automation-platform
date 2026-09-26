@@ -24,6 +24,10 @@ class OrganizationRepository(Protocol):
 
     async def slug_exists(self, slug: str) -> bool: ...
 
+    async def get_by_slug(self, slug: str) -> Organization | None:
+        """Authentication context (single sign-on names the organization)."""
+        ...
+
     async def list_for_user(self, user_id: UUID) -> list[OrganizationView]: ...
 
 

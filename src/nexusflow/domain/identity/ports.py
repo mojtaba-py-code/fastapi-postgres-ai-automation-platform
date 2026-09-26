@@ -7,6 +7,7 @@ from typing import Protocol
 from uuid import UUID
 
 from nexusflow.core.pagination import Page, PageRequest
+from nexusflow.domain.identity.directory import DirectoryFilter, DirectoryUser, ScimToken
 from nexusflow.domain.identity.model import (
     ApiKey,
     MfaRecoveryCode,
@@ -17,6 +18,7 @@ from nexusflow.domain.identity.model import (
     User,
     UserSession,
 )
+from nexusflow.domain.identity.sso import SsoConnection, SsoIdentity, SsoLoginState
 
 
 class UserRepository(Protocol):
@@ -41,12 +43,25 @@ class SessionRepository(Protocol):
     ) -> list[UserSession]: ...
 
     async def list_active_for_user(
-        self, user_id: UUID, *, now: datetime, limit: int
-    ) -> list[UserSession]: ...
+        self, user_id: UUID, *, now: datetime, limit: int, sso_org_id: UUID | None = None
+    ) -> list[UserSession]:
+        """Live sessions, most recently used first; with ``sso_org_id``, only the
+        sessions that organization's identity provider opened."""
+        ...
 
     async def revoke_all_for_user(
-        self, user_id: UUID, *, now: datetime, reason: str, except_session: UUID | None = None
+        self,
+        user_id: UUID,
+        *,
+        now: datetime,
+        reason: str,
+        except_session: UUID | None = None,
+        sso_org_id: UUID | None = None,
     ) -> int: ...
+
+    async def revoke_sso_sessions(self, org_id: UUID, *, now: datetime, reason: str) -> int:
+        """End every session an organization's identity provider opened."""
+        ...
 
     async def list_for_user(self, user_id: UUID, *, limit: int) -> list[UserSession]:
         """Every session still kept, ended ones too, newest first."""
@@ -124,6 +139,98 @@ class ServiceAccountRepository(Protocol):
     async def get_by_workflow_key(self, workflow_key: str) -> ServiceAccount | None: ...
 
     async def list_all(self) -> list[ServiceAccount]: ...
+
+
+class SsoConnectionRepository(Protocol):
+    async def add(self, connection: SsoConnection) -> None: ...
+
+    async def get_for_org(
+        self, org_id: UUID, *, for_update: bool = False
+    ) -> SsoConnection | None: ...
+
+    async def delete(self, connection: SsoConnection) -> None: ...
+
+    async def needing_rewrap(
+        self, org_id: UUID, active_key_id: str, limit: int
+    ) -> list[SsoConnection]: ...
+
+    async def count_needing_rewrap(self, org_id: UUID, active_key_id: str) -> int: ...
+
+
+class SsoLoginStateRepository(Protocol):
+    async def add(self, state: SsoLoginState) -> None: ...
+
+    async def find_by_hash(self, state_hash: str) -> SsoLoginState | None:
+        """Authentication context: the tenant is not known yet."""
+        ...
+
+    async def consume(self, org_id: UUID, state_id: UUID, *, now: datetime) -> bool:
+        """Mark a live state used; False when it was used or expired already
+        (one statement: two callbacks cannot both consume it)."""
+        ...
+
+    async def delete_for_org(self, org_id: UUID) -> int: ...
+
+    async def purge_expired(self, before: datetime, *, limit: int) -> int: ...
+
+
+class SsoIdentityRepository(Protocol):
+    async def add(self, identity: SsoIdentity) -> None: ...
+
+    async def find_by_subject(
+        self, org_id: UUID, issuer: str, subject: str
+    ) -> SsoIdentity | None: ...
+
+    async def find_for_user(self, org_id: UUID, issuer: str, user_id: UUID) -> SsoIdentity | None:
+        """The user's identity at this organization's provider, if linked."""
+        ...
+
+    async def delete_for_org(self, org_id: UUID) -> int: ...
+
+    async def delete_for_user(self, user_id: UUID) -> int: ...
+
+    async def list_for_user(self, user_id: UUID, limit: int) -> list[SsoIdentity]: ...
+
+
+class ScimTokenRepository(Protocol):
+    async def add(self, token: ScimToken) -> None: ...
+
+    async def get(self, org_id: UUID, token_id: UUID) -> ScimToken | None: ...
+
+    async def find_by_prefix(self, prefix: str) -> ScimToken | None:
+        """Authentication context: the tenant is not known yet."""
+        ...
+
+    async def list_for_org(self, org_id: UUID) -> list[ScimToken]: ...
+
+
+class DirectoryUserRepository(Protocol):
+    async def add(self, user: DirectoryUser) -> None: ...
+
+    async def get(
+        self, org_id: UUID, record_id: UUID, *, for_update: bool = False
+    ) -> DirectoryUser | None: ...
+
+    async def get_by_user(self, org_id: UUID, user_id: UUID) -> DirectoryUser | None: ...
+
+    async def get_by_external_id(self, org_id: UUID, external_id: str) -> DirectoryUser | None: ...
+
+    async def list_page(
+        self,
+        org_id: UUID,
+        *,
+        directory_filter: DirectoryFilter | None,
+        offset: int,
+        limit: int,
+    ) -> tuple[int, list[DirectoryUser]]:
+        """The total that match, and one page of them (oldest first)."""
+        ...
+
+    async def delete(self, user: DirectoryUser) -> None: ...
+
+    async def delete_for_user(self, user_id: UUID) -> int: ...
+
+    async def list_for_user(self, user_id: UUID, limit: int) -> list[DirectoryUser]: ...
 
 
 class TotpVerifier(Protocol):
