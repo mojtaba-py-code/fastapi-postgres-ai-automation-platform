@@ -26,6 +26,7 @@ if TYPE_CHECKING:
         SessionRepository,
         SignupRequestRepository,
         UserRepository,
+        WebAuthnCredentialRepository,
     )
     from nexusflow.domain.organizations.ports import (
         InvitationRepository,
@@ -77,6 +78,9 @@ class UnitOfWork(Protocol):
 
     @property
     def recovery_codes(self) -> RecoveryCodeRepository: ...
+
+    @property
+    def webauthn_credentials(self) -> WebAuthnCredentialRepository: ...
 
     @property
     def api_keys(self) -> ApiKeyRepository: ...
