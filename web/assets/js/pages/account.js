@@ -40,6 +40,9 @@ const TABS = [
   ["data", "Your data"],
 ];
 
+// The factor a session signed in with, where the API reports it.
+const FACTORS = { webauthn: "passkey", totp: "authenticator app", recovery_code: "recovery code" };
+
 const SSO_NOTE =
   "You signed in through your organization's identity provider. That session speaks for the organization only, so your account's password, second factors and deletion are managed from a password sign-in (use a password reset link if the account has no password yet).";
 
@@ -294,7 +297,10 @@ function sessionsTab(app) {
           { title: "Address", render: (row) => row.ip || "—" },
           { title: "Signed in", render: (row) => time(row.created_at) },
           { title: "Last active", render: (row) => time(row.last_used_at) },
-          { title: "Second factor", render: (row) => (row.mfa_verified ? badge("passed", "success") : badge("no", "neutral")) },
+          {
+            title: "Second factor",
+            render: (row) => (row.mfa_verified ? badge(FACTORS[row.mfa_method] || "passed", "success") : badge("no", "neutral")),
+          },
           {
             title: "",
             class: "actions",

@@ -14,6 +14,7 @@ function lines(text) {
 export async function organizationPage(app) {
   const organization = await app.api.get("/organizations/current");
   const settings = organization.settings;
+  const passkeyPolicy = "require_passkey" in settings; // the API offers the policy
   const owner = app.context.role === "owner";
 
   const general = section(
@@ -48,6 +49,7 @@ export async function organizationPage(app) {
           await app.api.patch("/organizations/current", {
             settings: {
               require_mfa: values.require_mfa,
+              ...(passkeyPolicy ? { require_passkey: values.require_passkey } : {}),
               allowed_ip_ranges: lines(values.allowed_ip_ranges).length ? lines(values.allowed_ip_ranges) : null,
               allowed_source_domains: lines(values.allowed_source_domains).length ? lines(values.allowed_source_domains) : null,
               ai_external_processing: values.ai_external_processing,
@@ -61,6 +63,10 @@ export async function organizationPage(app) {
       checkbox("Require two-step verification", { name: "require_mfa", checked: settings.require_mfa }, {
         hint: "Members reach the organization only from a session that passed a second factor (a passkey or an authenticator app). Members without one are asked to set it up.",
       }),
+      passkeyPolicy &&
+        checkbox("Require passkeys (phishing-resistant)", { name: "require_passkey", checked: settings.require_passkey }, {
+          hint: "Members reach the organization only from a session that signed in with a passkey; authenticator codes no longer suffice. Turn it on from a session that signed in with your own passkey.",
+        }),
       field(
         "Allowed networks",
         textarea({ name: "allowed_ip_ranges", rows: 3, spellcheck: "false", class: "input mono", value: (settings.allowed_ip_ranges || []).join("\n") }),
