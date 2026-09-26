@@ -57,6 +57,7 @@ from nexusflow.domain.authorization.principal import Principal
 from nexusflow.domain.authorization.roles import Role
 from nexusflow.domain.identity.authenticator import network_not_allowed
 from nexusflow.domain.identity.factors import (
+    factor_session_of,
     generate_recovery_codes,
     normalize_recovery_code,
     queue_security_email,
@@ -84,6 +85,7 @@ from nexusflow.domain.identity.ports import TotpVerifier
 from nexusflow.domain.identity.sso import (
     SsoRefusal,
     record_sso_failure,
+    refuse_sso_session,
     resolve_sso_access,
     satisfies_sso,
     sso_required_error,
@@ -1384,6 +1386,8 @@ class AuthService:
         self, principal: Principal, *, current_password: str, new_password: str, meta: RequestMeta
     ) -> TokenPair:
         user_id = _require_user(principal)
+        # The password is the account's, for every organization of the person.
+        refuse_sso_session(principal, "change your password")
         now = self._clock.now()
         # 1. Read, then hash outside any row lock (hashing is deliberately slow).
         async with self._uow_factory(TenantScope.of(principal)) as uow:
@@ -1520,7 +1524,7 @@ class AuthService:
     async def begin_mfa_enrollment(
         self, principal: Principal, *, password: str, meta: RequestMeta
     ) -> MfaEnrollment:
-        user_id = _require_session(principal)
+        user_id, _ = factor_session_of(principal)
         verified = await self.confirm_password(principal, password, meta, purpose="mfa_enrollment")
         now = self._clock.now()
         async with self._uow_factory(TenantScope.of(principal)) as uow:
@@ -1552,7 +1556,7 @@ class AuthService:
     ) -> list[str]:
         """Activate the authenticator app and return one-time recovery codes
         (shown exactly once; they replace any earlier ones)."""
-        user_id = _require_session(principal)
+        user_id, _ = factor_session_of(principal)
         now = self._clock.now()
         async with self._uow_factory(TenantScope.of(principal)) as uow:
             user = await uow.users.get_for_update(user_id)
@@ -1597,7 +1601,7 @@ class AuthService:
         TOTP or recovery code, and end every session. It is the only way MFA
         goes off: removing the last passkey of an account without TOTP is
         refused instead."""
-        user_id = _require_session(principal)
+        user_id, _ = factor_session_of(principal)
         verified = await self.confirm_password(principal, password, meta, purpose="mfa_disable")
         now = self._clock.now()
         async with self._uow_factory(TenantScope.of(principal)) as uow:

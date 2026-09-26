@@ -111,7 +111,9 @@ tokens (`domain/identity/sso*.py`, `provisioning.py`, `directory.py`;
 provider goes through the SSRF-guarded client. A provider is trusted only for the
 e-mail domains its organization proved it owns (DNS TXT), and a session it opens is
 **bound to that organization** (`user_sessions.sso_org_id`): its tokens name only that
-organization and its account-wide actions are confined to it. SCIM tokens work only
+organization, its account-wide actions are confined to it, and the account's own
+security - password, second factors, data export, deletion - is out of its reach
+(its MFA speaks for that organization only). SCIM tokens work only
 on `/scim/v2`, for their organization. The started sign-ins (looked up by a keyed
 hash before the tenant is known) and SCIM tokens (looked up by prefix) have narrow
 authentication-context read policies, like API keys. See [SSO.md](SSO.md).

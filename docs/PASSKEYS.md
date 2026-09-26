@@ -117,6 +117,11 @@ Another account's passkey is `404`. Rules that keep MFA meaningful:
   removing one and setting up TOTP answer `403 mfa_session_required` otherwise. A
   stolen session or API key, even with the password, cannot add a factor of its own
   or take one away.
+* **Never from a single sign-on session.** A session an organization's identity
+  provider opened neither lists nor changes second factors (`403
+  sso_session_restricted`), even when it counts as MFA-verified for that
+  organization: the provider's MFA speaks for its organization only, the account's
+  second factors guard all of them ([SSO.md](SSO.md), section 5).
 * **The last second factor cannot be removed.** Removing the last passkey of an
   account without TOTP answers `409 last_second_factor`: register another passkey
   or set up TOTP first, or turn MFA off.

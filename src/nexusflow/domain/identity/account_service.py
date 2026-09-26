@@ -24,6 +24,7 @@ from nexusflow.domain.authorization.principal import Principal
 from nexusflow.domain.authorization.roles import Permission, Role
 from nexusflow.domain.identity.api_keys import CredentialKind, generate_credential
 from nexusflow.domain.identity.model import ApiKey, User
+from nexusflow.domain.identity.sso import refuse_sso_session
 from nexusflow.domain.shared.context import RequestMeta
 from nexusflow.domain.shared.security import TokenHasher
 from nexusflow.domain.shared.unit_of_work import TenantScope, UnitOfWork, UnitOfWorkFactory
@@ -139,6 +140,8 @@ class AccountService:
         user_id = principal.user_id
         if user_id is None:
             raise NotFoundError()
+        # The account is every organization's of the person, not one provider's.
+        refuse_sso_session(principal, "delete your account")
         # Only from a signed-in session; a wrong password counts toward lockout.
         verified = await self._confirm_password(
             principal, password, meta, purpose="account_deletion"

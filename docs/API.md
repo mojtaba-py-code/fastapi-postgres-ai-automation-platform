@@ -72,8 +72,11 @@ organization's audit trail); `403 sso_email_not_verified`, `403 sso_domain_not_a
 `403 sso_access_revoked` (deactivated by the organization's directory),
 `403 ip_not_allowed`, `403 mfa_required`, `403 org_inactive`; `503 sso_unavailable`.
 The session a single sign-on opens is bound to its organization:
-`switch-organization` to another one is `403 sso_session_bound`, and the
-personal-data export is `403 sso_session_restricted`.
+`switch-organization` to another one is `403 sso_session_bound`, and what belongs
+to the account rather than the organization - the personal-data export, the
+password change, the MFA and passkey endpoints (`/auth/mfa/enroll`, `/confirm`,
+`/disable`, `/auth/webauthn/register/*`, `/auth/webauthn/credentials*`) and
+`/users/me/delete` - is `403 sso_session_restricted`: use a password sign-in.
 
 An organization that requires single sign-on answers password sessions with
 `403 sso_required` (owners who passed the platform's MFA excepted), including

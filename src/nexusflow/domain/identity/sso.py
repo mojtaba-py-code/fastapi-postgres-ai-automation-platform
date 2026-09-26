@@ -344,6 +344,26 @@ def sso_required_error() -> PermissionDeniedError:
     )
 
 
+def sso_session_restricted(action: str) -> PermissionDeniedError:
+    """An account-wide action asked of a session an identity provider opened.
+
+    Such a session speaks for its organization only - the provider's sign-in,
+    its MFA, even the platform's second factor after it - while the account
+    (its password, its second factors, its data, the account itself) belongs
+    to every organization of the person."""
+    return PermissionDeniedError(
+        f"Sign in with your password to {action}: a single sign-on session reaches its "
+        "organization only.",
+        code="sso_session_restricted",
+    )
+
+
+def refuse_sso_session(principal: Principal, action: str) -> None:
+    """Refuse ``action`` to a session an organization's identity provider opened."""
+    if principal.sso_org_id is not None:
+        raise sso_session_restricted(action)
+
+
 def sso_failed() -> AuthenticationError:
     """The one answer for everything that must not be told apart (unknown or
     reused state, a wrong binding, an ID token that does not verify)."""

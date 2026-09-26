@@ -186,10 +186,16 @@ A session opened by single sign-on is **bound to that organization**:
   organization's provider) for another organization;
 * its account-wide actions are confined to that organization: the session list and
   ending sessions show and reach only the sessions that provider opened, "log out
-  everywhere" ends only those, the organization list shows only that organization,
-  and the personal-data export (which covers every organization) is refused
-  (`403 sso_session_restricted`); password changes, MFA and account deletion still
-  need the account's password;
+  everywhere" ends only those, and the organization list shows only that
+  organization;
+* the account itself - which every organization of the person relies on - is out of
+  its reach, even with the password: the personal-data export, changing the
+  password, listing or changing second factors (TOTP, passkeys, turning MFA off) and
+  deleting the account are refused (`403 sso_session_restricted`) - sign in with the
+  password (and the account's second factor) for them. The provider's MFA, or the
+  platform's second factor after it, counts for that organization only; otherwise
+  whoever runs one organization's provider and knows a member's password could plant
+  a second factor of their own on the account;
 * it stops working when the member leaves the organization (every request checks
   the membership, and the next refresh revokes the session - if the member is added
   back before that refresh, it works again, as a password session would); it ends
@@ -332,6 +338,7 @@ the *Secret Token* to the SCIM token, and map `userPrincipalName` or `mail` to
 | Leaked SCIM token | Keyed hash only, expiry (at most a year), revocation, one organization, SCIM endpoints only, rate limit, network allowlist, no owner changes, verified domains only, every change audited |
 | Privilege escalation through the provider | JIT and SCIM grant `viewer` or `analyst` only; roles and groups from SCIM ignored; existing members keep their role |
 | Bypassing `sso_required` | Enforced on every request, at sign-in naming the organization and at switching; owners' break-glass needs the platform's MFA |
+| A provider's session (with a known password) reaching the account itself | A bound session cannot export the account's data, change its password or second factors, or delete it - the provider's MFA never stands in for the account's own second factor |
 
 Audit events: `sso.configured`, `sso.updated`, `sso.removed`, `sso.domain_verified`,
 `auth.sso.succeeded`, `auth.sso.failed` (with a reason), `auth.sso.identity_linked`,

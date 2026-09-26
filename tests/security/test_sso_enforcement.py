@@ -10,11 +10,16 @@ provider's session may do.
   scopes and the network allowlist).
 * An identity provider's session is its organization's only: account-wide
   actions from it (the session list, ending sessions, the personal-data
-  export) never reach the person's other organizations or sessions.
+  export) never reach the person's other organizations or sessions, and it
+  leaves the account's own security alone - password, second factors, the
+  account itself - even when the provider's MFA made it MFA-verified.
 """
 
 from __future__ import annotations
 
+from uuid import uuid4
+
+import asyncpg
 import httpx2
 import pyotp
 import pytest
@@ -166,6 +171,59 @@ async def test_a_single_sign_on_session_keeps_to_its_organization(
     assert (await sso.post("/api/v1/auth/logout-all")).status_code == 204
     expect_error(await sso.get("/api/v1/users/me"), 401)
     assert (await alice.get("/api/v1/users/me")).status_code == 200
+
+
+ACCOUNT_SECURITY = [
+    ("post", "/api/v1/auth/webauthn/register/begin", {"password": PASSWORD}),
+    ("get", "/api/v1/auth/webauthn/credentials", None),
+    ("patch", "/api/v1/auth/webauthn/credentials/{passkey}", {"name": "Mine now"}),
+    ("post", "/api/v1/auth/webauthn/credentials/{passkey}/delete", {"password": PASSWORD}),
+    ("post", "/api/v1/auth/mfa/enroll", {"password": PASSWORD}),
+    ("post", "/api/v1/auth/mfa/confirm", {"code": "123456"}),
+    ("post", "/api/v1/auth/mfa/disable", {"password": PASSWORD, "code": "123456"}),
+    (
+        "post",
+        "/api/v1/auth/password/change",
+        {"current_password": PASSWORD, "new_password": "Another-long-passphrase-7"},
+    ),
+    ("post", "/api/v1/users/me/delete", {"password": PASSWORD}),
+]
+
+
+async def test_a_single_sign_on_session_leaves_the_accounts_security_alone(
+    api: httpx2.AsyncClient, network: FakeNetwork, admin_conn: asyncpg.Connection
+) -> None:
+    domain = fresh_domain()
+    alice = await signup(api, email=f"alice@{domain}")
+    await _enroll_mfa(alice)  # the account has a second factor
+    owner = await signup(api)
+    idp = FakeIdp()
+    slug = await ready(owner, network, idp, domain)
+    await admin_conn.execute(
+        "UPDATE sso_connections SET trust_idp_mfa = true WHERE org_id = $1",
+        await org_id_of(owner),
+    )
+    signed_in = await sign_in(api, idp, slug, email=alice.email, amr=["pwd", "hwk"])
+    sso = session_of(api, signed_in, alice.email)
+    # The provider's MFA counts - for its organization ...
+    [current] = (await sso.get("/api/v1/users/me/sessions")).json()
+    assert current["mfa_verified"] is True
+    # ... never for the account, which every organization of the person relies on.
+    passkey = str(uuid4())
+    for method, path, body in ACCOUNT_SECURITY:
+        call = getattr(sso, method)
+        url = path.format(passkey=passkey)
+        response = await (call(url) if body is None else call(url, json=body))
+        expect_error(response, 403, "sso_session_restricted")
+    # Refused before any password was checked: nothing counted toward the
+    # lockout, and the account is as it was.
+    account = await admin_conn.fetchrow(
+        "SELECT failed_login_attempts, status, mfa_enabled FROM users WHERE email = $1",
+        alice.email,
+    )
+    assert tuple(account) == (0, "active", True)
+    # Her password session, which passed her second factor, still manages them.
+    assert (await alice.get("/api/v1/auth/webauthn/credentials")).status_code == 200
 
 
 async def test_leaving_the_organization_ends_the_single_sign_on_session(
