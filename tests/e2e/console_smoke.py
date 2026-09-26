@@ -5,10 +5,11 @@ and alerts), use the main pages, sign out and in again - with not one console
 error, uncaught exception or blocked resource. The console runs under a strict
 Content-Security-Policy with Trusted Types, so a violation would break it.
 
-CI runs it in the Playwright image the browser service is built on:
+CI runs it in the browser service's own image (Playwright and Chromium):
 
-    docker run --rm --network host -v "$PWD:/work:ro" -w /work -e NEXUSFLOW_E2E_... \
-        <playwright image> python3 tests/e2e/console_smoke.py
+    docker run --rm --network host --entrypoint /opt/venv/bin/python \
+        -v "$PWD:/work:ro" -w /work -e NEXUSFLOW_E2E_... \
+        nexusflow-browser:latest tests/e2e/console_smoke.py
 
 It needs only the standard library and Playwright. Environment:
 NEXUSFLOW_E2E_BASE_URL, NEXUSFLOW_E2E_MAILPIT_URL, NEXUSFLOW_E2E_CA_BUNDLE (the
@@ -234,7 +235,7 @@ def run(page: Page, org: str, email: str) -> None:
     page.goto(BASE + signup_link(email))
     expect(page.get_by_role("heading", name="Finish creating your account")).to_be_visible()
     assert "token" not in page.url, "the token must leave the address bar at once"
-    page.get_by_label("Your name").fill("Console Owner")
+    page.get_by_label("Your name").fill("Olivia Owner")
     page.get_by_label("Organization name").fill(org)
     page.get_by_label("Password", exact=True).fill(PASSWORD)
     page.get_by_label("Repeat the password").fill(PASSWORD)
@@ -326,7 +327,8 @@ def failed_request(failed: Any, problems: list[str]) -> None:
 def main() -> int:
     problems: list[str] = []
     suffix = uuid.uuid4().hex[:8]
-    org, email = f"Console {suffix}", f"console+{suffix}@nexusflow.example.com"
+    # A readable name for the screenshots (each CI run has a stack of its own).
+    org, email = "Acme Retail", f"console+{suffix}@nexusflow.example.com"
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         for scheme in ("light", "dark"):

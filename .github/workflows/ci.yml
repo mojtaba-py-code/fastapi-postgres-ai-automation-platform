@@ -213,19 +213,19 @@ jobs:
         run: uv run pytest tests/e2e -m e2e
       - name: Web console in a real browser (Chromium, Playwright)
         env:
-          # The base image of the browser service (docker/Dockerfile.browser), already built here.
-          PLAYWRIGHT_IMAGE: mcr.microsoft.com/playwright/python:v1.63.0-noble@sha256:72bd171a9ffc2b4b59532aaa6210e21014d07093120dc25528870c0b840da1f0
           SHOTS_DIR: ${{ runner.temp }}/console
         run: |
           mkdir -p "$SHOTS_DIR" && chmod 777 "$SHOTS_DIR"
-          docker run --rm --network host --ipc=host \
+          # The browser service's own image, built above: Playwright in /opt/venv,
+          # Chromium in /ms-playwright (the base image keeps neither usable).
+          docker run --rm --network host --ipc=host --entrypoint /opt/venv/bin/python \
             -v "$PWD:/work:ro" -v "$SHOTS_DIR:/shots:rw" -w /work \
             -e PYTHONDONTWRITEBYTECODE=1 \
             -e NEXUSFLOW_E2E_BASE_URL=https://localhost \
             -e NEXUSFLOW_E2E_MAILPIT_URL=http://127.0.0.1:8025 \
             -e NEXUSFLOW_E2E_CA_BUNDLE=/work/deploy/certs/dev-ca.pem \
             -e CONSOLE_SCREENSHOTS=/shots \
-            "$PLAYWRIGHT_IMAGE" python3 tests/e2e/console_smoke.py
+            nexusflow-browser:latest tests/e2e/console_smoke.py
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: ${{ !cancelled() }}
         with:
