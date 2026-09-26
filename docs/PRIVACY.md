@@ -24,6 +24,9 @@ your roles, lawful bases and contracts are yours to decide and document.
 | Sign-in sessions: IP address, browser string, times | `user_sessions` | Session management, revocation, sign-in risk | 90 days after the session expired (`retention.sessions_days`), then deleted |
 | Refresh, password-reset and sign-up tokens (keyed hashes only; reset and sign-up requests keep the requesting IP and the address) | `refresh_tokens`, `password_reset_tokens`, `signup_requests` | Sessions, account recovery, proof of address | A week after they expire, then deleted |
 | Invitations: the invited address and role | `invitations` | Joining an organization | While the organization exists (see section 7) |
+| Single sign-on: the person's identity at an organization's identity provider (issuer, subject, the address it last signed in with, times); which sessions that provider opened | `sso_identities`, `user_sessions.sso_org_id` | Matching the person on later sign-ins; confining those sessions to the organization | Until the account is erased, the organization removes its provider or changes its issuer, or the organization is deleted |
+| Started single sign-ons (keyed hashes of state, binding and nonce; the sealed PKCE verifier) | `sso_login_states` | Finishing a sign-in | A week after they expire (10 minutes), then deleted |
+| Directory entries an organization's identity provider keeps through SCIM: address, external ID, names, active flag | `scim_users` | Provisioning and deprovisioning members | Until the provider deletes the entry, the account is erased or the organization is deleted |
 | Audit trail: who did what, from which IP address and browser | `audit_logs` (append-only, hash-chained) | Accountability, security investigations | Until you purge it (section 4) |
 | API keys: name, role, scopes, times (the key itself only as a keyed hash) | `api_keys` | Machine access | Until the organization is deleted; revoked when their creator leaves |
 | Business data an organization collects - which may contain personal data | `records` and their history, `changes`, uploads, reports | The organization's purposes | Each dataset's own `retention_days` for history and changes; until deleted otherwise |
@@ -40,9 +43,9 @@ opted in to external AI.
 
 | Right | How |
 |---|---|
-| Access and portability (art. 15, 20) | Self-service: `GET /api/v1/users/me/export` returns a JSON copy - profile, organizations, sessions, API keys, and the account's own actions in its organizations' audit trails. On a request received otherwise: `nexusflow user export --email <address>`, which also lists the account's entries in the platform's own audit chain. Both exports are audited. |
+| Access and portability (art. 15, 20) | Self-service: `GET /api/v1/users/me/export` returns a JSON copy - profile, organizations, sessions, identity-provider links, directory (SCIM) entries, API keys, and the account's own actions in its organizations' audit trails. It needs a password sign-in: a single sign-on session reaches its organization only, so an account created by an identity provider sets a password first (reset link) or asks the operator. On a request received otherwise: `nexusflow user export --email <address>`, which also lists the account's entries in the platform's own audit chain. Both exports are audited. |
 | Rectification (art. 16) | People change their name themselves (`PATCH /api/v1/users/me`). There is no self-service change of the e-mail address yet: the person can sign up with the new address and be invited again. |
-| Erasure (art. 17) | Self-service: `POST /api/v1/users/me/delete` (password required). On a request received otherwise: `nexusflow user erase --email <address> --reason <ticket>`. Either way the person leaves every organization, their API keys are revoked, their sessions end, their recovery codes are deleted and the account is anonymised; the sessions themselves go with the identity retention (section 2). Refused while the person is the sole owner of an organization: ownership moves first, or the organization is deleted. Audit entries keep the now anonymous account ID. |
+| Erasure (art. 17) | Self-service: `POST /api/v1/users/me/delete` (password required). On a request received otherwise: `nexusflow user erase --email <address> --reason <ticket>`. Either way the person leaves every organization, their API keys are revoked, their sessions end, their recovery codes, identity-provider links and directory (SCIM) entries are deleted and the account is anonymised (an organization's identity provider may provision the address again: that is the organization's decision as controller of its directory); the sessions themselves go with the identity retention (section 2). Refused while the person is the sole owner of an organization: ownership moves first, or the organization is deleted. Audit entries keep the now anonymous account ID. |
 | Business data about a person | Answered by the organization, which controls it (dataset exports, deletion of sources, datasets or the organization). |
 
 Record every request and its outcome in your own case log; the audit trail shows
@@ -76,6 +79,8 @@ the exports and erasures themselves (`privacy.data_exported`, `auth.account_dele
 | Your SMTP relay | When e-mail is configured | Recipients, subjects and bodies of account mail and alerts |
 | Anthropic (Claude API) | Only with `NEXUSFLOW_AI_PROVIDER=anthropic` **and** an organization's opt-in | Change data for analysis: sensitive fields removed, free text redacted, restricted datasets never |
 | Your alerting receivers (PagerDuty, Opsgenie, Slack) | If configured in Alertmanager | Alert names and labels - no tenant data |
+| An organization's own identity provider | When the organization configures single sign-on | The sign-in requests of its members (client id, redirect URI, state, nonce, PKCE challenge); it already holds its members' identities |
+| The DNS-over-HTTPS resolver (Cloudflare by default) | When an organization verifies a domain | The name of the verification TXT record (`_nexusflow-verification.<domain>`) - no personal data |
 
 Sending data to a provider outside the UK or EEA (Anthropic processes in the
 United States) needs a transfer mechanism, such as the UK International Data
@@ -108,7 +113,7 @@ A starting point, to complete with your own details:
 | Controller / processor | *You, or the organization* | The organization (controller); you (processor) |
 | Purposes | Authentication, access control, security monitoring | *The organization's own* |
 | Categories of people | Users of the platform | *Whoever the collected data is about* |
-| Categories of data | Section 2, rows 1-6 | *Per dataset* |
+| Categories of data | Section 2, rows 1-9 | *Per dataset* |
 | Recipients | Section 5 | Section 5, plus the organization's own integrations |
 | Transfers outside the UK/EEA | *If your hosting or relay is* | Anthropic, only with the opt-in (section 5) |
 | Retention | Section 4 | Per dataset (`retention_days`) |

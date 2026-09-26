@@ -52,7 +52,7 @@ flowchart TB
 
 | Role | Command | Network access | Secrets it holds |
 |---|---|---|---|
-| Public API | `uvicorn ...main:create_public_app` | edge, backend | DB (app role), Redis app user, broker, JWT key, KEKs, pepper |
+| Public API | `uvicorn ...main:create_public_app` | edge, backend (+ egress with the single sign-on overlay) | DB (app role), Redis app user, broker, JWT key, KEKs, pepper |
 | Internal API | `uvicorn ...main:create_internal_app` | backend, automation, sandbox | same as the public API |
 | Pipeline worker | `celery ... -Q pipeline` | backend only (**no egress**) | same |
 | Integrations worker | `celery ... -Q integrations` | backend, automation, egress | same, plus the provider keys it uses |
@@ -102,6 +102,19 @@ a framework.
 * Cross-tenant platform jobs (schedulers, maintenance) obtain **identifiers only**
   from `SECURITY DEFINER` functions, then open per-tenant scoped transactions.
 * Repositories filter by `org_id` explicitly as well, as defence in depth.
+
+### Identity federation (single sign-on, SCIM)
+
+Each organization may configure one OpenID Connect identity provider and SCIM
+tokens (`domain/identity/sso*.py`, `provisioning.py`, `directory.py`;
+`infrastructure/sso/`). The public API is the confidential client; every call to a
+provider goes through the SSRF-guarded client. A provider is trusted only for the
+e-mail domains its organization proved it owns (DNS TXT), and a session it opens is
+**bound to that organization** (`user_sessions.sso_org_id`): its tokens name only that
+organization and its account-wide actions are confined to it. SCIM tokens work only
+on `/scim/v2`, for their organization. The started sign-ins (looked up by a keyed
+hash before the tenant is known) and SCIM tokens (looked up by prefix) have narrow
+authentication-context read policies, like API keys. See [SSO.md](SSO.md).
 
 ## 4. The data pipeline
 

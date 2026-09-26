@@ -12,6 +12,8 @@ all timestamps are ISO-8601 with a time zone. The OpenAPI document and Swagger U
 | **Refresh** | `POST /auth/refresh {refresh_token}` issues a new pair. Refresh tokens are single-use; presenting a used one revokes the whole session. |
 | **API key** | Create with `POST /api-keys {name, role, scopes[], expires_in_days}`. The `nxf_…` token is shown **once**; send it as `Authorization: Bearer nxf_…`. Scopes must be a subset of the role's permissions. |
 | **OAuth2 password form** | `POST /auth/token` (form-encoded), for tools that expect the OAuth2 password flow. |
+| **Single sign-on** | Through the organization's OpenID Connect identity provider: `POST /auth/sso/start`, then `POST /auth/sso/callback` (below). The session it opens is bound to that organization. See [SSO.md](SSO.md). |
+| **SCIM token** | `nxp_…`, created by an owner; valid on `/scim/v2` only (below). |
 
 The public signing keys are published at `/.well-known/jwks.json`.
 
@@ -33,7 +35,30 @@ Other authentication endpoints:
 * passwords: `/auth/password/change`, `/auth/password/reset-request`,
   `/auth/password/reset`;
 * MFA: `/auth/mfa/enroll`, `/auth/mfa/confirm`, `/auth/mfa/disable`;
-* organizations: `/auth/switch-organization`, `/auth/invitations/accept`.
+* organizations: `/auth/switch-organization`, `/auth/invitations/accept`;
+* single sign-on: `/auth/sso/start`, `/auth/sso/callback`.
+
+**Single sign-on** (OpenID Connect, authorization code flow with PKCE; details and
+the security model in [SSO.md](SSO.md)):
+
+| Step | Request | Answer |
+|---|---|---|
+| Start | `POST /auth/sso/start {organization: "<slug>"}` | `200 {authorization_url, state, binding, expires_in}`. Send the browser to `authorization_url`; keep `binding` in memory (never in a URL). `404 sso_not_available` - the same for an unknown organization and one without usable single sign-on; `503 sso_unavailable` if the provider's discovery document cannot be used |
+| Callback | The provider redirects to `{public_base_url}/sso/callback?code=…&state=…`; the front end checks `state` and posts `POST /auth/sso/callback {code, state, binding}` | `200` token pair - or `{mfa_required: true, mfa_token}` when the organization requires MFA the provider did not provide and the person has the platform's TOTP (finish with `/auth/mfa/verify`) |
+
+Callback errors: `401 sso_failed` for anything about the state (unknown, used,
+expired), the binding or the ID token (one message, the reason is in the
+organization's audit trail); `403 sso_email_not_verified`, `403 sso_domain_not_allowed`
+(not an address in one of the organization's verified domains),
+`403 sso_access_revoked` (deactivated by the organization's directory),
+`403 ip_not_allowed`, `403 mfa_required`, `403 org_inactive`; `503 sso_unavailable`.
+The session a single sign-on opens is bound to its organization:
+`switch-organization` to another one is `403 sso_session_bound`, and the
+personal-data export is `403 sso_session_restricted`.
+
+An organization that requires single sign-on answers password sessions with
+`403 sso_required` (owners who passed the platform's MFA excepted), including
+`/auth/login` naming it and `/auth/switch-organization` into it.
 
 ## Conventions
 
@@ -75,6 +100,8 @@ rejected with `422 invalid_cursor`.
 | Exports and downloads | 20 per hour per person (all of a user's API keys share it) |
 | AI analyses | 30 per hour per person (all of a user's API keys share it) |
 | Login | 20 per minute per IP, 5 per minute per account |
+| Single sign-on | 30 starts and 30 callbacks per minute per IP |
+| SCIM | 600 per minute per SCIM token |
 | Password change | 5 per 15 minutes per user; a wrong current password also counts toward lockout |
 | Webhook receipt | 600 per minute per IP (before verification); 120 per minute per endpoint, counted only for correctly signed deliveries |
 
@@ -102,6 +129,9 @@ for the role matrix.
 | GET, POST, DELETE | `/organizations/current/invitations[/{id}]` | Invitations [members:manage] |
 | GET, POST, DELETE | `/api-keys[/{id}]` | API keys [api_keys:manage] |
 | GET | `/audit`, `/audit/verify` | Audit trail and hash-chain verification [audit:read] |
+| GET, PUT, DELETE | `/organizations/current/sso` | The organization's OpenID Connect provider: `{issuer, client_id, client_secret, allowed_domains[], default_role (viewer or analyst), sso_required, trust_idp_mfa}`. The secret is write-only (required the first time; omitted keeps it) and never returned. The answer lists each domain's TXT record and the `redirect_uri` to register. `422 sso_discovery_failed`, `invalid_issuer`, `invalid_default_role`, `sso_domain_not_verified`, `would_lock_you_out`; `404 sso_not_configured`. A signed-in owner's or administrator's session only (`403 session_required` for API keys) [org:update] |
+| POST | `/organizations/current/sso/domains/verify` | Look up each unverified domain's TXT record: `{configuration, checks: [{domain, result}]}`, result `verified`, `already_verified`, `record_not_found` or `lookup_failed` [org:update] |
+| GET, POST, DELETE | `/organizations/current/scim-tokens[/{id}]` | SCIM tokens `{name, expires_in_days (1-365)}`; the `nxp_…` token is shown **once**; at most 10 live ones (`409 too_many_tokens`). Owners' signed-in sessions only (`403 owner_required`, `session_required`) |
 
 ### Data
 | Method | Path | |
@@ -182,6 +212,30 @@ Timestamps must be within 5 minutes. During secret rotation, both secrets are va
 for 24 hours, and a header may carry several `v1=` values. A delivery that was not
 stored (any non-2xx answer) can always be retried under the same delivery id; sign
 each attempt with a fresh timestamp.
+
+## SCIM 2.0 provisioning
+
+`https://<your-domain>/scim/v2` (RFC 7643/7644) lets an organization's identity
+provider provision and deprovision its members; setup and behaviour in
+[SSO.md](SSO.md#8-scim-20-provisioning). Authenticate with the organization's SCIM
+token: `Authorization: Bearer nxp_…`. Requests and responses are
+`application/scim+json` (`application/json` is accepted); bodies are capped at 64 KiB.
+
+| Method | Path | |
+|---|---|---|
+| GET | `/ServiceProviderConfig`, `/ResourceTypes[/User]`, `/Schemas[/{urn}]` | What is supported: PATCH yes; filter yes (200 results at most); bulk, sort, ETags and password changes no |
+| GET | `/Users?filter=&startIndex=&count=` | A ListResponse. Filters: `userName eq "…"`, `externalId eq "…"`, `emails.value eq "…"` only (else `400 invalidFilter`); `count` at most 200 |
+| POST | `/Users` | Provision: `userName` (an address in a verified domain), `externalId`, `name`, `displayName`, `emails`, `active`. `201` with `Location`; `409 uniqueness` for a second entry of the same person or `externalId`; passwords are refused |
+| GET, PUT | `/Users/{id}` | Read or replace (`userName` cannot change: `400 mutability`) |
+| PATCH | `/Users/{id}` | PatchOp `add`/`replace` of `active`, `externalId`, `displayName`, `name[.givenName/.familyName/.formatted]`, `emails`. `active: false` deprovisions (membership removed, the member's API keys in the organization revoked); `active: true` provisions again with the default role |
+| DELETE | `/Users/{id}` | Deprovision and delete the entry - never the account |
+
+Owners are never deactivated or removed (`403`). Errors use the SCIM Error schema:
+`{"schemas": ["urn:ietf:params:scim:api:messages:2.0:Error"], "status": "400",
+"scimType": "invalidFilter", "detail": "…"}`, with `401` (a missing, unknown, revoked
+or expired token, or any other credential), `403`, `404` (also another
+organization's resources), `409`, `413`, `415`, `429` (with `Retry-After`) and `503`.
+A SCIM token is refused (`401`) by every endpoint outside `/scim/v2`.
 
 ## Data classification
 
