@@ -8,7 +8,7 @@ all timestamps are ISO-8601 with a time zone. The OpenAPI document and Swagger U
 
 | Method | How |
 |---|---|
-| **User session** | `POST /auth/login {email, password}` returns an `access_token` (10 min) and a `refresh_token`. If MFA is enabled it instead returns `{mfa_required: true, mfa_token, expires_in}`; finish with `POST /auth/mfa/verify {mfa_token, code}` (a TOTP code or a recovery code). Send `Authorization: Bearer <access_token>`. |
+| **User session** | `POST /auth/login {email, password}` returns an `access_token` (10 min) and a `refresh_token`. If MFA is enabled it instead returns `{mfa_required: true, mfa_token, expires_in, methods}`; finish with `POST /auth/mfa/verify {mfa_token, code}` (a TOTP code or a recovery code) or with a passkey (below). Send `Authorization: Bearer <access_token>`. |
 | **Refresh** | `POST /auth/refresh {refresh_token}` issues a new pair. Refresh tokens are single-use; presenting a used one revokes the whole session. |
 | **API key** | Create with `POST /api-keys {name, role, scopes[], expires_in_days}`. The `nxf_…` token is shown **once**; send it as `Authorization: Bearer nxf_…`. Scopes must be a subset of the role's permissions. |
 | **OAuth2 password form** | `POST /auth/token` (form-encoded), for tools that expect the OAuth2 password flow. |
@@ -32,8 +32,27 @@ Other authentication endpoints:
 * sign-out: `/auth/logout`, `/auth/logout-all`;
 * passwords: `/auth/password/change`, `/auth/password/reset-request`,
   `/auth/password/reset`;
-* MFA: `/auth/mfa/enroll`, `/auth/mfa/confirm`, `/auth/mfa/disable`;
+* MFA: `/auth/mfa/enroll`, `/auth/mfa/confirm`, `/auth/mfa/disable` (turns every
+  second factor off: the authenticator app, all passkeys and the recovery codes);
 * organizations: `/auth/switch-organization`, `/auth/invitations/accept`.
+
+**Passkeys** (WebAuthn) are a second factor equal to TOTP; see
+[PASSKEYS.md](PASSKEYS.md). Options and credentials use WebAuthn's own JSON forms
+(`PublicKeyCredential.parseCreationOptionsFromJSON`, `credential.toJSON()`), with
+binary values as unpadded base64url.
+
+| Method | Path | |
+|---|---|---|
+| POST | `/auth/webauthn/register/begin {password}` | Creation options (`{options, expires_in}`): a single-use challenge for five minutes, bound to the account and session. From a session only; once the account has a second factor, from a session that passed one (`403 mfa_session_required`) |
+| POST | `/auth/webauthn/register/finish {name?, credential}` | `201 {passkey, recovery_codes}` - the codes only when this passkey turned MFA on. `422 passkey_rejected` names the reason in `details[0].code`; `409 passkey_exists`, `409 too_many_passkeys` (ten at most) |
+| GET | `/auth/webauthn/credentials` | My passkeys: name, algorithm, transports, backup flags, times - no key material |
+| PATCH | `/auth/webauthn/credentials/{id} {name}` | Rename |
+| POST | `/auth/webauthn/credentials/{id}/delete {password}` | Remove; `409 last_second_factor` for the last passkey of an account without TOTP |
+| POST | `/auth/mfa/webauthn/begin {mfa_token}` | Request options for the sign-in the `mfa_token` belongs to (`409 no_passkeys` if the account has none) |
+| POST | `/auth/mfa/webauthn/verify {mfa_token, credential}` | The token pair; any refusal is `401 mfa_failed` and counts toward the lockout |
+
+Passkey endpoints answer `503 passkeys_unavailable` where the public URL's host is
+not a domain name.
 
 ## Conventions
 
@@ -75,6 +94,7 @@ rejected with `422 invalid_cursor`.
 | Exports and downloads | 20 per hour per person (all of a user's API keys share it) |
 | AI analyses | 30 per hour per person (all of a user's API keys share it) |
 | Login | 20 per minute per IP, 5 per minute per account |
+| Passkeys | Sign-in step: 20 per 5 minutes per IP; registering and managing: 30 per 15 minutes per person |
 | Password change | 5 per 15 minutes per user; a wrong current password also counts toward lockout |
 | Webhook receipt | 600 per minute per IP (before verification); 120 per minute per endpoint, counted only for correctly signed deliveries |
 

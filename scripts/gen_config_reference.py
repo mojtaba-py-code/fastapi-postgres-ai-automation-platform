@@ -52,7 +52,7 @@ SECTION_NOTES: dict[str, str] = {
         "Key material, token lifetimes, password hashing, brute-force protection and the "
         "passkey (WebAuthn) relying party: its ID is the host of `app.public_base_url` unless "
         "`webauthn_rp_id` names a parent domain of it, and passkey answers are accepted from "
-        "that URL's origin plus `webauthn_origins`."
+        "that URL's origin plus `webauthn_origins`. See [PASSKEYS.md](PASSKEYS.md)."
     ),
     "scraping": (
         "Outbound HTTP for collection: SSRF policy, limits, politeness and the browser service."

@@ -95,7 +95,7 @@ RabbitMQ (Celery). Each worker pool has its own broker user; see deploy/rabbitmq
 
 ### `security`
 
-Key material, token lifetimes, password hashing, brute-force protection and the passkey (WebAuthn) relying party: its ID is the host of `app.public_base_url` unless `webauthn_rp_id` names a parent domain of it, and passkey answers are accepted from that URL's origin plus `webauthn_origins`.
+Key material, token lifetimes, password hashing, brute-force protection and the passkey (WebAuthn) relying party: its ID is the host of `app.public_base_url` unless `webauthn_rp_id` names a parent domain of it, and passkey answers are accepted from that URL's origin plus `webauthn_origins`. See [PASSKEYS.md](PASSKEYS.md).
 
 | Variable | Type | Default | Constraints |
 |---|---|---|---|
