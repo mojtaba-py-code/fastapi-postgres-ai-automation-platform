@@ -7,6 +7,14 @@ All notable changes are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+* Single sign-on with each organization's OpenID Connect provider (authorization
+  code flow with PKCE and a client-bound state, strictly verified ID tokens), for
+  the e-mail domains the organization proves with a DNS TXT record; accounts and
+  memberships created just in time; sessions bound to the organization; single
+  sign-on can be required. SCIM 2.0 provisioning (`/scim/v2`) with per-organization
+  tokens. Guides for Okta, Microsoft Entra ID and Google Workspace
+  ([docs/SSO.md](docs/SSO.md)); the public API needs `docker-compose.sso.yml` to
+  reach identity providers.
 * Passkeys (WebAuthn) as a phishing-resistant second factor, alongside TOTP:
   registered from a signed-in session, used after the password step, renamed and
   removed (never the last factor), verified strictly by the platform's own

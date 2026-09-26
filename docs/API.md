@@ -69,6 +69,8 @@ Callback errors: `401 sso_failed` for anything about the state (unknown, used,
 expired), the binding or the ID token (one message, the reason is in the
 organization's audit trail); `403 sso_email_not_verified`, `403 sso_domain_not_allowed`
 (not an address in one of the organization's verified domains),
+`403 sso_account_not_managed` (from Google: an account the organization's Workspace
+does not manage - no `hd` claim naming a verified domain),
 `403 sso_access_revoked` (deactivated by the organization's directory),
 `403 ip_not_allowed`, `403 mfa_required`, `403 org_inactive`; `503 sso_unavailable`.
 The session a single sign-on opens is bound to its organization:

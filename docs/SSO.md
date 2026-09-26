@@ -48,8 +48,10 @@ sequenceDiagram
   and `azp` equal to it when there are several audiences (or any `azp`); `exp`,
   `iat` and `nbf` against the platform's clock with 60 seconds of tolerance
   (`NEXUSFLOW_SSO__CLOCK_SKEW_SECONDS`), and `iat` no older than 10 minutes; the
-  `nonce`; `email_verified: true`. Critical header extensions are refused; `jku`,
-  `jwk` and `x5u` headers are ignored.
+  `nonce`; `email_verified: true` (from Microsoft Entra ID, which has no such
+  claim, `xms_edov: true` - section 2); from Google, an `hd` claim naming a verified
+  domain (section 3). Critical header extensions are refused; `jku`, `jwk` and
+  `x5u` headers are ignored.
 * **Every request to the provider** goes through the SSRF-guarded HTTP client:
   HTTPS on port 443 only, every DNS answer checked at connect time (no private,
   loopback or metadata addresses), size and time limits, no redirects for the token
@@ -68,7 +70,7 @@ Register NexusFlow at the provider as a **web application** (confidential client
 | Grant type | Authorization code (PKCE is sent; providers that support it enforce it) |
 | Client authentication | Client secret: HTTP Basic (`client_secret_basic`) if the provider offers it, else in the request body (`client_secret_post`) - taken from the discovery document |
 | Scopes | `openid email profile` |
-| Claims in the ID token | `sub`, `email`, `email_verified` (must be `true`), optionally `name`/`given_name`/`family_name` (the name of an account created at the first sign-in) and `amr` (see section 6) |
+| Claims in the ID token | `sub`, `email`, `email_verified` (must be `true`; from Entra ID, `xms_edov` instead), from Google `hd`, optionally `name`/`given_name`/`family_name` (the name of an account created at the first sign-in) and `amr` (see section 6) |
 
 Then, as an owner or administrator, **from a signed-in session** (API keys are
 refused):
@@ -95,8 +97,10 @@ PUT /api/v1/organizations/current/sso
   the row, re-wrapped by key rotation, and never returned or logged.
 * `default_role` is `viewer` or `analyst`: an identity provider never creates
   owners or administrators.
-* Changing the issuer or client id ends every session the old provider opened (a new
-  issuer also forgets the old one's identity links).
+* Changing the issuer or client id ends every session the old provider opened and
+  forgets its identity links: subjects can differ per client (Microsoft Entra ID's
+  are per application), so members are linked again by their address at their next
+  sign-in.
   `DELETE /api/v1/organizations/current/sso` removes the provider, ends its sessions,
   forgets its identity links and turns `sso_required` off.
 
@@ -109,13 +113,19 @@ Provider notes, in general terms - check your provider's current documentation:
 * **Microsoft Entra ID.** Create an *app registration* with a **Web** redirect URI and
   a client secret. Use the tenant-specific issuer
   `https://login.microsoftonline.com/<tenant-id>/v2.0` (the multi-tenant `common` and
-  `organizations` documents do not name a single issuer, so they are refused). Make
-  sure the ID token carries `email` and `email_verified`: Entra ID does not always
-  include them by default (optional claims), and NexusFlow refuses a token without
-  a verified address. Test with one account before rolling out.
+  `organizations` documents do not name a single issuer, so they are refused).
+  Entra ID sends no `email_verified` claim: under *Token configuration*, add the
+  optional ID token claims `email` and `xms_edov`. `xms_edov: true` - the address is
+  in a domain your tenant verified - is what NexusFlow accepts from Entra ID in its
+  place; a token with neither is refused (`403 sso_email_not_verified`). Add `amr`
+  too if you turn on `trust_idp_mfa` (section 6): Entra ID's v2.0 ID tokens carry it
+  only on request. Test with one account before rolling out.
 * **Google Workspace.** Create an OAuth client of type *Web application* in the
-  Google Cloud console. The issuer is `https://accounts.google.com`; Google sends
-  `email_verified`, but no `amr` (see section 6).
+  Google Cloud console (an *Internal* consent screen keeps it to your organization's
+  accounts). The issuer is `https://accounts.google.com`, which serves every Google
+  account: NexusFlow accepts only accounts your Workspace manages - the ID token's
+  `hd` claim must name a verified domain (section 3). Google sends `email_verified`,
+  but no `amr` (see section 6).
 
 ## 3. Domains and their proof
 
@@ -141,6 +151,14 @@ already have (they receive its mail and could reset its passwords).
   Removing a domain from the list removes its verification. A domain is verified
   once and not re-checked.
 * Sign-in is available only while at least one domain is verified.
+* **Only accounts the organization manages.** An organization's own tenant (Okta,
+  Entra ID, Keycloak and the like) issues tokens for the accounts it manages. Google's
+  issuer serves every Google account, so from Google the `hd` claim - the Workspace
+  domain of a managed account - must name a verified domain too
+  (`403 sso_account_not_managed`): a personal Google account registered with a work
+  address, or kept by a former employee, has a verified address in the domain but no
+  `hd`. Other public issuers that anyone can sign up to are not recognised: configure
+  your organization's own tenant.
 
 ## 4. Who gets in, and which account
 
@@ -165,17 +183,18 @@ At the callback, after the ID token verified and its address is in a verified do
 Refusals answer as little as possible: everything about the state, the binding or
 the token is `401 sso_failed` ("Single sign-on failed. Start again."). Actionable
 ones have their own code: `403 sso_email_not_verified`, `403 sso_domain_not_allowed`,
-`403 sso_access_revoked`, `403 ip_not_allowed` (the network allowlist, checked before
+`403 sso_account_not_managed`, `403 sso_access_revoked`, `403 ip_not_allowed` (the network allowlist, checked before
 anything is created), `403 mfa_required`, `403 org_inactive`, `503 sso_unavailable`.
 Every refusal of a well-formed callback is audited with a reason (`auth.sso.failed`),
 in the organization's trail - or the platform's when the state is unknown.
 
-The platform's account lockout does not block a single sign-on, and a single sign-on
-does not reset it: the lockout guards the password and the account's second factor
-(one counter for both, until a password sign-in completes), and a provider's sign-in
-proves neither. The platform's own second factor after a single sign-on (section 6)
-is different: a wrong code or a refused passkey counts toward the lockout, a locked
-account cannot complete it - and completing it still resets nothing. New-device and
+The platform's account lockout does not block a single sign-on, and a provider's
+sign-in does not reset it: the lockout guards the password and the account's second
+factor (one counter for both, until a sign-in completes with them), and a provider's
+sign-in proves neither. The platform's own second factor after a single sign-on
+(section 6) is different: a wrong code or a refused passkey counts toward the
+lockout, a locked account cannot complete it, and completing it resets the counter,
+as a completed password sign-in does. New-device and
 suspicious sign-in notices work as for a password sign-in (not for an account the
 sign-in just created).
 
@@ -337,10 +356,10 @@ the *Secret Token* to the SCIM token, and map `userPrincipalName` or `mail` to
 
 | Threat | Control |
 |---|---|
-| A tenant's identity provider asserting another person's address | Addresses accepted only in domains the organization proved (DNS TXT or operator); a linked account never re-linked to another subject; sessions bound to the organization |
+| A tenant's identity provider asserting another person's address | Addresses accepted only in domains the organization proved (DNS TXT or operator); from Google, only accounts the organization's Workspace manages (`hd`); a linked account never re-linked to another subject; sessions bound to the organization |
 | Account enumeration through JIT or SCIM | Only verified-domain addresses are ever looked up; `start` answers alike for unknown organizations, organizations without single sign-on and those with no verified domain; password-less accounts cost a full password verification at sign-in |
 | Stolen code or state (logs, `Referer`), login CSRF, code injection | Client binding secret, PKCE S256, single-use state (10 minutes), fixed redirect URI |
-| ID token forgery or confusion | Algorithm allowlist, key type bound to the algorithm, JWKS from the discovery document only, `iss`/`aud`/`azp`/times/`nonce` checked, `email_verified` required |
+| ID token forgery or confusion | Algorithm allowlist, key type bound to the algorithm, JWKS from the discovery document only, `iss`/`aud`/`azp`/times/`nonce` checked, a verified address required (`email_verified`; from Entra ID, `xms_edov`) |
 | SSRF through a tenant-configured issuer | SSRF-guarded client, HTTPS on 443 only, connect-time IP checks of every DNS answer, discovery must name the issuer exactly, no redirects for the token request |
 | Leaked client secret | Sealed at rest (AES-256-GCM, bound to the row), write-only in the API, never logged, re-wrapped by key rotation |
 | Leaked SCIM token | Keyed hash only, expiry (at most a year), revocation, one organization, SCIM endpoints only, rate limit, network allowlist, no owner changes, verified domains only, every change audited |
@@ -393,6 +412,11 @@ outbound access.
   rotation is seen within `NEXUSFLOW_SSO__METADATA_CACHE_SECONDS` (or at the first
   token signed with the new key).
 * The public API needs outbound HTTPS (section 10).
+* Public issuers that anyone can sign up to are not detected (Google's is: its `hd`
+  claim is checked); use your organization's own tenant.
+* Not yet tried against the real providers: the tests run every flow against an
+  in-process provider that follows the specifications (discovery, signing keys, the
+  token endpoint, ID tokens). Sign in with one account before rolling out.
 
 ## 12. Design notes
 

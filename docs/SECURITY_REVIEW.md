@@ -34,6 +34,7 @@ for an independent assessment:
 | R11 | First run of the full stack (CI) | The Compose stack built and started behind the TLS edge on a CI runner; the end-to-end suite, backup and restore, and a passive DAST scan of every API operation | 1 High, 2 Medium |
 | R12 | Six parallel reviews | Identity and access; pipeline and data lifecycle; workers, sandbox and browser; alerting, AI, notifications and reports; the database (measured on PostgreSQL); the deployment (checked against upstream sources) | 53 unique findings: 5 High, 28 Medium, 20 Low |
 | R13 | What fixing R12 surfaced | The first weekly scan of the third-party images, CI coverage, DAST, the accepted sign-up enumeration, and the lockout on the MFA path | 1 High, 4 Medium, 1 Low |
+| R14 | Single sign-on and SCIM before release | The OpenID Connect relying party, domain proofs, account linking, organization-bound sessions and SCIM provisioning, checked against the identity providers' own documentation (Google, Microsoft Entra ID); its merge with passkeys | 3 Medium, 2 Low |
 
 In R4 and R5, every defect was first committed as a *strict expected failure*
 (the test fails because of the bug), then fixed, which turned the test into a
@@ -41,7 +42,7 @@ permanent regression test.
 
 ## 2. Findings and resolutions
 
-Severities in R1, R2 and R12 are the reviewers'; in R4-R11 and R13 they were assigned when the defect was fixed. "Test" names the regression test that pins the fix.
+Severities in R1, R2 and R12 are the reviewers'; in R4-R11, R13 and R14 they were assigned when the defect was fixed. "Test" names the regression test that pins the fix.
 
 ### R1 - adversarial code review
 
@@ -320,11 +321,29 @@ database privileges, so a query too slow or a grant too wide fails in tests too.
 | R13-5 | Low | OWASP ZAP reported a "credit card number" in a response: nginx's 32-digit hexadecimal request ID now and then holds a Luhn-valid run of 13 digits | Request IDs shaped like UUIDs at the edge (no run beyond 12 digits), in the logs, the edge's errors and the forwarded header | `tests/unit/test_edge_config.py`, `tests/e2e/test_edge.py` |
 | R13-6 | Medium | The password step reset the failure counter when it issued the MFA challenge: whoever knew the password could guess four TOTP codes per password step, for ever - some 20 guesses a minute per account within the rate limits, about an 8 % chance of a hit a day (found while adding passkeys, which cannot be guessed) | The counter runs across both factors until a sign-in completes: wrong passwords and wrong codes add up to one exponential lockout | `tests/security/test_mfa_guessing.py` |
 
+### R14 - single sign-on and SCIM before release
+
+The single sign-on and SCIM code was reviewed before it reached `main`, with the
+identity providers' own documentation at hand. The design held - addresses only in
+proven domains, people identified by issuer and subject, organization-bound
+sessions, SCIM confined to one organization and never touching owners - but three
+things were wrong where it met real providers (R14-1 to R14-3), and merging it with
+passkeys surfaced two more, fixed in the merge before either reached `main` (R14-4,
+R14-5):
+
+| # | Severity | Finding | Resolution | Evidence |
+|---|---|---|---|---|
+| R14-1 | Medium | With Google as the provider, any Google account whose verified address was in a proven domain could sign in - also a personal account registered with a work address, or kept by a former employee. Google's issuer serves every Google account, and Google requires its `hd` claim to be checked when access is limited to a domain | From Google, the `hd` claim must name one of the organization's verified domains (`403 sso_account_not_managed`) | `tests/integration/test_sso.py`, `tests/unit/security/test_sso_policy.py` |
+| R14-2 | Low | Microsoft Entra ID sends no `email_verified` claim, so every Entra ID sign-in would have been refused - and SSO.md asked administrators for a claim Entra ID cannot send | Entra ID's optional `xms_edov` (the address is in a domain the account's own tenant verified) counts when `email_verified` is absent; an explicit `false` still refuses; SSO.md names the optional claims to add | `tests/unit/security/test_oidc_client.py`, `tests/integration/test_sso.py` |
+| R14-3 | Low | Changing only the client at the same issuer kept the identity links. Entra ID's subjects are per application, so after a new app registration every linked member would have been refused as an identity conflict | Any change of provider (issuer or client) forgets the links; members are linked again by their address at their next sign-in | `tests/integration/test_sso.py` |
+| R14-4 | Medium | A passkey that answered the second-factor step after a single sign-on opened an ordinary session, not one bound to the organization: the provider's word plus the passkey - without the password - would have reached every organization of the person | The step after a single sign-on completes, by code or passkey alike, into a session bound to that organization; a marked challenge without an organization is refused | `tests/integration/test_sso.py` (`TestMfa`) |
+| R14-5 | Medium | A session opened by an identity provider whose MFA the organization trusts counted as "a session that passed a second factor": whoever runs the provider and knows a member's password could have added a passkey of their own to the account - and then signed in to every organization of the person - or removed its factors, changed its password or deleted it | A session an identity provider opened cannot manage the account's second factors, change its password or delete the account (`403 sso_session_restricted`), as it already could not export its data | `tests/security/test_sso_enforcement.py` |
+
 ## 3. Checklist (specification section 39)
 
 | Item | How it is addressed | Evidence |
 |---|---|---|
-| Authentication | Argon2id; breached passwords refused; e-mail-verified sign-up; EdDSA access tokens (10 min) with key IDs; rotating refresh tokens with reuse detection; TOTP with replay protection; lockout; password confirmations counted like sign-ins; sign-in risk; session list and revocation; API keys capped by the creator's membership; per-organization network allowlists for sessions, renewals and API keys | `tests/integration/test_identity_flows.py`, `tests/security/` (incl. `test_network_allowlist.py`) |
+| Authentication | Argon2id; breached passwords refused; e-mail-verified sign-up; EdDSA access tokens (10 min) with key IDs; rotating refresh tokens with reuse detection; passkeys (WebAuthn) and TOTP with replay protection; lockout across both factors; single sign-on (OpenID Connect) for proven domains, with organization-bound sessions; SCIM tokens confined to one organization; password confirmations counted like sign-ins; sign-in risk; session list and revocation; API keys capped by the creator's membership; per-organization network allowlists for sessions, renewals and API keys | `tests/integration/test_identity_flows.py`, `tests/integration/test_sso.py`, `tests/integration/test_scim.py`, `tests/security/` (incl. `test_network_allowlist.py`, `test_passkeys.py`, `test_sso_enforcement.py`) |
 | Authorization | Permission checks at the route and in every service method; roles and scoped keys | `test_api_security.py`, `test_idor_sweep.py` |
 | Input validation | Strict request models (`extra="forbid"`), bounded sizes, lengths, counts and depth; typed dataset schemas | `test_api_security.py`, `test_stages.py` |
 | Output encoding | CSV formula neutralisation, XLSX string cells, XML-escaped PDF text, JSON only in APIs | `test_files_and_reports.py` |

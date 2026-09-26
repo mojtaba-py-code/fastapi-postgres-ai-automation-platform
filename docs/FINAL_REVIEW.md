@@ -9,7 +9,8 @@ a secure automation and intelligence platform, ready for a pilot. The whole stac
 runs in CI on every change - end-to-end tests behind the TLS edge, a
 backup-and-restore round trip and a passive DAST scan - but it is not yet
 production-proven: it has not run on a customer-like host, no independent
-penetration test has been done, and enterprise features such as SSO, high
+penetration test has been done, single sign-on and passkeys have not yet been
+tried with real identity providers, browsers and authenticators, and high
 availability and an admin UI are on the roadmap (section 7).
 
 ## 1. Architecture review
@@ -17,9 +18,9 @@ availability and an admin UI are on the roadmap (section 7).
 | Aspect | Assessment |
 |---|---|
 | Layering | Clean architecture `apps -> bootstrap -> infrastructure -> domain -> core`, enforced in CI by import-linter; the domain imports no framework (no FastAPI, SQLAlchemy, Celery, Redis, HTTP or AI SDK) |
-| Size | 199 modules, about 30,000 lines of Python; 6 migrations (the initial schema in two parts, and four additive ones); 10 ADRs |
+| Size | 220 modules, about 40,500 lines of Python; 11 migrations (the initial schema in two parts, and nine additive ones); 10 ADRs |
 | Components | Public API, internal API (n8n and sandbox), pipeline and integrations workers, sandbox worker, headless browser, beat, n8n (optional), PostgreSQL, Redis (two instances), RabbitMQ, nginx, Prometheus, Alertmanager, Grafana |
-| Trust boundaries | Edge (TLS, limits); tenant isolation (forced RLS plus `org_id` filters); sandbox (no DB, no secrets, per-run tickets); browser (pinning egress proxy); n8n (per-workflow service tokens, signed events). Every entry point is enumerated in the [threat model](THREAT_MODEL.md) (section 3.1) |
+| Trust boundaries | Edge (TLS, limits); tenant isolation (forced RLS plus `org_id` filters); sandbox (no DB, no secrets, per-run tickets); browser (pinning egress proxy); n8n (per-workflow service tokens, signed events); identity providers (trusted only for proven domains, sessions bound to their organization). Every entry point is enumerated in the [threat model](THREAT_MODEL.md) (section 3.1) |
 | Reliability | Transactional outbox; idempotent workers; quorum queues with dead-lettering, delayed retries held by the broker; reaper with bounded attempts and fencing; heartbeat health; one request ID from the API into every job it causes |
 | Extensibility | Ports and adapters for providers (AI, storage, scanning, notifications); new source kinds and channels are adapters; the domain services are independent of the transport |
 | Scaling path | Stateless APIs and workers scale horizontally; per-pool queues; the database is the shared core, and reports and analytics aggregate in it. Single-host Compose is the reference topology. The modular monolith has a documented extraction path to services ([ADR-0010](adr/0010-modular-monolith-and-service-extraction.md)); see section 7 |
@@ -30,21 +31,22 @@ audit); see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## 2. Security review
 
-Eleven AI-assisted review passes (adversarial code review, due diligence,
+Twelve AI-assisted review passes (adversarial code review, due diligence,
 traceability, test-driven reviews of the adapters, the core chain and of hostile
 uploads and rate limits, a deployment startup review, two completion reviews, an
-adversarial review of the day's new code, and six parallel reviews of the whole
+adversarial review of the day's new code, six parallel reviews of the whole
 platform - identity, pipeline and data lifecycle, workers and sandbox, alerting
-and AI, the database, the deployment), the first run of the full stack in CI, and
-what fixing the last round surfaced produced 139 numbered findings plus smaller
-observations. All are fixed with regression tests (or, for configuration, in the
-file named as evidence), except one accepted risk: a member who may read records
-can page through a whole dataset, where exports are audited and budgeted (D-n2).
-The full record, including the specification's security
-checklist, is in [SECURITY_REVIEW.md](SECURITY_REVIEW.md); residual risks are in
-the [threat model](THREAT_MODEL.md). A self-assessed mapping to the seventeen
-chapters of OWASP ASVS 5.0 (target Level 2, with selected Level 3 controls),
-with evidence and the remaining gaps, is in [ASVS.md](ASVS.md).
+and AI, the database, the deployment - and a review of single sign-on and SCIM
+before release), the first run of the full stack in CI, and what fixing the
+reviews surfaced produced 144 numbered findings plus smaller observations. All
+are fixed with regression tests (or, for configuration, in the file named as
+evidence), except one accepted risk: a member who may read records can page
+through a whole dataset, where exports are audited and budgeted (D-n2). The full
+record, including the specification's security checklist, is in
+[SECURITY_REVIEW.md](SECURITY_REVIEW.md); residual risks are in the [threat
+model](THREAT_MODEL.md). A self-assessed mapping to the seventeen chapters of
+OWASP ASVS 5.0 (target Level 2, with selected Level 3 controls), with evidence
+and the remaining gaps, is in [ASVS.md](ASVS.md).
 
 ## 3. Dependency and supply-chain audit
 
@@ -87,19 +89,21 @@ with evidence and the remaining gaps, is in [ASVS.md](ASVS.md).
 
 | Layer | Tests | What they exercise |
 |---|---|---|
-| Unit | 1,349 | Crypto, tokens, SSRF guard, log redaction, network allowlists, the edge configuration (nginx), alert rules against the exported metrics, the DAST gate, script modes in git, all adapters (scraping, robots.txt, collectors, senders, AI provider, ClamAV, n8n client), the core chain (detection, alert rules, offline analysis, property-based tests), pipeline stages, reports and analytics, sign-in risk, request correlation, hostile uploads (hand-built zip bombs, traversal, macros, XXE, sparse sheets), the rate limiter, TLS client configuration, worker policy and liveness, n8n generator and lint, configuration and broker consistency |
-| Integration | 147 | Real PostgreSQL with production roles (RLS really enforced): identity and sign-in risk, database security, the business API and change analytics, the core chain end to end with the real worker handlers, crash recovery, data lifecycle, workflows, request correlation, backup and restore (`pg_dump`/`pg_restore` with the production roles), the CLI, and the demo walkthrough over real HTTP |
-| Security | 97 | Authentication, authorization, an IDOR sweep over every resource route, API-key lifecycle, login locking, session management, network allowlists (members, API keys, sign-in, anti-lockout, operator recovery), every rate-limit scope and its failure policy, hostile uploads through the API, input handling, headers, error leakage |
-| End to end | 13 | The business scenario and the edge's security properties (headers on every response, JSON errors, hidden paths, body limits, tenant isolation) against the running Compose stack (CI), followed by a backup, restore and audit verification and a DAST scan; skipped without a stack |
+| Unit | 1,915 | Crypto, tokens, the WebAuthn verifier and its CBOR decoder, the OpenID Connect client (discovery, key sets, ID tokens) and single sign-on rules, Vault transit wrapping, SSRF guard, log redaction, network allowlists, the edge configuration (nginx), alert rules against the exported metrics, the DAST gate, script modes in git, all adapters (scraping, robots.txt, collectors, senders, AI provider, ClamAV, n8n client), the core chain (detection, alert rules, offline analysis, property-based tests), pipeline stages, reports and analytics, sign-in risk, request correlation, hostile uploads (hand-built zip bombs, traversal, macros, XXE, sparse sheets), the rate limiter, TLS client configuration, worker policy and liveness, n8n generator and lint, configuration and broker consistency |
+| Integration | 320 | Real PostgreSQL with production roles (RLS really enforced): identity and sign-in risk, e-mail-verified sign-up, privacy (export, erasure, retention), single sign-on against an in-process identity provider, SCIM provisioning, migrations down and up again, database security, the business API and change analytics, the core chain end to end with the real worker handlers, crash recovery, data lifecycle, workflows, request correlation, backup and restore (`pg_dump`/`pg_restore` with the production roles), the CLI, and the demo walkthrough over real HTTP |
+| Security | 212 | Authentication, passkeys, second-factor guessing, single sign-on enforcement (organization-bound sessions, `sso_required`), authorization, an IDOR sweep over every resource route, API-key lifecycle, login locking, session management, network allowlists (members, API keys, sign-in, anti-lockout, operator recovery), every rate-limit scope and its failure policy, hostile uploads through the API, input handling, headers, error leakage |
+| End to end | 18 | The business scenario, the monitoring stack and the edge's security properties (headers on every response, JSON errors, hidden paths, body limits, tenant isolation) against the running Compose stack (CI), followed by a backup, restore and audit verification and a DAST scan; skipped without a stack |
 
-* The last full run: 1,593 passed (the 13 end-to-end tests run in CI against the
-  stack); line and branch coverage 87 %, with a CI floor of 80 %.
+* The last full run: 2,446 passed (the 18 end-to-end tests run in CI against the
+  stack); line and branch coverage 90 %, with a CI floor of 80 %.
 * Defects found by writing tests were pinned as strict expected failures first,
   then fixed.
-* Not covered by automated tests: a real n8n instance, a real Chromium, real
-  SMTP/Slack/Telegram endpoints (all tested against faithful fakes at the
-  protocol boundary), and a real Redis and RabbitMQ outside the end-to-end job
-  (`fakeredis` with Lua elsewhere).
+* Not covered by automated tests: the workflows running inside a real n8n (CI
+  starts n8n with the stack; the workflows are generated and linted), real
+  Slack/Telegram endpoints and a real mail provider (tested against faithful fakes
+  at the protocol boundary; CI's stack delivers mail to Mailpit), and a real Redis
+  and RabbitMQ outside the end-to-end job (`fakeredis` with Lua elsewhere). The
+  real headless Chromium renders a public page in the end-to-end job.
 
 ## 5. Deployment review
 
@@ -142,11 +146,11 @@ below.
 3. Publish the first signed release (tag `v0.1.0`) and deploy it by digest.
 
 **Enterprise features**
-4. SSO (OIDC, SAML) and SCIM provisioning; today: local passwords with passkeys
-   (WebAuthn) or TOTP as second factors, per-organization network allowlists, and
-   API keys that follow their creator's membership. Passkeys still need an interop
-   pass with real browsers and authenticators, and organizations cannot yet
-   require them specifically.
+4. Single sign-on and provisioning: OpenID Connect and SCIM 2.0 are in
+   ([SSO.md](SSO.md)) but not yet tried against real identity providers (Okta,
+   Microsoft Entra ID, Google Workspace); no SAML, no front- or back-channel logout.
+   Passkeys still need an interop pass with real browsers and authenticators, and
+   organizations cannot yet require them specifically.
 5. An admin web UI; today the product is API-first (Swagger is disabled in
    production).
 6. High availability and disaster recovery: managed PostgreSQL with

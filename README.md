@@ -148,9 +148,9 @@ tests/             unit, integration (real PostgreSQL), security and end-to-end 
 
 ## Status and honest limitations
 
-A complete, tested reference implementation: 1,593 tests (unit,
+A complete, tested reference implementation: 2,446 tests (unit,
 integration against a real PostgreSQL, security, and a walkthrough over real
-HTTP) pass with 87 % line and branch coverage, plus 13 end-to-end tests that CI
+HTTP) pass with 90 % line and branch coverage, plus 18 end-to-end tests that CI
 runs against the full stack; every quality gate is green - Ruff, mypy `--strict`,
 import-linter, Bandit, pip-audit, zizmor, the n8n workflow lint, and the
 configuration and image-digest drift checks. A self-assessed mapping to OWASP ASVS
@@ -169,15 +169,16 @@ configuration and image-digest drift checks. A self-assessed mapping to OWASP AS
   deployment defects that the static startup review had missed - all fixed (R11 in
   [SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md)). Do a clean-host dry run before
   production.
-* A real n8n and a real Chromium are not exercised by the tests. The n8n
-  workflows are generated and linted; the browser's guard and pinning egress
-  proxy are tested. The platform runs fully without n8n (`internal` mode, the
-  default).
+* The n8n workflows are not run inside a real n8n by the tests: they are
+  generated and linted, and CI starts n8n with the stack. The real headless
+  Chromium renders a page in CI's end-to-end job, behind its pinning egress
+  proxy. The platform runs fully without n8n (`internal` mode, the default).
 * Single-host reference topology: no high availability, no admin UI (API only).
-  Single sign-on is OpenID Connect only (no SAML), and it needs the public API to
-  reach identity providers (an opt-in Compose overlay); its limitations are in
-  [SSO.md](docs/SSO.md). See [FINAL_REVIEW.md](docs/FINAL_REVIEW.md) for the full
-  list and a roadmap.
+  Single sign-on is OpenID Connect only (no SAML), not yet tried against real
+  identity providers, and it needs the public API to reach them (an opt-in Compose
+  overlay); its limitations are in [SSO.md](docs/SSO.md). Passkeys are not yet
+  tested with real browsers and authenticators ([PASSKEYS.md](docs/PASSKEYS.md)).
+  See [FINAL_REVIEW.md](docs/FINAL_REVIEW.md) for the full list and a roadmap.
 
 ## License
 

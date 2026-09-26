@@ -49,6 +49,15 @@ Details are in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) and
   refused) and shows in the organization's audit trail. An administrator cannot save
   a list that excludes their own address, and an operator can lift a list that
   locked an organization out (audited in the organization's trail, with the reason).
+* Single sign-on: an organization can sign its members in through its own OpenID
+  Connect provider (authorization code flow with PKCE, a state bound to the client
+  that started it, strictly verified ID tokens) and require it. A provider speaks
+  only for e-mail domains the organization proved it owns (a DNS TXT record); from
+  Google, only for accounts the organization's Workspace manages. The sessions it
+  opens reach that organization only and never manage the account itself (password,
+  second factors, deletion). SCIM 2.0 provisioning (`/scim/v2`) works with
+  per-organization tokens (`nxp_…`, keyed hash, expiry) that grant viewer or analyst
+  at most and never touch owners. See [docs/SSO.md](docs/SSO.md).
 * Accounts lock out exponentially after repeated failures. Authentication endpoints
   also have fail-closed rate limits per IP and per account.
 * Sign-up proves the e-mail address before an account exists: it answers alike

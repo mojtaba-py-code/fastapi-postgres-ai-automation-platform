@@ -214,7 +214,7 @@ concurrency = ["greenlet", "thread"]
 omit = ["src/nexusflow/apps/browser/app.py"]  # render() needs a real Chromium
 
 [tool.coverage.report]
-# Line and branch coverage of the whole suite is about 85 %; the floor catches
+# Line and branch coverage of the whole suite is about 90 %; the floor catches
 # a change that lands without its tests.
 fail_under = 80
 show_missing = true
