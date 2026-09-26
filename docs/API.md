@@ -63,7 +63,7 @@ the security model in [SSO.md](SSO.md)):
 | Step | Request | Answer |
 |---|---|---|
 | Start | `POST /auth/sso/start {organization: "<slug>"}` | `200 {authorization_url, state, binding, expires_in}`. Send the browser to `authorization_url`; keep `binding` in memory (never in a URL). `404 sso_not_available` - the same for an unknown organization and one without usable single sign-on; `503 sso_unavailable` if the provider's discovery document cannot be used |
-| Callback | The provider redirects to `{public_base_url}/sso/callback?code=…&state=…`; the front end checks `state` and posts `POST /auth/sso/callback {code, state, binding}` | `200` token pair - or `{mfa_required: true, mfa_token}` when the organization requires MFA the provider did not provide and the person has the platform's TOTP (finish with `/auth/mfa/verify`) |
+| Callback | The provider redirects to `{public_base_url}/sso/callback?code=…&state=…`; the front end checks `state` and posts `POST /auth/sso/callback {code, state, binding}` | `200` token pair - or `{mfa_required: true, mfa_token, expires_in, methods}` when the organization requires MFA the provider did not provide and the person has the platform's second factor: finish with `/auth/mfa/verify` (a TOTP or recovery code) or with a passkey (`/auth/mfa/webauthn/begin`, then `/verify`) - either way into a session bound to the organization |
 
 Callback errors: `401 sso_failed` for anything about the state (unknown, used,
 expired), the binding or the ID token (one message, the reason is in the

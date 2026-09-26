@@ -171,9 +171,11 @@ Every refusal of a well-formed callback is audited with a reason (`auth.sso.fail
 in the organization's trail - or the platform's when the state is unknown.
 
 The platform's account lockout does not block a single sign-on, and a single sign-on
-does not reset it: the lockout guards the password, which a provider's sign-in does
-not use. The platform's own TOTP step (section 6) is different: wrong codes count
-toward the lockout, and a locked account cannot complete it. New-device and
+does not reset it: the lockout guards the password and the account's second factor
+(one counter for both, until a password sign-in completes), and a provider's sign-in
+proves neither. The platform's own second factor after a single sign-on (section 6)
+is different: a wrong code or a refused passkey counts toward the lockout, a locked
+account cannot complete it - and completing it still resets nothing. New-device and
 suspicious sign-in notices work as for a password sign-in (not for an account the
 sign-in just created).
 
@@ -221,18 +223,23 @@ without `amr` does not count. `trust_idp_mfa` is off by default.
 
 Otherwise, when the organization requires MFA:
 
-* a person with the platform's own TOTP is asked for it after the provider
-  (`{mfa_required, mfa_token}`, finished with `POST /auth/mfa/verify`) and gets a
-  session bound to the organization, as above;
+* a person with the platform's own second factor - TOTP or a passkey - is asked for
+  it after the provider: the callback answers `{mfa_required, mfa_token, expires_in,
+  methods}` (`methods` names `totp`, `webauthn` and `recovery_code` as they apply),
+  finished with `POST /auth/mfa/verify` (a TOTP or recovery code) or with a passkey
+  (`POST /auth/mfa/webauthn/begin`, then `/verify`). Either way the session is bound
+  to the organization, as above, and `auth.sso.succeeded` names the factor
+  (`mfa_method`);
 * a person without it is refused (`403 mfa_required`). Accounts created by single
-  sign-on have no password and so cannot enrol TOTP: an organization that requires
+  sign-on have no password and so can set up neither TOTP nor a passkey (both need
+  the password, from a password sign-in - section 5): an organization that requires
   MFA and uses single sign-on should trust its provider's MFA (and enforce MFA
-  there). Google does not send `amr`, so with Google the platform's TOTP is the only
-  way.
+  there). Google does not send `amr`, so with Google the platform's second factor is
+  the only way.
 
 When the organization does not require MFA, a single sign-on does not ask for the
-platform's TOTP even if the person set one up: the provider authenticates them, and
-the session reaches that organization only (section 5).
+platform's second factor even if the person set one up: the provider authenticates
+them, and the session reaches that organization only (section 5).
 
 ## 7. Requiring single sign-on
 
@@ -244,10 +251,11 @@ organization is refused - and shown in its trail (`auth.login.failed`, reason
 without it.
 
 * **Break-glass for owners:** an owner whose session passed the platform's own MFA
-  (password + TOTP or a recovery code) still gets in - the way back when the
-  provider is down or misconfigured. Nobody else does (administrators included).
-  Owners who might need it enrol TOTP beforehand; the MFA enrolment endpoints stay
-  open for them.
+  (the password, then TOTP, a passkey or a recovery code) still gets in - the way
+  back when the provider is down or misconfigured. Nobody else does (administrators
+  included). Owners who might need it set up TOTP or a passkey beforehand from a
+  password sign-in: the MFA enrolment and passkey registration endpoints accept such
+  a session even where single sign-on is required.
 * It needs a verified domain, and is refused when it would lock the caller out
   (`422 would_lock_you_out`): turn it on from a session the provider opened, or as an
   owner with MFA. It is set only through this configuration, never through
@@ -341,7 +349,8 @@ the *Secret Token* to the SCIM token, and map `userPrincipalName` or `mail` to
 | A provider's session (with a known password) reaching the account itself | A bound session cannot export the account's data, change its password or second factors, or delete it - the provider's MFA never stands in for the account's own second factor |
 
 Audit events: `sso.configured`, `sso.updated`, `sso.removed`, `sso.domain_verified`,
-`auth.sso.succeeded`, `auth.sso.failed` (with a reason), `auth.sso.identity_linked`,
+`auth.sso.succeeded` (with `mfa`, `idp_mfa`, and `mfa_method` when the platform's
+second factor was used), `auth.sso.failed` (with a reason), `auth.sso.identity_linked`,
 `auth.sso.jit_user_created`, `auth.sso.jit_membership_created`,
 `scim.token_created`, `scim.token_revoked`, `scim.user_created`, `scim.user_updated`,
 `scim.user_deactivated`, `scim.user_reactivated`, `scim.user_deleted`,

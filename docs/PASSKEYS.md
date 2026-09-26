@@ -102,6 +102,14 @@ the same generic `401 mfa_failed` whatever the reason, counts toward the account
 lockout like a wrong code, and is audited as `auth.mfa.failed` with
 `method: "webauthn"` and the reason.
 
+The same two steps finish a **single sign-on** whose organization requires MFA its
+identity provider did not provide: the callback answers with an `mfa_token` and lists
+`webauthn` among its `methods`, and the passkey opens a session bound to that
+organization, as a TOTP code would - audited as `auth.sso.succeeded` with
+`mfa_method: "webauthn"`, never as a password sign-in, and resetting no failure
+counter; a refused passkey counts toward the lockout there too ([SSO.md](SSO.md),
+section 6).
+
 ## 3. Managing passkeys
 
 | Request | |
