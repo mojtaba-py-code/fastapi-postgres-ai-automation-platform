@@ -129,6 +129,9 @@ Another account's passkey is `404`. Rules that keep MFA meaningful:
   removing one and setting up TOTP answer `403 mfa_session_required` otherwise. A
   stolen session or API key, even with the password, cannot add a factor of its own
   or take one away.
+* **An account bound to passkeys** - a member of an organization that requires them
+  (section 4) - adds and removes passkeys, and turns MFA off, only from a session that
+  signed in with one of its passkeys (`403 passkey_session_required`).
 * **Never from a single sign-on session.** A session an organization's identity
   provider opened neither lists nor changes second factors (`403
   sso_session_restricted`), even when it counts as MFA-verified for that
@@ -163,9 +166,22 @@ require its members to **sign in with a passkey**:
 * A sign-in that merely defaults to such an organization opens in it as in one that
   requires MFA: its requests are refused, but the MFA set-up endpoints
   (`/auth/mfa/enroll`, `/confirm`, `/auth/webauthn/register/*`,
-  `/auth/webauthn/credentials*`) answer for the account - so a member can register a
-  passkey, under the rule of section 3: once the account has a second factor, only
-  from a session that passed one.
+  `/auth/webauthn/credentials*`) answer for the account - so a member can register
+  their first passkey (below).
+* **Its members' accounts are bound to passkeys.** While an account belongs to an
+  active organization that requires passkeys, its passkeys are added or removed, and
+  MFA turned off, only from a session that signed in with one of its passkeys
+  (`403 passkey_session_required`, "Add passkeys from a session that signed in with
+  one of your passkeys."). A session that passed a TOTP or recovery code - what a
+  phishing site can relay - changes none of them. Setting up TOTP and using recovery
+  codes are unaffected: neither opens such an organization.
+* **The first passkey** of such an account - a new member's, or one whose factors an
+  operator reset - is registered from the session it has (under the rule of section
+  3: once the account has a second factor, a session that passed one). Each binding
+  organization's own trail shows it (`auth.webauthn.registered_without_passkey`,
+  with the member and the factor that session passed), and its owners and
+  administrators are e-mailed, naming the member by address: unexpected, they remove
+  the member at once.
 * **Turning it on** needs a session that signed in with a passkey: from any other
   session, or with an API key, it is refused (`422 would_lock_you_out`) - the change
   would shut the caller out, and an API key (which it does not affect) shows no one
@@ -179,20 +195,22 @@ require its members to **sign in with a passkey**:
   passkey completes it; a TOTP or recovery code is refused (`403 passkey_required`),
   and a person without a passkey gets nowhere ([SSO.md](SSO.md), section 6).
 
-**Recovery** when every passkey is lost: sign in with the password and a recovery
-code (or TOTP) without naming the organization. The organization refuses that
-session, but a new passkey can be registered from it; then sign in with the new
-passkey, and remove the lost ones. (Naming the organization at that sign-in is
-refused, and the code is used up all the same.)
+**Recovery** when every passkey is lost: a TOTP or recovery code still signs the
+member in, but that session reaches neither the organization nor the passkeys. An
+operator checks who they are outside the platform, then runs
+`nexusflow user reset-second-factors --email <address> --reason <ticket>`: it
+removes the account's passkeys, authenticator app and recovery codes and ends every
+session; it is audited with the reason in the platform's trail and each of the
+account's organizations' (`auth.mfa.reset`), and e-mailed to the account. The member
+signs in with the password and registers a first passkey again - announced as above.
 
-**What it does not stop.** That way back is open to anyone who holds the password
-and a code: someone who phishes both in real time can register a passkey of their
-own, then sign in with it. The registration is audited (`auth.webauthn.registered`,
-in the platform's trail when made from a session the organization refuses) and
-e-mailed to the account's address ("A passkey was added"); the organization's
-administrators are not told. `require_passkey` guarantees that every session
-reaching the organization signed in with a passkey - not how that passkey was
-registered.
+**What remains.** The first passkey: an account that has none yet registers it from
+whatever session it has, so someone who phishes such an account's password (and a
+code, if it has TOTP) before its owner registers one can register theirs. It is
+announced, not prevented - the organization's trail shows it and its administrators
+are e-mailed. `require_passkey` guarantees that every session reaching the
+organization signed in with a passkey, and that only such a session changes a
+member's passkeys once they have one.
 
 ## 5. Relying party settings
 
@@ -231,8 +249,11 @@ registered.
 * **Recovery codes**: ten single-use codes are issued when the first second factor
   is set up (and replaced when TOTP is set up). Each signs in once in place of a TOTP
   code or a passkey, is audited and e-mailed.
-* There is deliberately no operator command that removes a person's second factor:
-  it would be a way around MFA. Keep the recovery codes safe.
+* An operator removes a person's second factors only on a recovery request checked
+  outside the platform (`nexusflow user reset-second-factors`, section 4): it is a
+  way around MFA by design, so it takes a reason, is audited in the platform's and
+  every organization's trail, and is e-mailed to the account. Keep the recovery
+  codes safe.
 
 ## 7. Design decisions
 
@@ -275,8 +296,9 @@ registered.
   registration to certain models (an AAGUID without attestation proves nothing and
   is not stored). An authenticator that answers `attestation: "none"` with a
   self-attestation (`packed` without a certificate) is refused.
-* **Requiring passkeys does not govern their registration**: a session that passed
-  TOTP or a recovery code can register one (section 4).
+* **The first passkey** of an account bound to passkeys comes from a session that did
+  not sign in with one (it has none): announced to the organization, not prevented
+  (section 4).
 * **User verification is required**: an authenticator without a PIN or biometric
   check cannot be registered.
 * **Second factor only**: signing in without a password (discoverable credentials,
@@ -303,4 +325,6 @@ sign-in, management, organizations that require MFA, recovery and erasure end to
 through the API, and `tests/security/test_passkey_policy.py` organizations that
 require passkeys: every enforcement point, the setting's lock-out guard, the recorded
 factor, the recovery path and single sign-on (`tests/integration/test_migration_0012.py`
-takes its migration down and up).
+takes its migration down and up). `tests/security/test_passkey_bound_accounts.py`
+covers accounts bound to passkeys: what a session that passed a code cannot change,
+the first passkey's announcement, and the operator reset.

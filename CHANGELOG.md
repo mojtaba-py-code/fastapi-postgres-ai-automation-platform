@@ -25,7 +25,12 @@ All notable changes are documented here. The format follows
   provider's MFA never counts. Turning it on needs such a session
   (`422 would_lock_you_out`); API keys are not affected. Each session records the
   second factor it passed (`mfa_method`, migration 0012), listed by
-  `GET /users/me/sessions`.
+  `GET /users/me/sessions`. Members of such an organization add or remove
+  passkeys, and turn MFA off, only from a passkey session
+  (`403 passkey_session_required`); a member's first passkey is announced in the
+  organization's trail and to its owners and administrators; an operator resets
+  the second factors of a member who lost them all
+  (`nexusflow user reset-second-factors`, audited).
 * E-mail-verified sign-up: `POST /auth/register` takes an address and mails it a
   link - or, if it already has an account, a notice; `POST /auth/register/complete`
   creates the account and its organization; an invitation creates the account

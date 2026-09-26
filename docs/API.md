@@ -35,7 +35,9 @@ Other authentication endpoints:
 * passwords: `/auth/password/change`, `/auth/password/reset-request`,
   `/auth/password/reset`;
 * MFA: `/auth/mfa/enroll`, `/auth/mfa/confirm`, `/auth/mfa/disable` (turns every
-  second factor off: the authenticator app, all passkeys and the recovery codes);
+  second factor off: the authenticator app, all passkeys and the recovery codes -
+  for a member of an organization that requires passkeys, only from a session that
+  signed in with one: `403 passkey_session_required`);
 * organizations: `/auth/switch-organization`, `/auth/invitations/accept`;
 * single sign-on: `/auth/sso/start`, `/auth/sso/callback`.
 
@@ -46,11 +48,11 @@ binary values as unpadded base64url.
 
 | Method | Path | |
 |---|---|---|
-| POST | `/auth/webauthn/register/begin {password}` | Creation options (`{options, expires_in}`): a single-use challenge for five minutes, bound to the account and session. From a session only; once the account has a second factor, from a session that passed one (`403 mfa_session_required`) |
+| POST | `/auth/webauthn/register/begin {password}` | Creation options (`{options, expires_in}`): a single-use challenge for five minutes, bound to the account and session. From a session only; once the account has a second factor, from a session that passed one (`403 mfa_session_required`); for a member of an organization that requires passkeys, once the account has one, from a session that signed in with one of them (`403 passkey_session_required`) |
 | POST | `/auth/webauthn/register/finish {name?, credential}` | `201 {passkey, recovery_codes}` - the codes only when this passkey turned MFA on. `422 passkey_rejected` names the reason in `details[0].code`; `409 passkey_exists`, `409 too_many_passkeys` (ten at most) |
 | GET | `/auth/webauthn/credentials` | My passkeys: name, algorithm, transports, backup flags, times - no key material |
 | PATCH | `/auth/webauthn/credentials/{id} {name}` | Rename |
-| POST | `/auth/webauthn/credentials/{id}/delete {password}` | Remove; `409 last_second_factor` for the last passkey of an account without TOTP |
+| POST | `/auth/webauthn/credentials/{id}/delete {password}` | Remove; `409 last_second_factor` for the last passkey of an account without TOTP; `403 passkey_session_required` as for registering |
 | POST | `/auth/mfa/webauthn/begin {mfa_token}` | Request options for the sign-in the `mfa_token` belongs to (`409 no_passkeys` if the account has none) |
 | POST | `/auth/mfa/webauthn/verify {mfa_token, credential}` | The token pair; any refusal is `401 mfa_failed` and counts toward the lockout |
 

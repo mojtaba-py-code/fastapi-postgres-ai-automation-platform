@@ -58,6 +58,10 @@ network, or a new device or network right after several wrong passwords.
 2. The user runs `POST /auth/logout-all` or an operator revokes sessions. A password
    change revokes all other sessions and increments the token version.
 3. Review the audit trail for the actor: `GET /api/v1/audit?actor_id=...`.
+4. A member who lost every passkey, or whose second factors may be in other hands, once
+   you have checked who they are:
+   `nexusflow user reset-second-factors --email <address> --reason "<ticket>"` removes
+   them all and ends every session (audited); they register a passkey again.
 
 ### 3.3 Leaked API key or service token (alert `NetworkAllowlistDenials`)
 * API key: `DELETE /api/v1/api-keys/{id}` (immediate). Review `last_used_at` and the
