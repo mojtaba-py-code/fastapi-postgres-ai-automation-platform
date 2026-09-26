@@ -7,6 +7,10 @@ All notable changes are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+* Passkeys (WebAuthn) as a phishing-resistant second factor, alongside TOTP:
+  registered from a signed-in session, used after the password step, renamed and
+  removed (never the last factor), verified strictly by the platform's own
+  WebAuthn verifier ([docs/PASSKEYS.md](docs/PASSKEYS.md)).
 * E-mail-verified sign-up: `POST /auth/register` takes an address and mails it a
   link - or, if it already has an account, a notice; `POST /auth/register/complete`
   creates the account and its organization; an invitation creates the account
@@ -76,6 +80,9 @@ surfaced. All are fixed except one accepted residual risk (D-n2); the record is 
 * Restores run as the owning roles, never as the superuser, and backups are signed
   (F-8); the documented egress firewall no longer breaks DNS (F-1).
 * Third-party images moved off lines that no longer received fixes (R13-3).
+* Wrong passwords and wrong second factors add up to one lockout: the password
+  step no longer restarts the count, which allowed endless code guessing by
+  whoever knew the password (R13-6).
 
 ### Fixed
 * XLSX uploads failed in the sandbox (C-1).

@@ -34,8 +34,13 @@ Details are in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) and
   and key-ID checks, plus a JWKS for rotation. Algorithm confusion is impossible.
 * Refresh tokens are opaque, HMAC-peppered at rest and rotated on every use. Reuse of
   a rotated token revokes the whole session family and notifies the user.
-* TOTP MFA rejects code replay and uses single-use recovery codes. Organizations can
-  require MFA.
+* Second factors: passkeys (WebAuthn), which a phishing site cannot relay, and
+  authenticator apps (TOTP, replay rejected), with single-use recovery codes.
+  Organizations can require MFA. Passkey ceremonies are verified strictly (user
+  verification, exact origins and relying party, allowlisted algorithms,
+  single-use challenges, counters that must move forward); the runtime role
+  cannot change a stored passkey's key. Wrong passwords and wrong second factors
+  add up to one exponential lockout until a sign-in completes.
 * Organizations can confine access to their own networks: with an allowlist of CIDR
   ranges, members' sessions and API keys work only from those addresses (the real
   client address, taken from forwarding headers only when they come from the trusted

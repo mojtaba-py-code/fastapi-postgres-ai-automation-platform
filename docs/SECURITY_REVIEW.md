@@ -33,7 +33,7 @@ for an independent assessment:
 | R10 | Adversarial review of the day's new code | Change analytics, sign-in risk, password change, request correlation, rate limiting, uploads, operations and CI workflows | 1 finding |
 | R11 | First run of the full stack (CI) | The Compose stack built and started behind the TLS edge on a CI runner; the end-to-end suite, backup and restore, and a passive DAST scan of every API operation | 1 High, 2 Medium |
 | R12 | Six parallel reviews | Identity and access; pipeline and data lifecycle; workers, sandbox and browser; alerting, AI, notifications and reports; the database (measured on PostgreSQL); the deployment (checked against upstream sources) | 53 unique findings: 5 High, 28 Medium, 20 Low |
-| R13 | What fixing R12 surfaced | The first weekly scan of the third-party images, CI coverage, DAST, and the accepted sign-up enumeration | 1 High, 3 Medium, 1 Low |
+| R13 | What fixing R12 surfaced | The first weekly scan of the third-party images, CI coverage, DAST, the accepted sign-up enumeration, and the lockout on the MFA path | 1 High, 4 Medium, 1 Low |
 
 In R4 and R5, every defect was first committed as a *strict expected failure*
 (the test fails because of the bug), then fixed, which turned the test into a
@@ -318,6 +318,7 @@ database privileges, so a query too slow or a grant too wide fails in tests too.
 | R13-3 | High | The first weekly scan of the third-party images failed seven: Grafana ran from a repository that had stopped receiving releases, Prometheus from a long-term-support line out of support, nginx from a superseded mainline | Maintained lines (Grafana 12.4, Prometheus 3.13 LTS, nginx 1.30 slim, current n8n); what the newest releases still carry is accepted only when unreachable here, with its reason and an expiry date; n8n's findings are reported, not failed on | `.trivyignore.yaml`, `.github/workflows/supply-chain.yml`, SECURITY.md |
 | R13-4 | Medium | n8n became opt-in (F-10) and so silently left CI's end-to-end stack; nothing checked the monitoring stack after it started | CI starts n8n again; end-to-end tests check Grafana's provisioned dashboard and data source, and a Prometheus with every alert rule, every target and Alertmanager | `tests/e2e/test_monitoring.py`, `.github/workflows/ci.yml` |
 | R13-5 | Low | OWASP ZAP reported a "credit card number" in a response: nginx's 32-digit hexadecimal request ID now and then holds a Luhn-valid run of 13 digits | Request IDs shaped like UUIDs at the edge (no run beyond 12 digits), in the logs, the edge's errors and the forwarded header | `tests/unit/test_edge_config.py`, `tests/e2e/test_edge.py` |
+| R13-6 | Medium | The password step reset the failure counter when it issued the MFA challenge: whoever knew the password could guess four TOTP codes per password step, for ever - some 20 guesses a minute per account within the rate limits, about an 8 % chance of a hit a day (found while adding passkeys, which cannot be guessed) | The counter runs across both factors until a sign-in completes: wrong passwords and wrong codes add up to one exponential lockout | `tests/security/test_mfa_guessing.py` |
 
 ## 3. Checklist (specification section 39)
 

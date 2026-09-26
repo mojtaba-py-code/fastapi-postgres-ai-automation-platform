@@ -36,7 +36,7 @@ uploads and rate limits, a deployment startup review, two completion reviews, an
 adversarial review of the day's new code, and six parallel reviews of the whole
 platform - identity, pipeline and data lifecycle, workers and sandbox, alerting
 and AI, the database, the deployment), the first run of the full stack in CI, and
-what fixing the last round surfaced produced 138 numbered findings plus smaller
+what fixing the last round surfaced produced 139 numbered findings plus smaller
 observations. All are fixed with regression tests (or, for configuration, in the
 file named as evidence), except one accepted risk: a member who may read records
 can page through a whole dataset, where exports are audited and budgeted (D-n2).
@@ -142,9 +142,11 @@ below.
 3. Publish the first signed release (tag `v0.1.0`) and deploy it by digest.
 
 **Enterprise features**
-4. SSO (OIDC, SAML), SCIM provisioning and phishing-resistant MFA (WebAuthn,
-   passkeys); today: local passwords with TOTP, per-organization network
-   allowlists, and API keys that follow their creator's membership.
+4. SSO (OIDC, SAML) and SCIM provisioning; today: local passwords with passkeys
+   (WebAuthn) or TOTP as second factors, per-organization network allowlists, and
+   API keys that follow their creator's membership. Passkeys still need an interop
+   pass with real browsers and authenticators, and organizations cannot yet
+   require them specifically.
 5. An admin web UI; today the product is API-first (Swagger is disabled in
    production).
 6. High availability and disaster recovery: managed PostgreSQL with
