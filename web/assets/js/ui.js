@@ -14,6 +14,8 @@ const GUIDANCE = {
   sso_required: "This organization requires single sign-on: sign in through its identity provider.",
   sso_session_restricted: "You signed in through your organization's identity provider. Manage your account's password and second factors from a password sign-in.",
   passkey_required: "This organization requires signing in with a passkey. Add one under Account → Security, then sign in with it.",
+  // The API names the change it refused; what the person can do about it:
+  passkey_session_required: (error) => `${error.message} Sign out, then sign in with a passkey.`,
   ip_not_allowed: "Your network is not on this organization's allowlist.",
   permission_denied: "Your role does not allow this.",
   session_required: "This needs a signed-in session (API keys cannot do it).",
@@ -24,7 +26,8 @@ export function errorMessage(error) {
     if (error.code === "rate_limited") {
       return `Too many requests. Try again${error.retryAfter ? ` in ${error.retryAfter} seconds` : " shortly"}.`;
     }
-    return GUIDANCE[error.code] || error.message;
+    const guidance = GUIDANCE[error.code];
+    return (typeof guidance === "function" ? guidance(error) : guidance) || error.message;
   }
   return error?.message || "Something went wrong.";
 }

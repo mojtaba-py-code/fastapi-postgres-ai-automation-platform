@@ -3,9 +3,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { ApiError } from "../../web/assets/js/api.js";
 import { projectChoice } from "../../web/assets/js/choices.js";
 import { describeCondition } from "../../web/assets/js/pages/alerting.js";
 import { configTemplate } from "../../web/assets/js/pages/sources.js";
+import { errorMessage } from "../../web/assets/js/ui.js";
 
 test("the project to open on is the one with the most datasets, projects sorted by name", () => {
   const projects = [
@@ -41,4 +43,17 @@ test("a source template maps the dataset's own fields for every kind", () => {
   assert.deepEqual(configTemplate("webhook", fields), { kind: "webhook", items_path: "items", field_mapping: { sku: "sku", price: "price" } });
   assert.deepEqual(configTemplate("file_upload", fields).column_mapping, { sku: "Sku", price: "Price" });
   assert.deepEqual(configTemplate("webhook", []).field_mapping, { id: "id", title: "title" }); // a dataset without fields yet
+});
+
+test("refusals read as what to do: guidance by code, else the API's own message", () => {
+  const refusal = (error, message) => new ApiError(403, { error, message });
+  assert.match(errorMessage(refusal("passkey_required", "x")), /requires signing in with a passkey/);
+  // The API names the refused change; the console adds the way out.
+  assert.equal(
+    errorMessage(refusal("passkey_session_required", "Add passkeys from a session that signed in with one of your passkeys.")),
+    "Add passkeys from a session that signed in with one of your passkeys. Sign out, then sign in with a passkey.",
+  );
+  assert.equal(errorMessage(refusal("would_lock_you_out", "Requiring passkeys would lock you out.")), "Requiring passkeys would lock you out.");
+  assert.equal(errorMessage(new ApiError(429, { error: "rate_limited" }, 30)), "Too many requests. Try again in 30 seconds.");
+  assert.equal(errorMessage(new Error("plain")), "plain");
 });

@@ -82,9 +82,23 @@ It starts an embedded PostgreSQL, migrates it with the production roles, runs
 the worker tasks in-process, seeds a month of a competitor-pricing demo
 (`--empty` for none), and serves the console with the edge's headers at
 <http://localhost:8765/>. It prints the demo owner's credentials and a sign-up
-link. Development only: e-mails are not sent, and trying passkeys needs an
-authenticator on the machine (Windows Hello, Touch ID, a phone or a security
-key). With the Compose stack, the console is at the edge's address.
+link. E-mails are kept in a local mailbox instead of sent: the links of sign-up,
+password-reset and invitation e-mails are printed as they go out, and
+`/_dev/mail/api/v1` answers as Mailpit's API does (search by recipient, read a
+message). Trying passkeys needs an authenticator on the machine (Windows Hello,
+Touch ID, a phone or a security key). Development only: it listens on 127.0.0.1
+and forgets everything when it stops. With the Compose stack, the console is at
+the edge's address.
+
+The browser test (section 6) runs against it as against the stack. Playwright
+comes with the `browser` extra; `NEXUSFLOW_E2E_BROWSER_CHANNEL=msedge` (or
+`chrome`) drives an installed browser, otherwise run
+`uv run --extra browser playwright install chromium` once:
+
+```bash
+uv run python scripts/dev_console.py --empty      # in one terminal
+NEXUSFLOW_E2E_BASE_URL=http://localhost:8765 NEXUSFLOW_E2E_MAILPIT_URL=http://localhost:8765/_dev/mail CONSOLE_SCREENSHOTS=var/console   uv run --extra browser python tests/e2e/console_smoke.py
+```
 
 ## 6. Tests
 
@@ -102,9 +116,13 @@ key). With the Compose stack, the console is at the edge's address.
   policy and headers, the assets.
 * `tests/e2e/console_smoke.py` - **a real Chromium** (Playwright) against the
   running stack in CI: sign up from the e-mailed link, feed a partner catalogue
-  through the signed webhook, use the main pages, sign out and in - failing on
-  any console error, uncaught exception or blocked resource. It saves
-  screenshots (light and dark) as a CI artifact.
+  through the signed webhook, use the main pages, sign out and in; then
+  **passkeys through the browser's own WebAuthn** with a virtual authenticator
+  (Chromium's testing API): a password session may not require passkeys (it
+  would lock itself out), a passkey is added, the next sign-in uses it, and that
+  session requires them for the organization. It fails on any console error,
+  uncaught exception or blocked resource, and saves screenshots (light and dark,
+  and of a failure) as a CI artifact.
 
 ## 7. Limits
 
@@ -113,6 +131,7 @@ key). With the Compose stack, the console is at the edge's address.
   refresh). Long lists page with "Load more".
 * Workflows are created through the API; the console runs, pauses and stops
   them. Dead letters are handled through the API.
-* Passkeys and single sign-on have been exercised in the console only against
-  the test suite's providers and the development server, not yet with real
-  authenticators and identity providers.
+* Passkeys run end to end in a real Chromium, but with a virtual authenticator;
+  single sign-on has been exercised only against the test suite's providers.
+  Neither has been tried with real authenticators (platform or security keys),
+  other browsers, or real identity providers.

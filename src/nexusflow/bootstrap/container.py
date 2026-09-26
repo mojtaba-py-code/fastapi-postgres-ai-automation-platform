@@ -57,7 +57,11 @@ from nexusflow.infrastructure.database.mapping import register_mappings
 from nexusflow.infrastructure.database.unit_of_work import SqlUnitOfWorkFactory
 from nexusflow.infrastructure.http.client import SafeHttpClient
 from nexusflow.infrastructure.n8n.client import N8nClient
-from nexusflow.infrastructure.notifications.senders import ChannelSender, SmtpEmailTransport
+from nexusflow.infrastructure.notifications.senders import (
+    ChannelSender,
+    EmailTransport,
+    SmtpEmailTransport,
+)
 from nexusflow.infrastructure.redis.challenges import RedisChallengeStore
 from nexusflow.infrastructure.redis.client import (
     FeatureFlags,
@@ -208,6 +212,7 @@ def build_container(
     http: SafeHttpClient | None = None,
     ai_provider: AIProvider | None = None,
     idp_http: SafeHttpClient | None = None,
+    email: EmailTransport | None = None,
 ) -> Container:
     register_mappings()
     clock = clock or SystemClock()
@@ -319,7 +324,7 @@ def build_container(
             settings.scraping.max_items_per_run, settings.storage.max_upload_rows
         ),
     )
-    email_transport = SmtpEmailTransport(settings.notifications)
+    email_transport = email or SmtpEmailTransport(settings.notifications)
     rules = settings.rate_limits.rules
     idp_client = idp_http or build_idp_http_client(settings.sso, settings.scraping)
     sso = SsoService(

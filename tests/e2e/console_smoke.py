@@ -13,8 +13,13 @@ CI runs it in the browser service's own image (Playwright and Chromium):
 
 It needs only the standard library and Playwright. Environment:
 NEXUSFLOW_E2E_BASE_URL, NEXUSFLOW_E2E_MAILPIT_URL, NEXUSFLOW_E2E_CA_BUNDLE (the
-stack's development CA, for the requests made from here), and CONSOLE_SCREENSHOTS
-(a directory for screenshots of a few pages, light and dark).
+stack's development CA, for the requests made from here), CONSOLE_SCREENSHOTS
+(a directory for screenshots of a few pages, light and dark, and of a failure),
+and NEXUSFLOW_E2E_BROWSER_CHANNEL (optional: an installed browser, such as
+"msedge" or "chrome", instead of Playwright's Chromium).
+
+On a workstation it runs against scripts/dev_console.py, whose mailbox answers
+as Mailpit does (docs/CONSOLE.md).
 """
 
 from __future__ import annotations
@@ -33,12 +38,14 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from playwright.sync_api import Page, expect, sync_playwright
+from playwright.sync_api import BrowserContext, Page, expect, sync_playwright
+from playwright.sync_api import Error as PlaywrightError
 
 BASE = os.environ["NEXUSFLOW_E2E_BASE_URL"].rstrip("/")
 MAILPIT = os.environ["NEXUSFLOW_E2E_MAILPIT_URL"].rstrip("/")
 CA_BUNDLE = os.environ.get("NEXUSFLOW_E2E_CA_BUNDLE")
 SHOTS = Path(os.environ["CONSOLE_SCREENSHOTS"]) if os.environ.get("CONSOLE_SCREENSHOTS") else None
+CHANNEL = os.environ.get("NEXUSFLOW_E2E_BROWSER_CHANNEL") or None
 PASSWORD = "a console passphrase for CI 1"  # a throwaway CI account  # nosec B105
 TLS = ssl.create_default_context(cafile=CA_BUNDLE) if CA_BUNDLE else ssl.create_default_context()
 # API answers the pages expect and handle (the browser still logs them as failed loads).
@@ -204,9 +211,21 @@ def feed_the_stack(email: str) -> None:
 
 
 def shot(page: Page, name: str) -> None:
-    if SHOTS:
-        SHOTS.mkdir(parents=True, exist_ok=True)
-        page.screenshot(path=str(SHOTS / f"{name}.png"), full_page=True)
+    """The whole page as a person sees it on a screen tall enough for it: the
+    sidebar is sticky at the viewport's height, which a full-page capture
+    would cut short. Passing notices are dismissed first."""
+    if not SHOTS:
+        return
+    SHOTS.mkdir(parents=True, exist_ok=True)
+    # Removed, not clicked: one may leave on its own timer in between.
+    page.evaluate("document.querySelectorAll('.toast').forEach((toast) => toast.remove())")
+    size = page.viewport_size or {"width": 1280, "height": 860}
+    height = page.evaluate("document.documentElement.scrollHeight")
+    page.set_viewport_size({"width": size["width"], "height": max(size["height"], height)})
+    try:
+        page.screenshot(path=str(SHOTS / f"{name}.png"))
+    finally:
+        page.set_viewport_size(size)
 
 
 def nav(page: Page, label: str) -> None:
@@ -301,9 +320,74 @@ def run(page: Page, org: str, email: str) -> None:
 
     # Out, and in again with the password.
     page.get_by_label("Your account").click()
-    page.get_by_role("button", name="Sign out").click()
+    page.get_by_role("button", name="Sign out", exact=True).click()  # not "... everywhere"
     expect(page.get_by_role("heading", name="Sign in")).to_be_visible()
     sign_in(page, email, org)
+
+
+def virtual_authenticator(context: BrowserContext, page: Page) -> None:
+    """A passkey authenticator inside the browser (Chromium's WebAuthn testing
+    API, over the DevTools protocol): discoverable credentials, and user
+    verification that always passes - a person's screen lock, simulated."""
+    devtools = context.new_cdp_session(page)
+    devtools.send("WebAuthn.enable", {"enableUI": False})
+    devtools.send(
+        "WebAuthn.addVirtualAuthenticator",
+        {
+            "options": {
+                "protocol": "ctap2",
+                "transport": "internal",
+                "hasResidentKey": True,
+                "hasUserVerification": True,
+                "isUserVerified": True,
+                "automaticPresenceSimulation": True,
+            }
+        },
+    )
+
+
+def passkeys(page: Page, email: str, org: str) -> None:
+    """Passkeys end to end, with the browser's own WebAuthn: a session that
+    signed in with a password may not require them (it would lock itself
+    out); a passkey is added, the next sign-in uses it, and that session may
+    require passkeys - listed as a passkey session."""
+    page.goto(f"{BASE}/#/sign-in")
+    sign_in(page, email, org)
+    nav(page, "Settings")
+    # Refused: 422, which the browser logs as a failed load (expected from now on).
+    EXPECTED_ERRORS.add("/api/v1/organizations/current")
+    page.get_by_label("Require passkeys (phishing-resistant)").check()
+    page.get_by_role("button", name="Save the policy").click()
+    expect(page.get_by_role("alert").filter(has_text="would lock you out")).to_be_visible()
+
+    page.goto(f"{BASE}/#/account?tab=security")
+    page.get_by_role("button", name="Add a passkey").click()
+    dialog = page.get_by_role("dialog")
+    dialog.get_by_label("Your password").fill(PASSWORD)
+    dialog.get_by_label("Name", exact=True).fill("CI authenticator")
+    dialog.get_by_role("button", name="Continue").click()
+    # The account's first second factor: its recovery codes are shown once.
+    page.get_by_role("button", name="I have stored them").click()
+    expect(page.get_by_role("main").get_by_text("CI authenticator")).to_be_visible()
+
+    page.get_by_label("Your account").click()
+    page.get_by_role("button", name="Sign out", exact=True).click()
+    page.get_by_label("E-mail address").fill(email)
+    page.get_by_label("Password", exact=True).fill(PASSWORD)
+    page.get_by_role("button", name="Sign in", exact=True).click()
+    page.get_by_role("button", name="Use a passkey").click()
+    expect(page.get_by_role("heading", level=1, name=org)).to_be_visible()
+
+    nav(page, "Settings")
+    page.get_by_label("Require passkeys (phishing-resistant)").check()
+    page.get_by_role("button", name="Save the policy").click()
+    expect(page.get_by_text("The policy was saved.")).to_be_visible()
+    overview(page, org)  # the organization still opens to this session
+
+    page.goto(f"{BASE}/#/account?tab=sessions")
+    current = page.get_by_role("row").filter(has_text="this session")
+    expect(current.get_by_text("Passkey", exact=True)).to_be_visible()
+    shot(page, "sessions")
 
 
 def record(message: Any, problems: list[str]) -> None:
@@ -324,14 +408,32 @@ def failed_request(failed: Any, problems: list[str]) -> None:
         problems.append(f"failed request: {failed.url} ({failed.failure})")
 
 
+def report_failure(page: Page, phase: str, problems: list[str]) -> None:
+    """What the page showed when a step failed - a screenshot (uploaded by CI),
+    its address and text - and the problems seen until then."""
+    try:
+        if SHOTS:  # as it is: toasts and any open dialog included
+            SHOTS.mkdir(parents=True, exist_ok=True)
+            page.screenshot(path=str(SHOTS / f"failure-{phase}.png"), full_page=True)
+        sys.stderr.write(f"failed at {page.url}:\n{page.inner_text('body')[:4000]}\n")
+    except (PlaywrightError, OSError) as error:  # the page may be gone
+        sys.stderr.write(f"no page state: {error}\n")
+    for problem in problems:
+        sys.stderr.write(problem + "\n")
+
+
 def main() -> int:
     problems: list[str] = []
     suffix = uuid.uuid4().hex[:8]
     # A readable name for the screenshots (each CI run has a stack of its own).
     org, email = "Acme Retail", f"console+{suffix}@nexusflow.example.com"
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
-        for scheme in ("light", "dark"):
+        browser = playwright.chromium.launch(channel=CHANNEL)
+        # The tour, the same account in the dark theme, then passkeys (last: the
+        # organization requires them afterwards). A fresh browser context each.
+        # Five password sign-ins of one account in about a minute, all told: the
+        # most the API allows (auth.login.account) - add one, and it answers 429.
+        for phase, scheme in (("tour", "light"), ("dark", "dark"), ("passkeys", "light")):
             # The development CA is not in the browser's store (the requests made
             # from here verify it); the policy and the flows are what is tested.
             context = browser.new_context(
@@ -347,13 +449,20 @@ def main() -> int:
             page.on("console", lambda message: record(message, problems))
             page.on("pageerror", lambda error: problems.append(f"uncaught: {error}"))
             page.on("requestfailed", lambda failed: failed_request(failed, problems))
-            if scheme == "light":
-                run(page, org, email)
-            else:  # the same account in the dark theme
-                page.goto(f"{BASE}/#/sign-in")
-                sign_in(page, email, org)
-                overview(page, org)
-                shot(page, "overview-dark")
+            try:
+                if phase == "tour":
+                    run(page, org, email)
+                elif phase == "dark":
+                    page.goto(f"{BASE}/#/sign-in")
+                    sign_in(page, email, org)
+                    overview(page, org)
+                    shot(page, "overview-dark")
+                else:
+                    virtual_authenticator(context, page)
+                    passkeys(page, email, org)
+            except Exception:
+                report_failure(page, phase, problems)
+                raise
             context.close()
         browser.close()
     for problem in problems:

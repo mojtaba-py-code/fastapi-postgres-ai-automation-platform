@@ -10,8 +10,13 @@ console.conf) next to the API. The worker tasks run in-process (the
 integration tests' bus), so webhook deliveries become runs, changes and
 alerts as on a live stack. It seeds a month of a competitor-pricing demo
 (pass --empty for none) and prints the owner's credentials and a fresh
-sign-up link. Development only: e-mails are not sent, and everything is gone
-when it stops.
+sign-up link.
+
+E-mails are not sent: a local mailbox keeps them, prints the links of those
+that carry one (sign-up, password reset, invitation), and serves them through
+a small Mailpit-compatible API under /_dev/mail - so the browser test runs
+against this server as against the stack (docs/CONSOLE.md). Development only:
+it listens on 127.0.0.1, and everything is gone when it stops.
 """
 
 from __future__ import annotations
@@ -20,8 +25,10 @@ import argparse
 import asyncio
 import json
 import random
+import re
 import sys
 import tempfile
+from collections import deque
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -36,7 +43,7 @@ import uvicorn  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
 from starlette.middleware.base import BaseHTTPMiddleware  # noqa: E402
 from starlette.requests import Request  # noqa: E402
-from starlette.responses import FileResponse, Response  # noqa: E402
+from starlette.responses import FileResponse, JSONResponse, Response  # noqa: E402
 from starlette.staticfiles import StaticFiles  # noqa: E402
 from tests.conftest import make_settings  # noqa: E402
 from tests.support.bus import InProcessBus  # noqa: E402
@@ -284,16 +291,74 @@ class ConsoleHeaders(BaseHTTPMiddleware):
         return response
 
 
-def serve_console(api: FastAPI) -> FastAPI:
+class DevMailbox:
+    """The platform's e-mail transport here: messages are kept, not sent. Those
+    with a link into the console are printed with it."""
+
+    def __init__(self) -> None:
+        self.messages: deque[dict[str, Any]] = deque(maxlen=500)
+        self._next_id = 1
+
+    async def send_email(self, recipients: list[str], subject: str, body: str) -> None:
+        message = {
+            "ID": str(self._next_id),
+            "Created": datetime.now(UTC).isoformat(),
+            "To": [{"Name": "", "Address": address} for address in recipients],
+            "Subject": subject,
+            "Text": body,
+        }
+        self._next_id += 1
+        self.messages.append(message)
+        links = [
+            link for link in re.findall(r"https?://\S+", body) if urlsplit(link).path in ENTRY_PATHS
+        ]
+        if links:
+            lines = [f"  Mail to {', '.join(recipients)}: {subject}", *(f"    {x}" for x in links)]
+            print("\n".join(lines), flush=True)
+
+    def search(self, query: str) -> list[dict[str, Any]]:
+        """Newest first; ``to:"address"`` (Mailpit's syntax) or everything."""
+        wanted = re.fullmatch(r'\s*to:"([^"]+)"\s*', query)
+        address = wanted[1].lower() if wanted else None
+        return [
+            message
+            for message in reversed(self.messages)
+            if address is None or any(to["Address"].lower() == address for to in message["To"])
+        ]
+
+    def get(self, message_id: str) -> dict[str, Any] | None:
+        return next((m for m in self.messages if m["ID"] == message_id), None)
+
+
+def _summary(message: dict[str, Any]) -> dict[str, Any]:
+    return {key: message[key] for key in ("ID", "Created", "To", "Subject")}
+
+
+def serve_console(api: FastAPI, mailbox: DevMailbox) -> FastAPI:
     """Add the console to the API application itself (so the API's own start-up
-    still runs), outermost of all: its headers replace the API's on its paths."""
+    still runs), outermost of all: its headers replace the API's on its paths.
+    The mailbox's read API (a subset of Mailpit's) sits under /_dev/mail."""
 
     async def index(_: Request) -> FileResponse:
         return FileResponse(WEB / "index.html", media_type="text/html")
 
+    async def mail_search(request: Request) -> JSONResponse:
+        found = mailbox.search(request.query_params.get("query", ""))
+        summaries = [_summary(message) for message in found]
+        return JSONResponse({"messages": summaries, "messages_count": len(found)})
+
+    async def mail_message(request: Request) -> JSONResponse:
+        message = mailbox.get(request.path_params["message_id"])
+        if message is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return JSONResponse(message)
+
     api.add_route("/", index, include_in_schema=False)
     for path in ENTRY_PATHS:
         api.add_route(path, index, include_in_schema=False)
+    api.add_route("/_dev/mail/api/v1/messages", mail_search, include_in_schema=False)
+    api.add_route("/_dev/mail/api/v1/search", mail_search, include_in_schema=False)
+    api.add_route("/_dev/mail/api/v1/message/{message_id}", mail_message, include_in_schema=False)
     api.mount("/assets", StaticFiles(directory=WEB / "assets"), name="console-assets")
     api.add_middleware(ConsoleHeaders, headers=console_headers())
     return api
@@ -317,15 +382,19 @@ async def main(port: int, *, empty: bool) -> None:
         storage,
         database={"url": database.app_url},
         app={"public_base_url": base_url, "allowed_hosts": ["localhost", "127.0.0.1"]},
+        # E-mail on, into the mailbox (the host is never contacted: .invalid).
+        notifications={"smtp_host": "mailbox.dev.invalid"},
     )
     clock = ShiftableClock()
     engine = create_engine(settings.database, application_name="nexusflow-dev-console")
+    mailbox = DevMailbox()
     container = build_container(
         settings,
         application_name="nexusflow-dev-console",
         clock=clock,
         engine=engine,
         redis=fakeredis.FakeAsyncRedis(),
+        email=mailbox,
     )
     bus = InProcessBus(container)
     container.uow_factory._publisher = bus  # type: ignore[attr-defined]  # the worker pools, in-process
@@ -342,7 +411,9 @@ async def main(port: int, *, empty: bool) -> None:
         fresh, _ = await container.auth.issue_signup_link(email="new.person@example.com", meta=META)
         api = create_app(settings, container=container, configure_logs=False)
         web = uvicorn.Server(
-            uvicorn.Config(serve_console(api), host="127.0.0.1", port=port, log_level="warning")
+            uvicorn.Config(
+                serve_console(api, mailbox), host="127.0.0.1", port=port, log_level="warning"
+            )
         )
         tasks.append(asyncio.create_task(web.serve()))
         while not web.started:  # noqa: ASYNC110 - uvicorn exposes a flag, not an event
