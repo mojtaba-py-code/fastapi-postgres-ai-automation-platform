@@ -19,6 +19,13 @@ All notable changes are documented here. The format follows
   registered from a signed-in session, used after the password step, renamed and
   removed (never the last factor), verified strictly by the platform's own
   WebAuthn verifier ([docs/PASSKEYS.md](docs/PASSKEYS.md)).
+* Organizations can require passkeys (`require_passkey`): only sessions that signed
+  in with a passkey reach them - checked on every request, at sign-in naming the
+  organization, when switching to it and after single sign-on, where the identity
+  provider's MFA never counts. Turning it on needs such a session
+  (`422 would_lock_you_out`); API keys are not affected. Each session records the
+  second factor it passed (`mfa_method`, migration 0012), listed by
+  `GET /users/me/sessions`.
 * E-mail-verified sign-up: `POST /auth/register` takes an address and mails it a
   link - or, if it already has an account, a notice; `POST /auth/register/complete`
   creates the account and its organization; an invitation creates the account

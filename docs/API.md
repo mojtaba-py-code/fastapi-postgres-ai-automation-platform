@@ -63,7 +63,7 @@ the security model in [SSO.md](SSO.md)):
 | Step | Request | Answer |
 |---|---|---|
 | Start | `POST /auth/sso/start {organization: "<slug>"}` | `200 {authorization_url, state, binding, expires_in}`. Send the browser to `authorization_url`; keep `binding` in memory (never in a URL). `404 sso_not_available` - the same for an unknown organization and one without usable single sign-on; `503 sso_unavailable` if the provider's discovery document cannot be used |
-| Callback | The provider redirects to `{public_base_url}/sso/callback?code=…&state=…`; the front end checks `state` and posts `POST /auth/sso/callback {code, state, binding}` | `200` token pair - or `{mfa_required: true, mfa_token, expires_in, methods}` when the organization requires MFA the provider did not provide and the person has the platform's second factor: finish with `/auth/mfa/verify` (a TOTP or recovery code) or with a passkey (`/auth/mfa/webauthn/begin`, then `/verify`) - either way into a session bound to the organization |
+| Callback | The provider redirects to `{public_base_url}/sso/callback?code=…&state=…`; the front end checks `state` and posts `POST /auth/sso/callback {code, state, binding}` | `200` token pair - or `{mfa_required: true, mfa_token, expires_in, methods}` when the organization requires MFA the provider did not provide and the person has the platform's second factor: finish with `/auth/mfa/verify` (a TOTP or recovery code) or with a passkey (`/auth/mfa/webauthn/begin`, then `/verify`) - either way into a session bound to the organization. An organization that requires passkeys always asks, whatever the provider reported, with `methods: ["webauthn"]`: only a passkey finishes it |
 
 Callback errors: `401 sso_failed` for anything about the state (unknown, used,
 expired), the binding or the ID token (one message, the reason is in the
@@ -72,7 +72,9 @@ organization's audit trail); `403 sso_email_not_verified`, `403 sso_domain_not_a
 `403 sso_account_not_managed` (from Google: an account the organization's Workspace
 does not manage - no `hd` claim naming a verified domain),
 `403 sso_access_revoked` (deactivated by the organization's directory),
-`403 ip_not_allowed`, `403 mfa_required`, `403 org_inactive`; `503 sso_unavailable`.
+`403 ip_not_allowed`, `403 mfa_required`, `403 passkey_required` (no passkey, where the
+organization requires one; also from `/auth/mfa/verify` for a TOTP or recovery code
+there), `403 org_inactive`; `503 sso_unavailable`.
 The session a single sign-on opens is bound to its organization:
 `switch-organization` to another one is `403 sso_session_bound`, and what belongs
 to the account rather than the organization - the personal-data export, the
@@ -83,6 +85,12 @@ password change, the MFA and passkey endpoints (`/auth/mfa/enroll`, `/confirm`,
 An organization that requires single sign-on answers password sessions with
 `403 sso_required` (owners who passed the platform's MFA excepted), including
 `/auth/login` naming it and `/auth/switch-organization` into it.
+
+An organization that requires passkeys (`require_passkey`) answers every session that
+did not sign in with one with `403 passkey_required` - on every request, at
+`/auth/login` naming it and at `/auth/switch-organization` into it. The MFA and passkey
+set-up endpoints answer for the account instead, so a passkey can be registered; API
+keys are not affected ([PASSKEYS.md](PASSKEYS.md), section 4).
 
 ## Conventions
 
@@ -148,10 +156,10 @@ for the role matrix.
 | GET/PATCH | `/users/me` | Profile |
 | GET | `/users` | Users of the current organization, with their roles [members:read] |
 | POST | `/users/me/delete` | Erase own account (password confirmation) |
-| GET | `/users/me/sessions` | My signed-in sessions: device (a coarse description such as "Firefox on Windows"), IP address, times, MFA, and which one this request uses. Signed-in users only - never with an API key (`403 session_required`) |
+| GET | `/users/me/sessions` | My signed-in sessions: device (a coarse description such as "Firefox on Windows"), IP address, times, MFA (`mfa_verified`, and `mfa_method`: the second factor the session passed - `totp`, `recovery_code`, `webauthn` or `null`), and which one this request uses. Signed-in users only - never with an API key (`403 session_required`) |
 | DELETE | `/users/me/sessions/{id}` | End one of my sessions: its access and refresh tokens stop working at once (audited as `auth.session.revoked`); another user's session is `404` |
 | GET | `/organizations` | Organizations of the current user |
-| GET/PATCH | `/organizations/current` | View / update [org:update]. `settings` is a partial update; `allowed_ip_ranges` (up to 100 CIDRs, IPv4 or IPv6; `null` lifts it) confines members' sessions and API keys to those networks - a change that would exclude the caller's own address is `422 would_lock_you_out` |
+| GET/PATCH | `/organizations/current` | View / update [org:update]. `settings` is a partial update; `allowed_ip_ranges` (up to 100 CIDRs, IPv4 or IPv6; `null` lifts it) confines members' sessions and API keys to those networks - a change that would exclude the caller's own address is `422 would_lock_you_out`. `require_mfa` admits only MFA-verified sessions (`403 mfa_required`); `require_passkey` only sessions that signed in with a passkey (`403 passkey_required`), and turning it on from any other session or with an API key is `422 would_lock_you_out` |
 | POST | `/organizations/current/automation-freeze` | Tenant kill switch with reason [workflows:disable] |
 | POST | `/organizations/current/deletion` | Request deletion (slug confirmation, 7-day grace) [org:delete] |
 | GET, PATCH, DELETE | `/organizations/current/members[/{id}]` | Members and roles [members:read / members:manage] |

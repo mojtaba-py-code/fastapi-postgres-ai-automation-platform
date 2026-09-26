@@ -50,7 +50,8 @@ network, or a new device or network right after several wrong passwords.
    `auth.login.succeeded` entry carries its `risk` and `signals` (`new_device`,
    `new_network`, `after_failures`). The users were e-mailed the time, IP address
    and device of each such sign-in. Force `logout-all` and a password reset for
-   affected users; recommend MFA or enforce it per organization (`require_mfa`).
+   affected users; recommend MFA or enforce it per organization (`require_mfa`, or
+   `require_passkey` for phishing-resistant sign-ins only).
 
 ### 3.2 Compromised user account
 1. Owner/admin removes the membership or changes the role (audited).
