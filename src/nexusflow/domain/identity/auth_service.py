@@ -33,8 +33,9 @@ Security design notes
   checked on every request, at sign-in naming the organization, when
   switching to it, and after a single sign-on - where the provider's MFA never
   counts and only a passkey completes the platform's step. Their members turn
-  MFA off only from such a session (``factors``); an operator resets the
-  second factors of a member who lost them all.
+  MFA off - and, once they have a passkey, set up an authenticator app - only
+  from such a session (``factors``); an operator resets the second factors of
+  a member who lost them all.
 """
 
 from __future__ import annotations
@@ -128,6 +129,7 @@ _INVALID_CREDENTIALS = "Invalid email or password."
 _ADDRESS = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 _FAMILIARITY_WINDOW = timedelta(days=90)  # sign-ins a new one is compared with
 _MAX_LISTED_SESSIONS = 100
+_SET_UP_TOTP = "Set up an authenticator app"  # passkey_session_required(...)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1632,6 +1634,15 @@ class AuthService:
                 raise ConflictError("An authenticator app is set up already.", code="mfa_enabled")
             if user.mfa_enabled and not session.mfa_verified:  # passkeys already
                 raise verified_session_required()
+            if (
+                user.mfa_enabled
+                and not session.signed_in_with_passkey
+                and await passkey_bound_organizations(uow, user.id)
+            ):
+                # Bound to passkeys, with one already: a recovery code phished
+                # from the member must not set up a factor of the phisher's own
+                # (nor replace the member's recovery codes).
+                raise passkey_session_required(_SET_UP_TOTP)
             secret = self._totp.generate_secret()
             user.mfa_pending_secret_encrypted = self._cipher.encrypt(
                 secret, context=_mfa_context(user.id)
@@ -1659,6 +1670,14 @@ class AuthService:
             session = await uow.sessions.get_for_update(_session_of(principal))
             if user.mfa_enabled and (session is None or not session.mfa_verified):
                 raise verified_session_required()  # passkeys already: as at enrolment
+            if (
+                user.mfa_enabled
+                and (session is None or not session.signed_in_with_passkey)
+                and await passkey_bound_organizations(uow, user.id)
+            ):
+                # As at enrolment - checked again: an organization may have come
+                # to require passkeys since. Before the code is checked.
+                raise passkey_session_required(_SET_UP_TOTP)
             secret = self._decrypt_mfa_secret(user, user.mfa_pending_secret_encrypted)
             step = self._totp.verify(secret, code, now=now, last_used_step=None)
             if step is None:

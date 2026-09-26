@@ -11,8 +11,11 @@ An account **bound to passkeys** - a member of an active organization that
 requires them - is held to more: a phishable factor (a TOTP or recovery
 code) must not mint the passkey that organization asks for. Its passkeys are
 added or removed, and MFA turned off, only from a session that signed in
-with one of its passkeys. Only its very first passkey can be registered
-otherwise (how a member starts), and each binding organization is told.
+with one of its passkeys - and, once it has one, so is an authenticator app
+set up (a phished recovery code would otherwise add the phisher's own factor
+and replace the member's codes). Only its very first passkey can be
+registered otherwise (how a member starts), and each binding organization is
+told.
 """
 
 from __future__ import annotations

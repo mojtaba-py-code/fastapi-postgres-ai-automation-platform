@@ -3,10 +3,11 @@
 An account is bound to passkeys while it belongs to an active organization
 that requires them. Then:
 
-* its passkeys are added and removed - and MFA turned off - only from a session
-  that signed in with one of its passkeys (``403 passkey_session_required``):
-  whoever relays its password and a TOTP code through a phishing site cannot
-  plant a passkey of their own, take the member's away, or wipe every factor
+* its passkeys are added and removed - and MFA turned off, and, once it has
+  a passkey, an authenticator app set up - only from a session that signed in
+  with one of its passkeys (``403 passkey_session_required``): whoever relays
+  its password and a code through a phishing site cannot plant a passkey or an
+  authenticator app of their own, take the member's away, or wipe every factor
   to start afresh;
 * only its very first passkey comes from another session - how a member
   starts - and each binding organization's own trail shows it, and its owners
@@ -175,6 +176,47 @@ async def test_a_session_that_passed_a_code_changes_no_passkey_of_a_bound_accoun
     removed = await by_passkey.post(f"{PASSKEYS}/{first['id']}/delete", json={"password": PASSWORD})
     assert removed.status_code == 204, removed.text
     assert [p["id"] for p in (await by_passkey.get(PASSKEYS)).json()] == [second["id"]]
+
+
+async def test_a_recovery_code_sets_up_no_authenticator_app_for_a_bound_account(
+    api: httpx2.AsyncClient, container: Container, admin_conn: asyncpg.Connection
+) -> None:
+    admin, _ = await require_passkeys(api, await signup(api))
+    bob = await signup(api)  # his own organization comes first
+    authenticator, registered = await register_passkey(bob)
+    codes: list[str] = registered["recovery_codes"]  # his first factor's
+    # A recovery code phished from Bob: a session that passed MFA - not a passkey.
+    phished = await code_session(api, bob.email, codes[0])
+    started = await phished.post("/api/v1/auth/mfa/enroll", json={"password": PASSWORD})
+    assert started.status_code == 200, started.text  # Bob is not bound yet
+    await join_organization(admin, bob, container, admin_conn)
+    bob_id = await _user_id(admin_conn, bob.email)
+
+    # Bound now: finishing it is refused (before the code is checked) ...
+    code = pyotp.TOTP(started.json()["secret"]).now()
+    confirmed = await phished.post("/api/v1/auth/mfa/confirm", json={"code": code})
+    refused = expect_error(confirmed, 403, "passkey_session_required")
+    assert refused["message"] == (
+        "Set up an authenticator app from a session that signed in with one of your passkeys."
+    )
+    # ... and so is starting again.
+    again = await phished.post("/api/v1/auth/mfa/enroll", json={"password": PASSWORD})
+    expect_error(again, 403, "passkey_session_required")
+    # No authenticator app of the phisher's, and Bob's recovery codes stand.
+    assert await admin_conn.fetchval(
+        "SELECT mfa_secret_encrypted IS NULL FROM users WHERE id = $1", bob_id
+    )
+    unused = await admin_conn.fetchval(
+        "SELECT count(*) FROM mfa_recovery_codes WHERE user_id = $1 AND used_at IS NULL", bob_id
+    )
+    assert unused == len(codes) - 1  # the phished one was used to sign in
+
+    # His passkey session sets one up.
+    by_passkey = await passkey_session(api, bob.email, authenticator)
+    await enroll_totp(by_passkey, datetime.now(UTC))
+    assert await admin_conn.fetchval(
+        "SELECT mfa_secret_encrypted IS NOT NULL FROM users WHERE id = $1", bob_id
+    )
 
 
 async def test_a_passkey_session_turns_mfa_off(
