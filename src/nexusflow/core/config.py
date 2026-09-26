@@ -16,9 +16,11 @@ from __future__ import annotations
 import base64
 import binascii
 import os
+import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from enum import StrEnum
-from ipaddress import IPv4Network, IPv6Network
+from ipaddress import IPv4Network, IPv6Network, ip_address
 from pathlib import Path
 from typing import Any, Literal, Self
 from urllib.parse import urlsplit
@@ -142,7 +144,12 @@ class SecuritySettings(_Section):
     signup_link_ttl_seconds: int = Field(default=86_400, ge=900, le=7 * 86_400)
     invitation_ttl_seconds: int = Field(default=72 * 3600, ge=3600, le=14 * 86_400)
     webhook_timestamp_tolerance_seconds: int = Field(default=300, ge=30, le=900)
-    mfa_issuer: str = "NexusFlow AI"
+    mfa_issuer: str = "NexusFlow AI"  # also the passkey relying party's name
+    # --- Passkeys (WebAuthn). The relying party ID is the host of
+    # app.public_base_url unless set to a parent domain of it; a passkey answer
+    # is accepted from that URL's origin and the origins listed here.
+    webauthn_rp_id: str | None = Field(default=None, max_length=253)
+    webauthn_origins: list[str] = Field(default_factory=list, max_length=20)
 
 
 class ScrapingSettings(_Section):
@@ -266,6 +273,10 @@ def _default_rate_limits() -> dict[str, RateLimitRule]:
         # link's token gates it, so a whole office behind one address can join.
         "auth.register.complete": RateLimitRule(limit=60, period_seconds=3600, fail_closed=True),
         "auth.mfa": RateLimitRule(limit=10, period_seconds=300, fail_closed=True),
+        # Passkeys: the sign-in step per client address (begin and verify),
+        # registering and managing them per person.
+        "auth.webauthn.sign_in": RateLimitRule(limit=20, period_seconds=300, fail_closed=True),
+        "auth.webauthn.manage": RateLimitRule(limit=30, period_seconds=900, fail_closed=True),
         # Per user: a stolen access token must not become a password oracle.
         "auth.password_change": RateLimitRule(limit=5, period_seconds=900, fail_closed=True),
         "api.read": RateLimitRule(limit=600, period_seconds=60),
@@ -301,6 +312,114 @@ class RateLimitSettings(_Section):
                 else rule
             )
         return merged
+
+
+@dataclass(frozen=True, slots=True)
+class WebAuthnRelyingParty:
+    """Where passkeys work: the relying party ID and the exact origins accepted."""
+
+    rp_id: str
+    origins: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _Origin:
+    scheme: str
+    host: str
+    serialized: str  # as a browser writes it into the client data
+
+
+_DNS_LABEL = re.compile(r"(?!-)[a-z0-9-]{1,63}(?<!-)")
+
+
+def _is_domain(name: str) -> bool:
+    """An ASCII DNS name (IDNs in their ``xn--`` form), never an IP address."""
+    if not name or len(name) > 253:
+        return False
+    try:
+        ip_address(name)
+    except ValueError:
+        labels = name.split(".")
+        return all(_DNS_LABEL.fullmatch(label) for label in labels) and not labels[-1].isdigit()
+    return False
+
+
+def _is_within(host: str, rp_id: str) -> bool:
+    """``host`` is ``rp_id`` or one of its subdomains. A parent domain needs two
+    labels at least; browsers also refuse public suffixes such as ``co.uk``,
+    which cannot be told apart here without the Public Suffix List."""
+    return host == rp_id or ("." in rp_id and host.endswith("." + rp_id))
+
+
+def _parse_origin(url: str, *, exact: bool) -> _Origin | None:
+    """The origin of ``url``, serialized as browsers do (lower-case host, no
+    default port). With ``exact``, ``url`` may hold nothing but the origin."""
+    try:
+        parts = urlsplit(url.strip())
+        port = parts.port
+    except ValueError:
+        return None
+    host = parts.hostname or ""
+    if parts.scheme not in ("https", "http") or not host or parts.username or parts.password:
+        return None
+    if exact and (parts.path not in ("", "/") or parts.query or parts.fragment):
+        return None
+    default_port = 443 if parts.scheme == "https" else 80
+    suffix = f":{port}" if port is not None and port != default_port else ""
+    return _Origin(parts.scheme, host, f"{parts.scheme}://{host}{suffix}")
+
+
+def _usable_origin(origin: _Origin, *, production: bool) -> bool:
+    """https - or http://localhost, outside staging and production."""
+    return origin.scheme == "https" or (not production and origin.host == "localhost")
+
+
+def webauthn_relying_party(
+    app: AppSettings, security: SecuritySettings
+) -> tuple[WebAuthnRelyingParty | None, list[str]]:
+    """The passkey relying party - ``None`` where passkeys cannot work (the
+    public host is an IP address, or no origin is usable) - and the problems
+    found in the passkey settings, which refuse startup."""
+    production = app.is_production_like
+    public = _parse_origin(app.public_base_url, exact=False)
+    host = public.host if public is not None else ""
+    if security.webauthn_rp_id is not None:
+        rp_id = security.webauthn_rp_id.strip().lower()
+        if not _is_domain(rp_id):
+            return None, ["security.webauthn_rp_id must be a domain name (xn-- form for IDNs)"]
+        if not _is_within(host, rp_id):
+            return None, [
+                (
+                    "security.webauthn_rp_id must be the host of app.public_base_url "
+                    "or a parent domain of it"
+                )
+            ]
+    elif _is_domain(host):
+        rp_id = host
+    else:
+        return None, []
+    problems: list[str] = []
+    origins: list[str] = []
+    if public is not None and _usable_origin(public, production=production):
+        origins.append(public.serialized)
+    for raw in security.webauthn_origins:
+        origin = _parse_origin(raw, exact=True)
+        if origin is None:
+            problems.append(f"security.webauthn_origins: {raw!r} is not an origin")
+        elif not _usable_origin(origin, production=production):
+            problems.append(
+                f"security.webauthn_origins: {raw!r} must use https "
+                "(http only for localhost, outside staging and production)"
+            )
+        elif not _is_within(origin.host, rp_id):
+            problems.append(f"security.webauthn_origins: {raw!r} is outside {rp_id!r}")
+        else:
+            origins.append(origin.serialized)
+    if problems:
+        return None, problems
+    if not origins:
+        return None, []
+    return WebAuthnRelyingParty(rp_id=rp_id, origins=tuple(dict.fromkeys(origins))), []
 
 
 class _EnvSource(EnvSettingsSource):
@@ -380,7 +499,10 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _enforce_secure_configuration(self) -> Self:
-        problems = [*self._key_material_problems()]
+        problems = [
+            *self._key_material_problems(),
+            *webauthn_relying_party(self.app, self.security)[1],
+        ]
         if self.app.is_production_like:
             problems.extend(self._production_problems())
         if problems:
@@ -424,6 +546,11 @@ class Settings(BaseSettings):
     def security_warnings(self) -> list[str]:
         """Non-fatal hardening recommendations, logged at startup."""
         warnings: list[str] = []
+        if webauthn_relying_party(self.app, self.security)[0] is None:
+            warnings.append(
+                "passkeys are unavailable: app.public_base_url needs a domain name and an "
+                "https origin (or see security.webauthn_rp_id and security.webauthn_origins)"
+            )
         if self.app.is_production_like:
             if self.database.ssl_mode == "disable":
                 warnings.append("database TLS is disabled (rely on an isolated network)")
