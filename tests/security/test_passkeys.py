@@ -1039,3 +1039,37 @@ class TestAroundTheAccount:
             "WHERE relname = 'webauthn_credentials'"
         )
         assert (rls["relrowsecurity"], rls["relforcerowsecurity"]) == (True, True)
+
+    async def test_the_runtime_role_cannot_change_what_verifies_a_passkey(
+        self, api: httpx2.AsyncClient, app_conn: asyncpg.Connection, admin_conn: asyncpg.Connection
+    ) -> None:
+        owner, authenticator = await _passkey_owner(api)
+        [before] = await stored_passkeys(admin_conn, owner.email)
+        await app_conn.execute(
+            "SELECT set_config('app.current_user_id', $1, false)",
+            str(await user_id_of(admin_conn, owner.email)),
+        )
+        # Even in its owner's context, a key cannot be swapped: only the columns a
+        # sign-in or a rename changes are writable (ASVS 6.7.1).
+        for column, value in (
+            ("public_key", os.urandom(91)),
+            ("algorithm", -8),
+            ("credential_id", os.urandom(32)),
+            ("user_handle", os.urandom(64)),
+            ("backup_eligible", True),
+        ):
+            with pytest.raises(asyncpg.InsufficientPrivilegeError):
+                await app_conn.execute(
+                    f"UPDATE webauthn_credentials SET {column} = $1",  # noqa: S608 - fixed names
+                    value,
+                )
+        updated = await app_conn.execute(
+            "UPDATE webauthn_credentials SET name = 'Renamed', sign_count = sign_count, "
+            "backed_up = backed_up, last_used_at = now()"
+        )
+        assert updated == "UPDATE 1"
+        [after] = await stored_passkeys(admin_conn, owner.email)
+        for column in ("public_key", "algorithm", "credential_id", "user_handle"):
+            assert after[column] == before[column]
+        # ... and the passkey still signs in.
+        assert (await sign_in(api, owner.email, authenticator)).status_code == 200

@@ -9,7 +9,10 @@ its COSE algorithm, signature counter, transports, backup flags, a name the
 user chose and the random WebAuthn user handle - public data only, nothing
 that signs. Like the MFA recovery codes it is user-scoped: row-level
 security enabled and forced, rows visible to their owner (or during
-authentication) only. A credential ID is unique across all accounts.
+authentication) only. A credential ID is unique across all accounts. The
+runtime role may update only what a sign-in or a rename changes - the name,
+the counter, the backup state and the last use - never a passkey's key,
+algorithm, credential ID, user handle or owner.
 
 ``users.mfa_enabled`` now means "a second factor is set up": an
 authenticator app (TOTP), passkeys, or both. The check constraint that
@@ -37,6 +40,8 @@ depends_on: str | Sequence[str] | None = None
 
 TS = sa.DateTime(timezone=True)
 TABLE = "webauthn_credentials"
+# Column-level UPDATE: what a sign-in or a rename changes, and nothing else.
+UPDATABLE_COLUMNS = "name, sign_count, backed_up, last_used_at"
 
 
 def upgrade() -> None:
@@ -97,7 +102,8 @@ def upgrade() -> None:
             "USING (user_id = nf_current_user() OR nf_auth_context()) "
             "WITH CHECK (user_id = nf_current_user() OR nf_auth_context())"
         ),
-        grant(TABLE, "SELECT, INSERT, UPDATE, DELETE", app_role()),
+        grant(TABLE, "SELECT, INSERT, DELETE", app_role()),
+        f"GRANT UPDATE ({UPDATABLE_COLUMNS}) ON {TABLE} TO {app_role()}",
         # A TOTP secret without MFA is a leftover no code path writes; clear
         # any before the converse constraint below validates every row.
         (

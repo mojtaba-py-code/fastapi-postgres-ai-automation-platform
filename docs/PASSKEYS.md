@@ -176,7 +176,10 @@ Another account's passkey is `404`. Rules that keep MFA meaningful:
 * **Credentials** are in `webauthn_credentials`, user-scoped like the recovery
   codes: row-level security enabled and forced, rows visible to their owner (or
   during authentication) only. A credential ID is unique across all accounts, and
-  every lookup names the account - an ID alone never selects one.
+  every lookup names the account - an ID alone never selects one. The runtime
+  database role may update only a passkey's name, counter, backup state and last
+  use: its public key, algorithm, credential ID, user handle and owner cannot be
+  changed, only the whole passkey removed.
 * `users.mfa_enabled` means "a second factor is set up" (TOTP, passkeys or both);
   a TOTP secret implies it (migration 0011 inverted the check constraint).
 * **Rate limits** (fail closed): `auth.webauthn.sign_in`, 20 per 5 minutes per client
