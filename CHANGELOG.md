@@ -7,6 +7,15 @@ All notable changes are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+* A web console ([docs/CONSOLE.md](docs/CONSOLE.md)): sign-up, sign-in with passkeys,
+  TOTP or single sign-on, and the pages e-mails link to; members, API keys, the
+  audit log, the security policy, single sign-on and SCIM, integrations, channels;
+  projects, datasets and records, sources and webhook endpoints, workflows, alert
+  rules, alerts and reports; the account's security, sessions and data. Static and
+  dependency-free, served by the edge under a strict Content-Security-Policy with
+  Trusted Types; tested with Node's own runner, static checks, through the edge,
+  and in a real Chromium in CI. `scripts/dev_console.py` runs it locally with demo
+  data, without Docker.
 * Single sign-on with each organization's OpenID Connect provider (authorization
   code flow with PKCE and a client-bound state, strictly verified ID tokens), for
   the e-mail domains the organization proves with a DNS TXT record; accounts and

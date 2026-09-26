@@ -11,7 +11,8 @@ backup-and-restore round trip and a passive DAST scan - but it is not yet
 production-proven: it has not run on a customer-like host, no independent
 penetration test has been done, single sign-on and passkeys have not yet been
 tried with real identity providers, browsers and authenticators, and high
-availability and an admin UI are on the roadmap (section 7).
+availability is on the roadmap (section 7). A web console covers the everyday
+flows ([CONSOLE.md](CONSOLE.md)).
 
 ## 1. Architecture review
 
@@ -151,8 +152,9 @@ below.
    Microsoft Entra ID, Google Workspace); no SAML, no front- or back-channel logout.
    Passkeys still need an interop pass with real browsers and authenticators, and
    organizations cannot yet require them specifically.
-5. An admin web UI; today the product is API-first (Swagger is disabled in
-   production).
+5. The web console covers sign-in, the organization's administration and the
+   everyday data flows ([CONSOLE.md](CONSOLE.md)); creating workflows and handling
+   dead letters remain API-only, and the console is in English only.
 6. High availability and disaster recovery: managed PostgreSQL with
    point-in-time recovery, a RabbitMQ cluster, managed Redis, object storage for
    uploads and reports, Kubernetes manifests, and stated RPO/RTO. Today: one

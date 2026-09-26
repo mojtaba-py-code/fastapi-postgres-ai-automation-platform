@@ -182,6 +182,12 @@ sudo certbot certonly --webroot -w ./deploy/acme -d example.com --deploy-hook "$
 For a local evaluation, `make dev-certs` creates a development CA and a certificate
 for `localhost` in `deploy/certs/`; never use it in production.
 
+**Web console**: the edge serves `./web` (mounted read-only) at `https://<domain>/`,
+under a policy of its own (`deploy/nginx/snippets/console.conf`). It needs no
+setting of its own: the links in e-mails and the single sign-on redirect point to
+it through the public URL, `https://${NEXUSFLOW_DOMAIN}`. An update of `./web`
+reaches browsers at their next load. See [CONSOLE.md](CONSOLE.md).
+
 **E-mail**: set `NEXUSFLOW_SMTP_HOST`, `NEXUSFLOW_SMTP_PORT`,
 `NEXUSFLOW_SMTP_TLS_MODE` (`starttls` or `tls`; TLS and certificate validation
 cannot be switched off), `NEXUSFLOW_SMTP_USERNAME`, `NEXUSFLOW_SMTP_FROM` and

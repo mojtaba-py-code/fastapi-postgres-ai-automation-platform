@@ -20,6 +20,7 @@ is authorized, tenant-isolated, idempotent and audited.
 | **Tenant isolation** | PostgreSQL row-level security (`FORCE`d) enforced on a non-`BYPASSRLS` role, plus explicit `org_id` filters in every query. Cross-tenant IDs return `404`. |
 | **Authentication** | Sign-up proves the e-mail address first and answers alike for every address (no account enumeration). Argon2id passwords (breached passwords refused), 10-minute EdDSA access tokens, rotating refresh tokens with reuse detection, TOTP with replay prevention and phishing-resistant passkeys (WebAuthn) as second factors, progressive lockout, sign-in risk assessment (new device, new network, success after failures), a list of one's sessions with instant revocation, and scoped API keys hashed with a server-side pepper. Organizations can confine sessions and API keys to their own networks (IP allowlists), and sign their members in through their own OpenID Connect provider (optionally required), with SCIM 2.0 provisioning - trusted only for the e-mail domains they proved they own. |
 | **Authorization** | Five roles (owner, admin, analyst, operator, viewer) and 38 permissions, checked at the route and again in the service. |
+| **Web console** | A first-party browser interface for everything above - sign-in with passkeys, TOTP or single sign-on, members, API keys, the audit log, the security policy, sources, datasets, alerts and reports - served by the edge under a strict Content-Security-Policy with Trusted Types. No framework, no build step, no third-party code; tokens held in memory. [CONSOLE.md](docs/CONSOLE.md) |
 | **SSRF** | Every outbound request passes a URL policy and a connect-time IP check against every DNS answer. Redirects are re-validated, bodies are size-capped and the decompressor is bounded. |
 | **Hostile content** | Web pages and uploaded files are parsed only in a **sandbox** worker that has no database, no storage and no secrets. Its only credential is a per-run HMAC ticket. |
 | **AI safety** | Offline analysis by default. External AI runs only when the tenant opts in, and never for datasets classified `restricted`. PII and credentials are redacted, prompts are spotlighted, a read-only tool gateway enforces permissions and a budget, and output is strictly validated. |
@@ -86,7 +87,8 @@ make demo
 ```
 
 Alert e-mails arrive in Mailpit at http://127.0.0.1:8025 and the reports in
-`demo-output/`.
+`demo-output/`. The web console is at https://localhost/: create an account there,
+open the sign-up e-mail in Mailpit, and you are in.
 
 **Develop** - the application on the host; integration tests start an embedded
 PostgreSQL automatically, so no Docker is needed:
@@ -99,6 +101,13 @@ uv sync --group dev --group localdb
 uv run pytest
 ```
 
+**Try the web console without Docker** - a real API and database on your machine,
+the worker tasks in-process, and a month of demo data (credentials printed):
+
+```bash
+uv run python scripts/dev_console.py
+```
+
 See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for production (TLS, secrets, n8n,
 key rotation, backups, hardening) and [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)
 for the developer workflow.
@@ -108,6 +117,7 @@ for the developer workflow.
 | Document | Contents |
 |---|---|
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Components, data flow, trust boundaries, key design decisions |
+| [CONSOLE.md](docs/CONSOLE.md) | The web console: pages, security model, running it locally, tests |
 | [SECURITY.md](SECURITY.md) | Security model summary and vulnerability disclosure |
 | [THREAT_MODEL.md](docs/THREAT_MODEL.md) | STRIDE analysis per component, with mitigations and residual risks |
 | [SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md) | How the code was reviewed, every finding and its fix |
@@ -173,7 +183,7 @@ configuration and image-digest drift checks. A self-assessed mapping to OWASP AS
   generated and linted, and CI starts n8n with the stack. The real headless
   Chromium renders a page in CI's end-to-end job, behind its pinning egress
   proxy. The platform runs fully without n8n (`internal` mode, the default).
-* Single-host reference topology: no high availability, no admin UI (API only).
+* Single-host reference topology: no high availability.
   Single sign-on is OpenID Connect only (no SAML), not yet tried against real
   identity providers, and it needs the public API to reach them (an opt-in Compose
   overlay); its limitations are in [SSO.md](docs/SSO.md). Passkeys are not yet

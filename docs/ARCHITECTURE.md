@@ -15,6 +15,7 @@ flowchart TB
   end
   subgraph edge["edge (only published ports)"]
     NG[nginx: TLS, limits, header hygiene]
+    WC[Web console: static files]
   end
   subgraph core["backend - internal network, no egress"]
     API[Public API]
@@ -36,6 +37,7 @@ flowchart TB
     N8N[n8n]
   end
   U -->|HTTPS| NG --> API
+  NG --- WC
   P -->|HMAC-signed webhooks| NG
   API --> PG & RD & MQ
   MQ --> WP & WI & SB

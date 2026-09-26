@@ -58,6 +58,10 @@ Details are in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) and
   second factors, deletion). SCIM 2.0 provisioning (`/scim/v2`) works with
   per-organization tokens (`nxp_…`, keyed hash, expiry) that grant viewer or analyst
   at most and never touch owners. See [docs/SSO.md](docs/SSO.md).
+* The web console runs only its own code, under a strict Content-Security-Policy with
+  Trusted Types: nothing it shows can become markup or script, it loads nothing from
+  another origin, sends no cookies, and keeps tokens in memory. See
+  [docs/CONSOLE.md](docs/CONSOLE.md).
 * Accounts lock out exponentially after repeated failures. Authentication endpoints
   also have fail-closed rate limits per IP and per account.
 * Sign-up proves the e-mail address before an account exists: it answers alike
