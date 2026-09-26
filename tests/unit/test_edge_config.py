@@ -136,8 +136,31 @@ def test_errors_the_edge_answers_use_the_json_error_schema(config: Block) -> Non
         location = named[target.removeprefix("=")]
         assert ["default_type", "application/json"] in location.directives, target
         [body] = [d[2] for d in location.directives if d[0] == "return"]
-        for key in ('"error":', '"message":', '"request_id":"$request_id"'):
+        for key in ('"error":', '"message":', '"request_id":"$nexusflow_request_id"'):
             assert key in body, (target, key)
+
+
+def test_request_ids_are_uuid_shaped_everywhere(config: Block) -> None:
+    # A bare 32-digit hex id sometimes held a Luhn-valid run of 13+ digits:
+    # OWASP ZAP reported a "credit card number" in a 401 response (DAST).
+    [mapping] = [b for b in _blocks(config) if b.name == "map $request_id $nexusflow_request_id"]
+    [[pattern, value]] = mapping.directives
+    assert value == '"$1-$2-$3-$4-$5"'
+    groups = re.fullmatch(pattern.strip('"').removeprefix("~"), "0123456789abcdef" * 2)
+    assert groups is not None and [len(g) for g in groups.groups()] == [8, 4, 4, 4, 12]
+    text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in [NGINX / "nginx.conf", *NGINX.glob("snippets/*")]
+    )
+    uses = re.findall(r"\$request_id\b", text)
+    assert len(uses) == 1  # the map's own source, nothing else
+    proxy = [
+        d
+        for b in _blocks(config)
+        for d in b.directives
+        if d[:2] == ["proxy_set_header", "X-Request-ID"]
+    ]
+    assert proxy and all(d[2] == "$nexusflow_request_id" for d in proxy)
 
 
 def test_plain_http_serves_acme_challenges_and_redirects_everything_else(

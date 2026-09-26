@@ -104,7 +104,7 @@ class RunPayloadRepository(Protocol):
 
 class RecordRepository(Protocol):
     async def fetch_for_update(
-        self, dataset_id: UUID, keys: Sequence[str]
+        self, org_id: UUID, dataset_id: UUID, keys: Sequence[str]
     ) -> dict[str, Record]: ...
 
     async def rewrap_sealed(self, org_id: UUID, active_key_id: str, *, limit: int) -> int:
@@ -131,18 +131,24 @@ class RecordRepository(Protocol):
     async def add_versions(self, versions: Sequence[RecordVersion]) -> None: ...
 
     async def touch(
-        self, record_ids: Sequence[UUID], *, run_id: UUID, source_id: UUID, now: datetime
+        self,
+        org_id: UUID,
+        record_ids: Sequence[UUID],
+        *,
+        run_id: UUID,
+        source_id: UUID,
+        now: datetime,
     ) -> None:
         """Mark unchanged records as seen by this run - and owned by its source,
         which alone infers their deletion from its full snapshots."""
         ...
 
     async def missing_from_run(
-        self, dataset_id: UUID, source_id: UUID, run_id: UUID, *, limit: int
+        self, org_id: UUID, dataset_id: UUID, source_id: UUID, run_id: UUID, *, limit: int
     ) -> list[Record]: ...
 
     async def count_missing_from_run(
-        self, dataset_id: UUID, source_id: UUID, run_id: UUID
+        self, org_id: UUID, dataset_id: UUID, source_id: UUID, run_id: UUID
     ) -> int: ...
 
     async def get(self, org_id: UUID, record_id: UUID) -> Record | None: ...
@@ -159,15 +165,17 @@ class RecordRepository(Protocol):
         self, org_id: UUID, record_id: UUID, *, limit: int
     ) -> list[RecordVersion]: ...
 
-    async def pending_versions(self, dataset_id: UUID, *, limit: int) -> list[RecordVersion]: ...
+    async def pending_versions(
+        self, org_id: UUID, dataset_id: UUID, *, limit: int
+    ) -> list[RecordVersion]: ...
 
     async def previous_versions(
-        self, pairs: Iterable[tuple[UUID, int]]
+        self, org_id: UUID, pairs: Iterable[tuple[UUID, int]]
     ) -> dict[tuple[UUID, int], RecordVersion]: ...
 
-    async def mark_diffed(self, version_ids: Sequence[UUID]) -> None: ...
+    async def mark_diffed(self, org_id: UUID, version_ids: Sequence[UUID]) -> None: ...
 
-    async def keys_for(self, record_ids: Sequence[UUID]) -> dict[UUID, str]: ...
+    async def keys_for(self, org_id: UUID, record_ids: Sequence[UUID]) -> dict[UUID, str]: ...
 
     async def batch_after(
         self, org_id: UUID, dataset_id: UUID, *, after: UUID | None, limit: int
@@ -192,11 +200,13 @@ class ChangeRepository(Protocol):
 
     async def unanalyzed(self, org_id: UUID, dataset_id: UUID, *, limit: int) -> list[Change]: ...
 
-    async def assign_insight(self, change_ids: Sequence[UUID], insight_id: UUID) -> None: ...
+    async def assign_insight(
+        self, org_id: UUID, change_ids: Sequence[UUID], insight_id: UUID
+    ) -> None: ...
 
     async def pending_alerts(self, org_id: UUID, *, limit: int) -> list[Change]: ...
 
-    async def mark_alerts_evaluated(self, change_ids: Sequence[UUID]) -> None: ...
+    async def mark_alerts_evaluated(self, org_id: UUID, change_ids: Sequence[UUID]) -> None: ...
 
     async def rewrap_sealed(self, org_id: UUID, active_key_id: str, *, limit: int) -> int:
         """Re-encrypt sealed values of diffs still under an older key."""
@@ -318,7 +328,7 @@ class WebhookEndpointRepository(TenantRepository[WebhookEndpoint], Protocol):
 class WebhookEventRepository(Protocol):
     async def add(self, event: InboundWebhookEvent) -> bool: ...
 
-    async def exists(self, endpoint_id: UUID, delivery_id: str) -> bool: ...
+    async def exists(self, org_id: UUID, endpoint_id: UUID, delivery_id: str) -> bool: ...
 
     async def get(self, org_id: UUID, event_id: UUID) -> InboundWebhookEvent | None: ...
 

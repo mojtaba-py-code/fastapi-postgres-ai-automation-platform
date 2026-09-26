@@ -2,10 +2,11 @@
 
 UK GDPR / GDPR articles 15 and 20 (access and portability) and 17 (erasure).
 The export holds the personal data the platform keeps about the account
-itself - profile, organizations, sessions, API keys and the account's own
-actions in its organizations' audit trails. An organization's business data
-belongs to the organization, the controller, which exports it (dataset
-exports), not to the person.
+itself - profile, organizations, sessions, passkeys, identity-provider links,
+directory (SCIM) entries, API keys and the account's own actions in its
+organizations' audit trails. An organization's business data belongs to the
+organization, the controller, which exports it (dataset exports), not to the
+person.
 
 People erase their own account from a signed-in session
 (``AccountService.delete_account``); an operator does it on a request made
@@ -167,6 +168,7 @@ class PrivacyService:
             if user is None:
                 raise NotFoundError()
             sessions = await uow.sessions.list_for_user(user_id, limit=MAX_SESSIONS)
+            passkeys = await uow.webauthn_credentials.list_for_user(user_id)
             identities = await uow.sso_identities.list_for_user(user_id, MAX_SESSIONS)
             directory = await uow.scim_users.list_for_user(user_id, MAX_SESSIONS)
             org_ids = await uow.memberships.list_org_ids_for_user(user_id)
@@ -224,6 +226,18 @@ class PrivacyService:
                     "single_sign_on_organization_id": str(s.sso_org_id) if s.sso_org_id else None,
                 }
                 for s in sessions
+            ],
+            # What describes each passkey; its public key and IDs stay out.
+            "passkeys": [
+                {
+                    "id": str(p.id),
+                    "name": p.name,
+                    "created_at": _when(p.created_at),
+                    "last_used_at": _when(p.last_used_at),
+                    "transports": list(p.transports),
+                    "backed_up": p.backed_up,
+                }
+                for p in passkeys
             ],
             "identity_provider_links": [
                 {

@@ -24,6 +24,7 @@ from nexusflow.domain.identity.model import (
     SignupRequest,
     User,
     UserSession,
+    WebAuthnCredential,
 )
 from nexusflow.domain.identity.sso import SsoConnection, SsoIdentity, SsoLoginState
 from nexusflow.domain.integrations.model import Integration
@@ -51,6 +52,7 @@ _MAPPINGS: list[tuple[type, Table]] = [
     (PasswordResetToken, t.password_reset_tokens),
     (SignupRequest, t.signup_requests),
     (MfaRecoveryCode, t.mfa_recovery_codes),
+    (WebAuthnCredential, t.webauthn_credentials),
     (Membership, t.memberships),
     (Invitation, t.invitations),
     (ApiKey, t.api_keys),

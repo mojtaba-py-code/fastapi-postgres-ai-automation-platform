@@ -256,7 +256,9 @@ class IngestionService:
         counts = _Counts()
         for start in range(0, len(records), _CHUNK):
             chunk = records[start : start + _CHUNK]
-            existing = await uow.data.records.fetch_for_update(dataset.id, [r.key for r in chunk])
+            existing = await uow.data.records.fetch_for_update(
+                dataset.org_id, dataset.id, [r.key for r in chunk]
+            )
             new_records: list[Record] = []
             versions: list[RecordVersion] = []
             unchanged: list[UUID] = []
@@ -299,7 +301,9 @@ class IngestionService:
             # The source that last saw a record owns it, changed or not: a record
             # that moved to another source (or whose source was replaced) is
             # deleted by the snapshots of the source that has it now.
-            await uow.data.records.touch(unchanged, run_id=run.id, source_id=source.id, now=now)
+            await uow.data.records.touch(
+                dataset.org_id, unchanged, run_id=run.id, source_id=source.id, now=now
+            )
         return counts
 
     @staticmethod
@@ -364,7 +368,9 @@ class IngestionService:
         count is reported on the run instead - a mass disappearance is far more
         likely a broken or hostile source than a real catalogue change.
         """
-        missing_total = await uow.data.records.count_missing_from_run(dataset.id, source.id, run.id)
+        missing_total = await uow.data.records.count_missing_from_run(
+            dataset.org_id, dataset.id, source.id, run.id
+        )
         if missing_total == 0:
             return 0, 0
         previously_live = counts.updated + counts.unchanged + missing_total
@@ -372,7 +378,7 @@ class IngestionService:
         if missing_total >= _GUARD_MIN_DELETIONS and missing_total > ratio * previously_live:
             return 0, missing_total
         missing = await uow.data.records.missing_from_run(
-            dataset.id, source.id, run.id, limit=_MAX_DELETIONS_PER_RUN
+            dataset.org_id, dataset.id, source.id, run.id, limit=_MAX_DELETIONS_PER_RUN
         )
         versions = []
         for record in missing:

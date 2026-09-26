@@ -17,6 +17,7 @@ from nexusflow.domain.identity.model import (
     SignupRequest,
     User,
     UserSession,
+    WebAuthnCredential,
 )
 from nexusflow.domain.identity.sso import SsoConnection, SsoIdentity, SsoLoginState
 
@@ -113,6 +114,32 @@ class RecoveryCodeRepository(Protocol):
     async def find_unused(self, user_id: UUID, code_hash: str) -> MfaRecoveryCode | None: ...
 
     async def delete_for_user(self, user_id: UUID) -> None: ...
+
+
+class WebAuthnCredentialRepository(Protocol):
+    """Passkeys, always looked up *within one account*: a credential ID alone
+    never selects an account."""
+
+    async def add(self, credential: WebAuthnCredential) -> None:
+        """Raises ``ConflictError(passkey_exists)`` when the credential ID is
+        registered already - to any account."""
+        ...
+
+    async def list_for_user(self, user_id: UUID) -> list[WebAuthnCredential]: ...
+
+    async def count_for_user(self, user_id: UUID) -> int: ...
+
+    async def get(
+        self, user_id: UUID, passkey_id: UUID, *, for_update: bool = False
+    ) -> WebAuthnCredential | None: ...
+
+    async def find(
+        self, user_id: UUID, credential_id: bytes, *, for_update: bool = False
+    ) -> WebAuthnCredential | None: ...
+
+    async def delete(self, credential: WebAuthnCredential) -> None: ...
+
+    async def delete_for_user(self, user_id: UUID) -> int: ...
 
 
 class ApiKeyRepository(Protocol):

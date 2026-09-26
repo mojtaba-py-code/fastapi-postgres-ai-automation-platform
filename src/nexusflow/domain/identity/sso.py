@@ -331,7 +331,8 @@ def ensure_jit_role(role: Role) -> Role:
 def satisfies_sso(session: UserSession, org_id: UUID, role: Role) -> bool:
     """Whether a session may reach an organization that requires single sign-on:
     one its identity provider opened - or, break-glass, an owner's session that
-    passed the platform's own MFA (password + TOTP)."""
+    passed the platform's own MFA (the password, then TOTP, a passkey or a
+    recovery code)."""
     return session.sso_org_id == org_id or (role is Role.OWNER and session.mfa_verified)
 
 

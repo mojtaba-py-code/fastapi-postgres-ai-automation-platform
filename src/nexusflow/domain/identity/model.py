@@ -31,8 +31,8 @@ class User:
     status: UserStatus = UserStatus.ACTIVE
     is_platform_admin: bool = False
     email_verified_at: datetime | None = None
-    mfa_enabled: bool = False
-    mfa_secret_encrypted: bytes | None = None
+    mfa_enabled: bool = False  # a second factor is set up: TOTP, passkeys or both
+    mfa_secret_encrypted: bytes | None = None  # TOTP, when that is one of them
     mfa_pending_secret_encrypted: bytes | None = None
     mfa_last_used_step: int | None = None
     failed_login_attempts: int = 0
@@ -89,6 +89,12 @@ class User:
         self.token_version += 1
         self.updated_at = now
 
+    @property
+    def has_totp(self) -> bool:
+        """An authenticator app (TOTP) is one of the account's second factors.
+        ``mfa_enabled`` means *any* second factor: TOTP, passkeys, or both."""
+        return self.mfa_secret_encrypted is not None
+
     def anonymize(self, now: datetime) -> None:
         """GDPR-style erasure: keep the row for referential integrity only."""
         self.email = f"deleted-{self.id}@invalid"
@@ -97,6 +103,7 @@ class User:
         self.mfa_enabled = False
         self.mfa_secret_encrypted = None
         self.mfa_pending_secret_encrypted = None
+        self.mfa_last_used_step = None
         self.status = UserStatus.DELETED
         self.token_version += 1
         self.updated_at = now
@@ -186,6 +193,30 @@ class MfaRecoveryCode:
     code_hash: str
     created_at: datetime
     used_at: datetime | None = None
+
+
+@dataclass(eq=False, kw_only=True)
+class WebAuthnCredential:
+    """A passkey registered as a second factor: public data only.
+
+    ``user_handle`` is the random WebAuthn user ID the authenticator stores
+    with the credential (never the account's ID or e-mail address);
+    ``sign_count`` is the authenticator's signature counter as last seen.
+    """
+
+    id: UUID
+    user_id: UUID
+    credential_id: bytes
+    user_handle: bytes
+    public_key: bytes  # SubjectPublicKeyInfo, DER
+    algorithm: int  # COSE algorithm identifier
+    sign_count: int = 0
+    transports: list[str] = field(default_factory=list)
+    name: str
+    backup_eligible: bool = False
+    backed_up: bool = False
+    created_at: datetime
+    last_used_at: datetime | None = None
 
 
 @dataclass(eq=False, kw_only=True)

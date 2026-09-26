@@ -1,7 +1,7 @@
 """Single sign-on (OpenID Connect) and SCIM provisioning, per organization.
 
-Revision ID: 0010
-Revises: 0009
+Revision ID: 0011
+Revises: 0010
 Create Date: 2026-09-26
 
 * ``sso_connections`` - an organization's identity provider; the client
@@ -34,8 +34,8 @@ from alembic import op
 
 from nexusflow.infrastructure.database.rls import app_role, tenant_table_security
 
-revision: str = "0010"
-down_revision: str | None = "0009"
+revision: str = "0011"
+down_revision: str | None = "0010"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

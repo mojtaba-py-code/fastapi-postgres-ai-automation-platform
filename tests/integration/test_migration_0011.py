@@ -1,8 +1,8 @@
-"""Migration 0010 (single sign-on and SCIM) goes down and up again cleanly.
+"""Migration 0011 (single sign-on and SCIM) goes down and up again cleanly.
 
-A fresh database of its own: migrated to the head, taken back to 0009 (the
-new tables, the session column and the widened audit actor check are gone)
-and forward again.
+A fresh database of its own: migrated to the head, taken back to 0010 (the
+new tables, the session column and the widened audit actor check are gone;
+0010's passkeys stay) and forward again.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ pytestmark = pytest.mark.integration
 NEW_TABLES = {"sso_connections", "sso_login_states", "sso_identities", "scim_tokens", "scim_users"}
 
 
-async def _state(url: str) -> tuple[set[str], bool, str]:
+async def _state(url: str) -> tuple[set[str], bool, str, str | None]:
     conn = await asyncpg.connect(url)
     try:
         tables = {
@@ -40,30 +40,31 @@ async def _state(url: str) -> tuple[set[str], bool, str]:
             "SELECT pg_get_constraintdef(oid) FROM pg_constraint"
             " WHERE conname = 'ck_audit_logs_actor_type'"
         )
-        return tables & NEW_TABLES, bool(column), str(check)
+        version = await conn.fetchval("SELECT version_num FROM alembic_version")
+        return tables & (NEW_TABLES | {"webauthn_credentials"}), bool(column), str(check), version
     finally:
         await conn.close()
 
 
-async def test_migration_0010_goes_down_and_up_again() -> None:
+async def test_migration_0011_goes_down_and_up_again() -> None:
     admin_url = admin_url_or_none()
     if admin_url is None:
         pytest.skip("PostgreSQL not available")
     db = await create_database(admin_url)
     url = db.admin_url.rsplit("/", 1)[0] + f"/{db.name}"
     try:
-        tables, column, check = await _state(url)
-        assert (tables, column) == (NEW_TABLES, True)
+        tables, column, check, version = await _state(url)
+        assert (tables, column, version) == (NEW_TABLES | {"webauthn_credentials"}, True, "0011")
         assert "'scim'" in check
 
-        await asyncio.to_thread(downgrade, db, "0009")
-        tables, column, check = await _state(url)
-        assert (tables, column) == (set(), False)
+        await asyncio.to_thread(downgrade, db, "0010")
+        tables, column, check, version = await _state(url)
+        assert (tables, column, version) == ({"webauthn_credentials"}, False, "0010")
         assert "'scim'" not in check
 
         await asyncio.to_thread(run_migrations, db, "head")
-        tables, column, check = await _state(url)
-        assert (tables, column) == (NEW_TABLES, True)
+        tables, column, check, version = await _state(url)
+        assert (tables, column, version) == (NEW_TABLES | {"webauthn_credentials"}, True, "0011")
         assert "'scim'" in check
     finally:
         await drop_database(db)

@@ -17,6 +17,8 @@ Always required:
 * `security.hmac_pepper` (at least 32 bytes)
 * `security.encryption_keys` (JSON object of base64 32-byte keys)
 * `ai.api_key` when `ai.provider=anthropic`
+* `security.webauthn_rp_id`, when set, to be a domain name that is the host of `app.public_base_url` or a parent domain of it
+* each of `security.webauthn_origins` to be an origin (`https://host[:port]`) within the relying party ID; `http://localhost` only outside staging and production
 
 Additionally refused when `app.environment` is `staging` or `production`:
 
@@ -93,7 +95,7 @@ RabbitMQ (Celery). Each worker pool has its own broker user; see deploy/rabbitmq
 
 ### `security`
 
-Key material, token lifetimes, password hashing and brute-force protection.
+Key material, token lifetimes, password hashing, brute-force protection and the passkey (WebAuthn) relying party: its ID is the host of `app.public_base_url` unless `webauthn_rp_id` names a parent domain of it, and passkey answers are accepted from that URL's origin plus `webauthn_origins`. See [PASSKEYS.md](PASSKEYS.md).
 
 | Variable | Type | Default | Constraints |
 |---|---|---|---|
@@ -115,6 +117,7 @@ Key material, token lifetimes, password hashing and brute-force protection.
 | `NEXUSFLOW_SECURITY__LOCKOUT_BASE_SECONDS` | int | `900` | >= 60 |
 | `NEXUSFLOW_SECURITY__LOCKOUT_MAX_SECONDS` | int | `86400` | >= 900 |
 | `NEXUSFLOW_SECURITY__ENCRYPTION_KEYS` | secret (optional) | *(none)* | secret: prefer `…_FILE` |
+| `NEXUSFLOW_SECURITY__KEK_PROVIDER` | one of: `local`, `vault-transit` | `local` |  |
 | `NEXUSFLOW_SECURITY__ENCRYPTION_ACTIVE_KEY_ID` | str | `kek-1` | pattern `^[A-Za-z0-9._-]{1,32}$` |
 | `NEXUSFLOW_SECURITY__HMAC_PEPPER` | secret (optional) | *(none)* | secret: prefer `…_FILE` |
 | `NEXUSFLOW_SECURITY__PASSWORD_RESET_TTL_SECONDS` | int | `1800` | >= 300; <= 86400 |
@@ -122,10 +125,31 @@ Key material, token lifetimes, password hashing and brute-force protection.
 | `NEXUSFLOW_SECURITY__INVITATION_TTL_SECONDS` | int | `259200` | >= 3600; <= 1209600 |
 | `NEXUSFLOW_SECURITY__WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS` | int | `300` | >= 30; <= 900 |
 | `NEXUSFLOW_SECURITY__MFA_ISSUER` | str | `NexusFlow AI` |  |
+| `NEXUSFLOW_SECURITY__WEBAUTHN_RP_ID` | str (optional) | *(unset)* |  |
+| `NEXUSFLOW_SECURITY__WEBAUTHN_ORIGINS` | JSON list | `[]` |  |
+
+### `vault`
+
+
+
+| Variable | Type | Default | Constraints |
+|---|---|---|---|
+| `NEXUSFLOW_VAULT__ADDRESS` | str (optional) | *(unset)* |  |
+| `NEXUSFLOW_VAULT__TOKEN` | secret (optional) | *(none)* | secret: prefer `…_FILE` |
+| `NEXUSFLOW_VAULT__ROLE_ID` | str (optional) | *(unset)* |  |
+| `NEXUSFLOW_VAULT__SECRET_ID` | secret (optional) | *(none)* | secret: prefer `…_FILE` |
+| `NEXUSFLOW_VAULT__APPROLE_MOUNT` | str | `approle` | pattern `^[A-Za-z0-9_-]{1,64}(/[A-Za-z0-9_-]{1,64}){0,3}$` |
+| `NEXUSFLOW_VAULT__TRANSIT_MOUNT` | str | `transit` | pattern `^[A-Za-z0-9_-]{1,64}(/[A-Za-z0-9_-]{1,64}){0,3}$` |
+| `NEXUSFLOW_VAULT__TRANSIT_KEY` | str | `nexusflow` | pattern `^[A-Za-z0-9_-]{1,128}$` |
+| `NEXUSFLOW_VAULT__NAMESPACE` | str (optional) | *(unset)* | pattern `^[A-Za-z0-9_-]{1,64}(/[A-Za-z0-9_-]{1,64}){0,3}$` |
+| `NEXUSFLOW_VAULT__CA_CERT` | path (optional) | *(unset)* |  |
+| `NEXUSFLOW_VAULT__TIMEOUT_SECONDS` | float | `10.0` | > 0; <= 60 |
+| `NEXUSFLOW_VAULT__RETRIES` | int | `5` | >= 0; <= 20 |
+| `NEXUSFLOW_VAULT__ALLOW_INSECURE_HTTP` | bool | `false` |  |
 
 ### `sso`
 
-Single sign-on (OpenID Connect) and SCIM provisioning. Each organization configures its own identity provider (docs/SSO.md); these bound what the platform does with it.
+Single sign-on (OpenID Connect) and SCIM provisioning. Each organization configures its own identity provider; these bound what the platform does with it. See [SSO.md](SSO.md).
 
 | Variable | Type | Default | Constraints |
 |---|---|---|---|
@@ -276,6 +300,8 @@ Default rules. `NEXUSFLOW_RATE_LIMITS__RULES` is a JSON object merged over these
 | `auth.register.complete` | 60 | 3600 | reject (fail closed) |
 | `auth.sso.callback` | 30 | 60 | reject (fail closed) |
 | `auth.sso.start` | 30 | 60 | reject (fail closed) |
+| `auth.webauthn.manage` | 30 | 900 | reject (fail closed) |
+| `auth.webauthn.sign_in` | 20 | 300 | reject (fail closed) |
 | `automation.service` | 1200 | 60 | allow (fail open) |
 | `external_api.integration` | 60 | 60 | allow (fail open) |
 | `notifications.channel` | 30 | 60 | allow (fail open) |

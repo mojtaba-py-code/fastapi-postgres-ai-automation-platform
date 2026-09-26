@@ -18,14 +18,22 @@ Security design notes
 * **Revocation**: sessions are checked on every request, and ``token_version``
   invalidates every access token after password changes or "log out everywhere".
 * Only keyed hashes of opaque tokens are stored.
+* **Second factors**: an authenticator app (TOTP), passkeys (WebAuthn), or
+  both; recovery codes stand in for either. A wrong code or a refused passkey
+  counts toward the same lockout as a wrong password.
 * **Single sign-on** (``sso_service``) ends here too: :meth:`complete_sso_sign_in`
   opens a session bound to the identity provider's organization. Such a
   session never switches organizations, and its account-wide actions (the
   session list, "log out everywhere") are confined to that organization.
+  When the organization requires MFA its provider did not provide, the
+  platform's own second factor (TOTP, a passkey or a recovery code) completes
+  a challenge marked ``sso``, into the same bound session.
 """
 
 from __future__ import annotations
 
+import hmac
+import math
 import re
 import secrets
 from dataclasses import dataclass, replace
@@ -48,6 +56,13 @@ from nexusflow.domain.audit.recorder import AuditRecorder
 from nexusflow.domain.authorization.principal import Principal
 from nexusflow.domain.authorization.roles import Role
 from nexusflow.domain.identity.authenticator import network_not_allowed
+from nexusflow.domain.identity.factors import (
+    generate_recovery_codes,
+    normalize_recovery_code,
+    queue_security_email,
+    session_of,
+    verified_session_required,
+)
 from nexusflow.domain.identity.login_risk import (
     LoginAssessment,
     LoginRisk,
@@ -56,13 +71,14 @@ from nexusflow.domain.identity.login_risk import (
     sign_in_details,
 )
 from nexusflow.domain.identity.model import (
-    MfaRecoveryCode,
     PasswordResetToken,
     RefreshToken,
     SignupRequest,
     User,
     UserSession,
+    WebAuthnCredential,
 )
+from nexusflow.domain.identity.passkeys import descriptor, passkeys_unavailable
 from nexusflow.domain.identity.password_policy import PasswordPolicy
 from nexusflow.domain.identity.ports import TotpVerifier
 from nexusflow.domain.identity.sso import (
@@ -72,7 +88,19 @@ from nexusflow.domain.identity.sso import (
     satisfies_sso,
     sso_required_error,
 )
-from nexusflow.domain.identity.tokens import TokenCodec
+from nexusflow.domain.identity.tokens import MfaChallengeClaims, TokenCodec
+from nexusflow.domain.identity.webauthn import (
+    CHALLENGE_BYTES,
+    CHALLENGE_TTL_SECONDS,
+    AssertionResponse,
+    PasskeyRejectedError,
+    PasskeySupport,
+    RelyingParty,
+    RequestOptions,
+    b64url,
+    b64url_decode,
+    credential_fingerprint,
+)
 from nexusflow.domain.organizations.model import Membership, Organization
 from nexusflow.domain.shared.context import RequestMeta
 from nexusflow.domain.shared.outbox import TaskName, new_message
@@ -86,7 +114,6 @@ from nexusflow.domain.shared.unit_of_work import TenantScope, UnitOfWork, UnitOf
 
 _INVALID_CREDENTIALS = "Invalid email or password."
 _ADDRESS = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
-_RECOVERY_CODE_COUNT = 10
 _FAMILIARITY_WINDOW = timedelta(days=90)  # sign-ins a new one is compared with
 _MAX_LISTED_SESSIONS = 100
 
@@ -122,6 +149,8 @@ class LoginResult:
     tokens: TokenPair | None = None
     mfa_challenge: str | None = None
     mfa_challenge_expires_in: int | None = None
+    # How the second factor can be proved: "totp", "webauthn", "recovery_code".
+    mfa_methods: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,6 +192,7 @@ class AuthService:
         totp: TotpVerifier,
         audit: AuditRecorder,
         policy: AuthPolicy,
+        passkeys: PasskeySupport | None = None,
     ) -> None:
         self._uow_factory = uow_factory
         self._clock = clock
@@ -174,6 +204,7 @@ class AuthService:
         self._totp = totp
         self._audit = audit
         self._policy = policy
+        self._passkeys = passkeys
 
     # ------------------------------------------------------------ registration
 
@@ -509,16 +540,17 @@ class AuthService:
             if upgraded_hash is not None:
                 user.password_hash = upgraded_hash
             if user.mfa_enabled:
-                # The counter restarts for the second factor; the failures so far
-                # travel in the (signed) challenge to the risk assessment.
-                prior_failures = user.failed_login_attempts
-                user.failed_login_attempts = 0
-                challenge = self._codec.issue_mfa_challenge(
-                    user_id=user.id, org_id=org_id, now=now, prior_failures=prior_failures
-                )
+                # The failure counter keeps running until a sign-in completes:
+                # wrong passwords and wrong second factors add up to one lockout.
+                # (Restarting it here let whoever knew the password guess four
+                # codes per password step, for ever - review R13-6.)
+                challenge = self._codec.issue_mfa_challenge(user_id=user.id, org_id=org_id, now=now)
+                methods = await self._mfa_methods(uow, user)
                 await uow.commit()
                 return LoginResult(
-                    mfa_challenge=challenge.token, mfa_challenge_expires_in=challenge.expires_in
+                    mfa_challenge=challenge.token,
+                    mfa_challenge_expires_in=challenge.expires_in,
+                    mfa_methods=methods,
                 )
             tokens = await self._complete_login(uow, user, org_id, meta, now, mfa_verified=False)
             await uow.commit()
@@ -531,45 +563,36 @@ class AuthService:
             user = await uow.users.get_for_update(claims.user_id)
             if user is None or not user.is_active or user.is_locked(now) or not user.mfa_enabled:
                 raise AuthenticationError("Verification failed.", code="mfa_failed")
-            if not await self._check_second_factor(uow, user, code, now, meta):
-                locked = user.register_failed_login(
-                    now,
-                    threshold=self._policy.lockout_threshold,
-                    base_seconds=self._policy.lockout_base_seconds,
-                    max_seconds=self._policy.lockout_max_seconds,
-                )
-                await self._audit.record(
-                    uow.audit,
-                    action=AuditAction.MFA_FAILED,
-                    principal=None,
-                    meta=meta,
-                    result=AuditResult.FAILURE,
-                    actor_id=user.id,
-                    resource_type="user",
-                    resource_id=user.id,
-                )
-                if locked:
-                    await self._on_lockout(uow, user, meta)
-                await uow.commit()
+            method = await self._check_second_factor(uow, user, code, now, meta)
+            if method is None:
+                await self._refuse_second_factor(uow, user, meta, now)
                 raise AuthenticationError("Verification failed.", code="mfa_failed")
-            if claims.sso and claims.org_id is not None:
-                # The second step of a single sign-on: the session it opens is
-                # bound to that organization, exactly as without the challenge.
-                tokens = await self._complete_sso_step_up(
-                    uow, user, claims.org_id, meta, now, prior_failures=claims.prior_failures
-                )
-            else:
-                tokens = await self._complete_login(
-                    uow,
-                    user,
-                    claims.org_id,
-                    meta,
-                    now,
-                    mfa_verified=True,
-                    prior_failures=claims.prior_failures,
-                )
+            tokens = await self._complete_second_factor(uow, user, claims, meta, now, method)
             await uow.commit()
         return tokens
+
+    async def _complete_second_factor(
+        self,
+        uow: UnitOfWork,
+        user: User,
+        claims: MfaChallengeClaims,
+        meta: RequestMeta,
+        now: datetime,
+        method: str,
+    ) -> TokenPair:
+        """The sign-in a proved second factor completes - by code (TOTP or a
+        recovery code) or by passkey alike: an ordinary one after the password
+        step, or, for a challenge a single sign-on issued, a session bound to
+        that organization (never an ordinary one)."""
+        if claims.sso:
+            if claims.org_id is None:  # never issued so: the codec refuses it
+                raise AuthenticationError("Verification failed.", code="mfa_failed")
+            return await self._complete_sso_step_up(
+                uow, user, claims.org_id, meta, now, mfa_method=method
+            )
+        return await self._complete_login(
+            uow, user, claims.org_id, meta, now, mfa_verified=True, mfa_method=method
+        )
 
     async def _complete_sso_step_up(
         self,
@@ -579,7 +602,7 @@ class AuthService:
         meta: RequestMeta,
         now: datetime,
         *,
-        prior_failures: int,
+        mfa_method: str,
     ) -> TokenPair:
         """Everything a single sign-on checks when it opens a session, checked
         again: minutes may have passed since the identity provider answered."""
@@ -589,7 +612,7 @@ class AuthService:
                 uow, org_id=org_id, user_id=user.id, client_ip=meta.ip
             )
         except SsoRefusal as refusal:
-            # The code was used (replay protection stays); the refusal is audited.
+            # The factor was used (replay protection stays); the refusal is audited.
             await record_sso_failure(
                 self._audit,
                 uow,
@@ -598,7 +621,7 @@ class AuthService:
                 meta=meta,
                 user_id=user.id,
                 membership=refusal.membership,
-                metadata={"step": "mfa"},
+                metadata={"step": "mfa", "mfa_method": mfa_method},
             )
             await uow.commit()
             raise refusal.error from None
@@ -612,18 +635,24 @@ class AuthService:
             mfa_verified=True,
             idp_mfa=False,
             new_account=False,
-            prior_failures=prior_failures,
+            mfa_method=mfa_method,
         )
 
-    def sso_mfa_challenge(self, user: User, org_id: UUID, now: datetime) -> LoginResult:
+    async def sso_mfa_challenge(
+        self, uow: UnitOfWork, user: User, org_id: UUID, now: datetime
+    ) -> LoginResult:
         """The platform's second factor after a single sign-on (the organization
-        requires MFA its identity provider did not provide). Only
-        :meth:`verify_mfa` completes it, into a session bound to ``org_id``."""
+        requires MFA its identity provider did not provide), with the ways it
+        can be proved, as after the password step. Only :meth:`verify_mfa` and
+        :meth:`verify_passkey_sign_in` complete it, into a session bound to
+        ``org_id``. The caller commits."""
         challenge = self._codec.issue_mfa_challenge(
             user_id=user.id, org_id=org_id, now=now, sso=True
         )
         return LoginResult(
-            mfa_challenge=challenge.token, mfa_challenge_expires_in=challenge.expires_in
+            mfa_challenge=challenge.token,
+            mfa_challenge_expires_in=challenge.expires_in,
+            mfa_methods=await self._mfa_methods(uow, user),
         )
 
     async def complete_sso_sign_in(
@@ -638,22 +667,27 @@ class AuthService:
         mfa_verified: bool,
         idp_mfa: bool,
         new_account: bool,
-        prior_failures: int = 0,
+        mfa_method: str | None = None,
     ) -> TokenPair:
         """Open a session an identity provider authenticated: bound to its
         organization. Sign-in risk and the new-device notice work as for a
-        password (not for an account created by this very sign-in). The
-        password lockout is left alone: a provider's sign-in is no proof the
-        password guesses stopped. ``uow`` is scoped to ``org_id``."""
-        assessment = (
-            None if new_account else await self._assess_login(uow, user, meta, now, prior_failures)
-        )
+        password (not for an account created by this very sign-in).
+
+        The account's failure counter is left as it is - neither obeyed nor
+        reset: a provider's sign-in is no proof that someone guessing the
+        password or the second factor stopped (a completed password sign-in
+        resets it). The platform's own second factor after a single sign-on
+        does count: a wrong code or a refused passkey adds to the counter, and
+        a locked account cannot complete it. ``uow`` is scoped to ``org_id``."""
+        assessment = None if new_account else await self._assess_login(uow, user, meta, now)
         user.last_login_at = now
         user.updated_at = now
         principal = Principal.for_user(
             user_id=user.id, org_id=org_id, role=role, session_id=None, sso_org_id=org_id
         )
         metadata: JSONObject = {"mfa": mfa_verified, "idp_mfa": idp_mfa, "new_account": new_account}
+        if mfa_method is not None:
+            metadata["mfa_method"] = mfa_method  # the platform's: totp, recovery_code, webauthn
         if assessment is not None:
             metadata["risk"] = assessment.risk.value
             metadata["signals"] = list(assessment.signals)
@@ -689,28 +723,72 @@ class AuthService:
         )
         return replace(tokens, login_risk=assessment.risk if assessment is not None else None)
 
+    async def _refuse_second_factor(
+        self,
+        uow: UnitOfWork,
+        user: User,
+        meta: RequestMeta,
+        now: datetime,
+        metadata: JSONObject | None = None,
+    ) -> None:
+        """A wrong code or a refused passkey at sign-in: counted toward the
+        lockout like a wrong password, audited, and committed."""
+        locked = self._register_failure(user, now)
+        await self._audit.record(
+            uow.audit,
+            action=AuditAction.MFA_FAILED,
+            principal=None,
+            meta=meta,
+            result=AuditResult.FAILURE,
+            actor_id=user.id,
+            resource_type="user",
+            resource_id=user.id,
+            metadata=metadata,
+        )
+        if locked:
+            await self._on_lockout(uow, user, meta)
+        await uow.commit()
+
+    async def _mfa_methods(self, uow: UnitOfWork, user: User) -> tuple[str, ...]:
+        """The ways this account's second factor can be proved at sign-in."""
+        methods: list[str] = []
+        if user.has_totp:
+            methods.append("totp")
+        if (
+            self._passkeys is not None
+            and self._passkeys.relying_party is not None
+            and await uow.webauthn_credentials.count_for_user(user.id)
+        ):
+            methods.append("webauthn")
+        methods.append("recovery_code")
+        return tuple(methods)
+
     async def _check_second_factor(
         self, uow: UnitOfWork, user: User, code: str, now: datetime, meta: RequestMeta
-    ) -> bool:
+    ) -> str | None:
+        """What proved the second factor - ``"totp"`` or ``"recovery_code"`` -
+        or ``None``. Six digits are a TOTP code, which needs a TOTP secret."""
         candidate = code.strip()
         if len(candidate) == 6 and candidate.isdigit():
+            if not user.has_totp:
+                return None  # passkeys only: no code to compare with
             secret = self._decrypt_mfa_secret(user, user.mfa_secret_encrypted)
             step = self._totp.verify(
                 secret, candidate, now=now, last_used_step=user.mfa_last_used_step
             )
             if step is None:
-                return False
+                return None
             user.mfa_last_used_step = step
             blob = user.mfa_secret_encrypted
             if blob is not None and self._cipher.needs_rewrap(blob):
                 # Lazy key rotation: re-encrypt under the active KEK on use.
                 user.mfa_secret_encrypted = self._cipher.rewrap(blob, context=_mfa_context(user.id))
-            return True
+            return "totp"
         recovery = await uow.recovery_codes.find_unused(
-            user.id, self._token_hasher.hash(_normalize_recovery_code(candidate))
+            user.id, self._token_hasher.hash(normalize_recovery_code(candidate))
         )
         if recovery is None:
-            return False
+            return None
         recovery.used_at = now
         await self._audit.record(
             uow.audit,
@@ -722,7 +800,132 @@ class AuthService:
             resource_id=user.id,
         )
         await self._notify(uow, user, "mfa_recovery_code_used", now)
-        return True
+        return "recovery_code"
+
+    # ---------------------------------------------------------- passkey sign-in
+
+    def _passkey_support(self) -> tuple[PasskeySupport, RelyingParty]:
+        if self._passkeys is None or self._passkeys.relying_party is None:
+            raise passkeys_unavailable()
+        return self._passkeys, self._passkeys.relying_party
+
+    async def begin_passkey_sign_in(
+        self, *, challenge_token: str, meta: RequestMeta
+    ) -> RequestOptions:
+        """Options to sign in with a passkey, once the password step - or a
+        single sign-on that needs the platform's second factor - issued a
+        challenge token. The WebAuthn challenge is bound to that token, lives
+        at most five minutes (never beyond the token) and is single-use."""
+        support, rp = self._passkey_support()
+        now = self._clock.now()
+        claims = self._codec.decode_mfa_challenge(challenge_token, now=now)
+        async with self._uow_factory(TenantScope.auth()) as uow:
+            user = await uow.users.get(claims.user_id)
+            if user is None or not user.is_active or user.is_locked(now) or not user.mfa_enabled:
+                raise AuthenticationError("Verification failed.", code="mfa_failed")
+            passkeys = await uow.webauthn_credentials.list_for_user(user.id)
+        if not passkeys:
+            raise ConflictError("No passkey is registered for this account.", code="no_passkeys")
+        expires_at = min(now + timedelta(seconds=CHALLENGE_TTL_SECONDS), claims.expires_at)
+        lifetime = math.floor((expires_at - now).total_seconds())
+        if lifetime < 1:
+            raise AuthenticationError("The sign-in has expired: start again.", code="token_expired")
+        challenge = secrets.token_bytes(CHALLENGE_BYTES)
+        state: JSONObject = {
+            "challenge": b64url(challenge),
+            "user_id": str(user.id),
+            "expires_at": expires_at.isoformat(),
+            "allowed": [credential_fingerprint(p.credential_id) for p in passkeys],
+        }
+        await support.challenges.put(_sign_in_key(claims.challenge_id), state, ttl_seconds=lifetime)
+        return RequestOptions(
+            rp_id=rp.id,
+            challenge=challenge,
+            allow=tuple(descriptor(passkey) for passkey in passkeys),
+            timeout_ms=lifetime * 1000,
+        )
+
+    async def verify_passkey_sign_in(
+        self, *, challenge_token: str, response: AssertionResponse, meta: RequestMeta
+    ) -> TokenPair:
+        """Finish a sign-in with a passkey: exactly like a correct TOTP code
+        (MFA-verified session, counters reset, audit, risk assessment) - and a
+        refused passkey counts toward the lockout like a wrong code. For a
+        challenge a single sign-on issued, also exactly like a TOTP code: a
+        session bound to that organization, the failure counter left as it is."""
+        support, rp = self._passkey_support()
+        now = self._clock.now()
+        claims = self._codec.decode_mfa_challenge(challenge_token, now=now)
+        # Taken whatever happens next: each challenge is answered at most once.
+        state = await support.challenges.take(_sign_in_key(claims.challenge_id))
+        async with self._uow_factory(TenantScope.auth()) as uow:
+            user = await uow.users.get_for_update(claims.user_id)
+            if user is None or not user.is_active or user.is_locked(now) or not user.mfa_enabled:
+                raise AuthenticationError("Verification failed.", code="mfa_failed")
+            try:
+                await self._verify_passkey(uow, support, rp, user, state, response, now, meta)
+            except PasskeyRejectedError as rejected:
+                await self._refuse_second_factor(
+                    uow, user, meta, now, {"method": "webauthn", "reason": rejected.reason}
+                )
+                raise AuthenticationError("Verification failed.", code="mfa_failed") from None
+            tokens = await self._complete_second_factor(uow, user, claims, meta, now, "webauthn")
+            await uow.commit()
+        return tokens
+
+    async def _verify_passkey(
+        self,
+        uow: UnitOfWork,
+        support: PasskeySupport,
+        rp: RelyingParty,
+        user: User,
+        state: JSONObject | None,
+        response: AssertionResponse,
+        now: datetime,
+        meta: RequestMeta,
+    ) -> WebAuthnCredential:
+        """WebAuthn section 7.2 with the account's records; raises
+        :class:`PasskeyRejectedError`. On success the passkey's counter,
+        backup state and last use are updated."""
+        challenge, allowed = _sign_in_state(state, user.id, now)
+        # Only this account's passkeys, and only those the options allowed.
+        passkey = await uow.webauthn_credentials.find(user.id, response.raw_id, for_update=True)
+        if passkey is None or credential_fingerprint(passkey.credential_id) not in allowed:
+            raise PasskeyRejectedError("credential_unknown")
+        if response.user_handle is not None and not hmac.compare_digest(
+            response.user_handle, passkey.user_handle
+        ):
+            raise PasskeyRejectedError("user_handle_mismatch")
+        verified = support.verifier.verify_assertion(
+            response,
+            challenge=challenge,
+            rp=rp,
+            public_key=passkey.public_key,
+            algorithm=passkey.algorithm,
+        )
+        if verified.backup_eligible != passkey.backup_eligible:
+            raise PasskeyRejectedError("backup_eligibility_changed")
+        stored, presented = passkey.sign_count, verified.sign_count
+        if (stored or presented) and presented <= stored:
+            # A counter that does not move forward: the passkey may have been
+            # copied, and either copy may be the one signing now.
+            await self._audit.record(
+                uow.audit,
+                action=AuditAction.WEBAUTHN_CLONE_SUSPECTED,
+                principal=None,
+                meta=meta,
+                result=AuditResult.DENIED,
+                actor_id=user.id,
+                resource_type="webauthn_credential",
+                resource_id=passkey.id,
+                metadata={"stored_counter": stored, "presented_counter": presented},
+            )
+            await self._notify(uow, user, "passkey_clone_suspected", now)
+            raise PasskeyRejectedError("counter_regression")
+        passkey.sign_count = presented
+        passkey.backed_up = verified.backed_up
+        passkey.last_used_at = now
+        return passkey
 
     async def _complete_login(
         self,
@@ -733,16 +936,23 @@ class AuthService:
         now: datetime,
         *,
         mfa_verified: bool,
-        prior_failures: int = 0,
+        mfa_method: str | None = None,
     ) -> TokenPair:
         org_id, role = await self._resolve_login_org(
             uow, user, requested_org, meta, mfa_verified=mfa_verified
         )
         # Before the success resets the failure counters the assessment looks at.
-        assessment = await self._assess_login(uow, user, meta, now, prior_failures)
+        assessment = await self._assess_login(uow, user, meta, now)
         user.register_successful_login(now)
         await uow.switch_tenant(org_id)
         principal = Principal.for_user(user_id=user.id, org_id=org_id, role=role, session_id=None)
+        details: JSONObject = {
+            "mfa": mfa_verified,
+            "risk": assessment.risk.value,
+            "signals": list(assessment.signals),
+        }
+        if mfa_method is not None:
+            details["mfa_method"] = mfa_method  # totp, recovery_code or webauthn
         await self._audit.record(
             uow.audit,
             action=AuditAction.LOGIN_SUCCEEDED,
@@ -750,11 +960,7 @@ class AuthService:
             meta=meta,
             resource_type="user",
             resource_id=user.id,
-            metadata={
-                "mfa": mfa_verified,
-                "risk": assessment.risk.value,
-                "signals": list(assessment.signals),
-            },
+            metadata=details,
         )
         if assessment.risk is not LoginRisk.FAMILIAR:
             suspicious = assessment.risk is LoginRisk.SUSPICIOUS
@@ -868,7 +1074,6 @@ class AuthService:
         user: User,
         meta: RequestMeta,
         now: datetime,
-        prior_failures: int = 0,
     ) -> LoginAssessment:
         recent = await uow.sessions.list_recent_for_user(user.id, since=now - _FAMILIARITY_WINDOW)
         return assess_login(
@@ -876,7 +1081,7 @@ class AuthService:
             user_agent=meta.user_agent,
             history=[(session.ip, session.user_agent) for session in recent],
             # With MFA, wrong passwords before the challenge plus wrong codes after it.
-            failed_attempts=user.failed_login_attempts + prior_failures,
+            failed_attempts=user.failed_login_attempts,
             lockouts=user.lockout_count,
         )
 
@@ -1320,14 +1525,15 @@ class AuthService:
         now = self._clock.now()
         async with self._uow_factory(TenantScope.of(principal)) as uow:
             user = await uow.users.get_for_update(user_id)
-            if user is None:
+            session = await uow.sessions.get(_session_of(principal))
+            if user is None or session is None:
                 raise NotFoundError()
             if user.password_hash != verified:  # changed since it was confirmed
                 raise _wrong_password()
-            if user.mfa_enabled:
-                raise ConflictError(
-                    "Multi-factor authentication is already enabled.", code="mfa_enabled"
-                )
+            if user.has_totp:
+                raise ConflictError("An authenticator app is set up already.", code="mfa_enabled")
+            if user.mfa_enabled and not session.mfa_verified:  # passkeys already
+                raise verified_session_required()
             secret = self._totp.generate_secret()
             user.mfa_pending_secret_encrypted = self._cipher.encrypt(
                 secret, context=_mfa_context(user.id)
@@ -1344,13 +1550,17 @@ class AuthService:
     async def confirm_mfa_enrollment(
         self, principal: Principal, *, code: str, meta: RequestMeta
     ) -> list[str]:
-        """Activate MFA and return one-time recovery codes (shown exactly once)."""
+        """Activate the authenticator app and return one-time recovery codes
+        (shown exactly once; they replace any earlier ones)."""
         user_id = _require_session(principal)
         now = self._clock.now()
         async with self._uow_factory(TenantScope.of(principal)) as uow:
             user = await uow.users.get_for_update(user_id)
             if user is None or user.mfa_pending_secret_encrypted is None:
                 raise ConflictError("Start MFA enrollment first.", code="mfa_not_started")
+            session = await uow.sessions.get_for_update(_session_of(principal))
+            if user.mfa_enabled and (session is None or not session.mfa_verified):
+                raise verified_session_required()  # passkeys already: as at enrolment
             secret = self._decrypt_mfa_secret(user, user.mfa_pending_secret_encrypted)
             step = self._totp.verify(secret, code, now=now, last_used_step=None)
             if step is None:
@@ -1360,24 +1570,12 @@ class AuthService:
             user.mfa_enabled = True
             user.mfa_last_used_step = step
             user.updated_at = now
-            session = await uow.sessions.get_for_update(_session_of(principal))
             if session is not None and session.user_id == user.id:
                 # The code just proved the second factor: this session counts as
                 # MFA-verified, so an organization that requires MFA opens at once.
                 session.mfa_verified = True
-            codes = [_generate_recovery_code() for _ in range(_RECOVERY_CODE_COUNT)]
-            await uow.recovery_codes.replace_for_user(
-                user.id,
-                [
-                    MfaRecoveryCode(
-                        id=uuid7(),
-                        user_id=user.id,
-                        created_at=now,
-                        code_hash=self._token_hasher.hash(_normalize_recovery_code(c)),
-                    )
-                    for c in codes
-                ],
-            )
+            codes, stored = generate_recovery_codes(self._token_hasher, user.id, now)
+            await uow.recovery_codes.replace_for_user(user.id, stored)
             await self._audit.record(
                 uow.audit,
                 action=AuditAction.MFA_ENABLED,
@@ -1385,6 +1583,7 @@ class AuthService:
                 meta=meta,
                 resource_type="user",
                 resource_id=user.id,
+                metadata={"method": "totp"},
             )
             await self._notify(uow, user, "mfa_enabled", now)
             await uow.commit()
@@ -1393,6 +1592,11 @@ class AuthService:
     async def disable_mfa(
         self, principal: Principal, *, password: str, code: str, meta: RequestMeta
     ) -> None:
+        """Turn two-factor authentication off altogether - the authenticator
+        app, every passkey and the recovery codes - with the password and a
+        TOTP or recovery code, and end every session. It is the only way MFA
+        goes off: removing the last passkey of an account without TOTP is
+        refused instead."""
         user_id = _require_session(principal)
         verified = await self.confirm_password(principal, password, meta, purpose="mfa_disable")
         now = self._clock.now()
@@ -1404,7 +1608,7 @@ class AuthService:
                 )
             if user.password_hash != verified:  # changed since it was confirmed
                 raise _wrong_password()
-            if not await self._check_second_factor(uow, user, code, now, meta):
+            if await self._check_second_factor(uow, user, code, now, meta) is None:
                 # A wrong code counts toward lockout as at sign-in.
                 locked = self._register_failure(user, now)
                 await self._audit.record(
@@ -1422,9 +1626,11 @@ class AuthService:
                 raise InvalidInputError("The verification code is incorrect.", code="invalid_code")
             user.mfa_enabled = False
             user.mfa_secret_encrypted = None
+            user.mfa_pending_secret_encrypted = None
             user.mfa_last_used_step = None
             user.revoke_all_tokens(now)
             await uow.recovery_codes.delete_for_user(user.id)
+            removed = await uow.webauthn_credentials.delete_for_user(user.id)
             await uow.sessions.revoke_all_for_user(user.id, now=now, reason="mfa_disabled")
             await self._audit.record(
                 uow.audit,
@@ -1433,6 +1639,7 @@ class AuthService:
                 meta=meta,
                 resource_type="user",
                 resource_id=user.id,
+                metadata={"webauthn_removed": removed},
             )
             await self._notify(uow, user, "mfa_disabled", now)
             await uow.commit()
@@ -1505,16 +1712,7 @@ class AuthService:
         sign_in: SignInDetails | None = None,
     ) -> None:
         """Queue a security notification e-mail (rendered by the mail worker)."""
-        payload: JSONObject = {"user_id": str(user.id), "template": template}
-        if sign_in is not None:
-            payload["sign_in"] = {
-                "at": sign_in.at.isoformat(),
-                "ip": sign_in.ip,
-                "client": sign_in.client,
-            }
-        await uow.outbox.add(
-            new_message(TaskName.SEND_SECURITY_EMAIL, payload, org_id=None, now=now)
-        )
+        await queue_security_email(uow, user.id, template, now, sign_in=sign_in)
 
 
 def _password_break_glass(role: Role, mfa_verified: bool) -> bool:
@@ -1527,11 +1725,7 @@ def _password_break_glass(role: Role, mfa_verified: bool) -> bool:
 def _require_session(principal: Principal) -> UUID:
     """Sessions are managed from a signed-in session - never with an API key,
     so a leaked key can neither list its creator's devices nor end their sessions."""
-    if principal.session_id is None or principal.user_id is None:
-        raise PermissionDeniedError(
-            "This action requires a signed-in user session.", code="session_required"
-        )
-    return principal.user_id
+    return session_of(principal)[0]
 
 
 def _wrong_password() -> PermissionDeniedError:
@@ -1562,10 +1756,28 @@ def _mfa_context(user_id: UUID) -> str:
     return f"user:{user_id}|mfa-totp"
 
 
-def _generate_recovery_code() -> str:
-    raw = secrets.token_hex(6)  # 48 bits, formatted for humans
-    return f"{raw[:4]}-{raw[4:8]}-{raw[8:]}"
+def _sign_in_key(challenge_id: str) -> str:
+    return f"sign-in:{challenge_id}"
 
 
-def _normalize_recovery_code(code: str) -> str:
-    return code.strip().lower().replace("-", "").replace(" ", "")
+def _sign_in_state(
+    state: JSONObject | None, user_id: UUID, now: datetime
+) -> tuple[bytes, frozenset[str]]:
+    """The WebAuthn challenge issued for this sign-in, and the passkeys it
+    allowed, while it is valid."""
+    if state is None:
+        raise PasskeyRejectedError("challenge_missing")
+    try:
+        bound = state["user_id"] == str(user_id)
+        challenge = b64url_decode(str(state["challenge"]))
+        expires_at = datetime.fromisoformat(str(state["expires_at"]))
+        allowed = state["allowed"]
+        if not isinstance(allowed, list):
+            raise TypeError("allowed passkeys")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise PasskeyRejectedError("challenge_missing") from exc
+    if not bound:
+        raise PasskeyRejectedError("challenge_missing")
+    if now >= expires_at:
+        raise PasskeyRejectedError("challenge_expired")
+    return challenge, frozenset(str(item) for item in allowed)

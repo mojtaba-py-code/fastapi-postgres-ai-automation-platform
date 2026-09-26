@@ -219,7 +219,10 @@ def build_celery(
         "enable_utc": True,
         "beat_schedule": schedule or {},
         "beat_scheduler": "nexusflow.infrastructure.messaging.liveness:HeartbeatScheduler",
-        "worker_enable_remote_control": not sandboxed,
+        # No remote control anywhere: nothing here uses it, it would let a broker
+        # client command workers, and its reply queues are transient and
+        # non-exclusive - declarations RabbitMQ 4.3 refuses by default.
+        "worker_enable_remote_control": False,
         "worker_send_task_events": False,
         "task_send_sent_event": False,
     }

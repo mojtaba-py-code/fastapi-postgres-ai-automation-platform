@@ -128,7 +128,8 @@ class Authenticator:
                     return account
                 raise PermissionDeniedError(
                     "This organization requires multi-factor authentication: set it up "
-                    "(POST /api/v1/auth/mfa/enroll, then /mfa/confirm) or sign in with it.",
+                    "(POST /api/v1/auth/mfa/enroll, then /mfa/confirm - or register a "
+                    "passkey, POST /api/v1/auth/webauthn/register/begin) or sign in with it.",
                     code="mfa_required",
                 )
             _require_allowed_network(

@@ -323,7 +323,7 @@ chain) are your external audit anchors: compare them with `nexusflow audit verif
 | What | Procedure | Impact |
 |---|---|---|
 | **JWT signing key** | 1. Generate a new Ed25519 key and set a new `jwt_key_id`. 2. Add the old public key to `jwt_previous_public_keys` so existing tokens validate until they expire. 3. Redeploy. 4. Remove the old public key after the access-token TTL. | None |
-| **KEK** | 1. Add a new key to `encryption_keys` and set `encryption_active_key_id`. 2. Redeploy. 3. Run `nexusflow keys rewrap` until it reports 0 - it re-wraps integration and webhook secrets, single sign-on client secrets, sealed field values in records, versions and changes, and the keys of stored files; the daily beat job does the same in batches. 4. Remove the old key. MFA secrets are re-encrypted on each user's next MFA sign-in, and staged payloads live only minutes, so keep old KEKs until all users have signed in or MFA was re-enrolled. | None |
+| **KEK** | 1. Add a new key to `encryption_keys` and set `encryption_active_key_id`. 2. Redeploy. 3. Run `nexusflow keys rewrap` until it reports `"ok": true` (it lists what is left per tenant and exits 3 otherwise) - it re-wraps integration and webhook secrets, single sign-on client secrets, sealed field values in records, versions and changes, and the keys of stored files; the daily beat job does the same in batches. 4. Remove the old key. MFA secrets are re-encrypted on each user's next MFA sign-in, and staged payloads live only minutes, so keep old KEKs until all users have signed in or MFA was re-enrolled. | None |
 | **HMAC pepper** | Only after a compromise, see INCIDENT_RESPONSE.md | All API keys, sessions and pending links become invalid |
 | **Service tokens** | `nexusflow service-account rotate --workflow-key <key>`, then update the n8n credential | That workflow fails until updated |
 | **Webhook secrets** | `POST /api/v1/webhook-endpoints/{id}/rotate-secret` (24 h grace) | None |
@@ -331,6 +331,61 @@ chain) are your external audit anchors: compare them with `nexusflow audit verif
 | **Single sign-on client secret** | Create a new secret at the identity provider, then `PUT /api/v1/organizations/current/sso` with it | None (a new issuer or client id ends the provider's sessions) |
 | **SCIM tokens** | Create a new token (`POST /api/v1/organizations/current/scim-tokens`), set it at the identity provider, revoke the old one | None |
 | **Database / Redis / RabbitMQ passwords** | Change the role, ACL or definition, update the secret files (including `redis_sandbox_url` and `redis_sandbox_acl` for the sandbox Redis), restart the dependent services | Brief restart |
+
+### Keys wrapped by Vault (optional)
+
+By default `secrets/encryption_keys` holds the key-encryption keys themselves:
+whoever copies that file, or a backup of it, can decrypt every sealed value. With
+HashiCorp Vault's transit engine the file holds Vault ciphertexts instead. The
+platform unwraps them once at start-up - retrying while Vault is unreachable, then
+refusing to start - and encrypts locally from then on. Access to the keys is then
+granted, audited and revoked in Vault. A running process still holds the keys in
+memory, as with local keys.
+
+1. In Vault, a transit key and an AppRole that may only decrypt with it:
+
+   ```bash
+   vault secrets enable transit
+   ```
+
+   ```bash
+   vault write -f transit/keys/nexusflow type=aes256-gcm96
+   ```
+
+   ```hcl
+   path "transit/decrypt/nexusflow" { capabilities = ["update"] }
+   ```
+
+   The operator's own policy also needs `transit/encrypt/nexusflow` and
+   `transit/rewrap/nexusflow`.
+2. Put the AppRole's secret ID in `secrets/vault_secret_id`, Vault's CA certificate
+   in `secrets/vault_ca.pem`, and `NEXUSFLOW_VAULT_ADDRESS` and
+   `NEXUSFLOW_VAULT_ROLE_ID` in `.env` (the two files mode 0644, like the other
+   secrets: the 0700 directory protects them). The overlay `docker-compose.vault.yml`
+   gives the five services that load the keyring these settings and a route to
+   Vault; restrict that network to the Vault address in the host firewall, as in
+   section 1.
+3. Wrap the existing keyring - the keys stay the same, so no stored data changes -
+   with an operator token passed from the environment for this one run (the
+   keyring is still local at this point):
+
+   ```bash
+   NEXUSFLOW_VAULT__TOKEN="$(cat ~/.vault-token)" docker compose -f docker-compose.yml -f docker-compose.vault.yml run --rm -e NEXUSFLOW_SECURITY__KEK_PROVIDER=local -e NEXUSFLOW_VAULT__TOKEN api-internal nexusflow keys vault-wrap
+   ```
+
+   Write the printed `encryption_keys` object to `secrets/encryption_keys`, keeping
+   the old file offline until the platform has started with the new one.
+4. Start with the overlay:
+
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.vault.yml up -d
+   ```
+
+To rotate the wrapping key, run `vault write -f transit/keys/nexusflow/rotate`,
+then `nexusflow keys vault-rewrap` and write its output to
+`secrets/encryption_keys`; the keys themselves do not change. For a new
+key-encryption key, `nexusflow keys vault-new --key-id kek-2` prints it wrapped:
+add it, make it active and run `nexusflow keys rewrap` as above.
 
 ## 9. Backups and restore
 
@@ -398,6 +453,22 @@ purpose with its variable, digest included, e.g.
 3. `make secrets` - adds any secret the new release needs, touching none that
    exist.
 4. `docker compose pull` or `docker compose build`, then `docker compose up -d`.
+
+A stack that ran RabbitMQ 4.1 (the default before; its community support ended in
+January 2026) cannot move straight to 4.3, which the stack runs now: 4.3 upgrades
+only from 4.2 with every feature flag enabled. Drain the queues (stop the beat and
+let the workers finish), then either remove the `rabbitmq-data` volume - the
+definitions are imported again at start - or go through 4.2 first:
+
+```bash
+docker compose exec rabbitmq rabbitmqctl enable_feature_flag all
+```
+
+```bash
+RABBITMQ_IMAGE=rabbitmq:4.2-alpine docker compose up -d rabbitmq
+```
+
+then enable all feature flags again and start the stack with the new default.
 
 A stack set up before internal TLS existed (its `secrets/redis_app_url` still
 begins with `redis://`) also needs `python scripts/generate_secrets.py --tls-urls`

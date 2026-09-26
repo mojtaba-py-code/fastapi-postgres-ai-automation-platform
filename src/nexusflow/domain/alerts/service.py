@@ -269,7 +269,7 @@ class AlertService:
                 subject = _change_subject(change, sensitive, values_allowed=values_allowed)
                 for rule in rules_cache[change.dataset_id]:
                     created += await self._fire(uow, rule, subject)
-            await uow.data.changes.mark_alerts_evaluated([c.id for c in changes])
+            await uow.data.changes.mark_alerts_evaluated(org_id, [c.id for c in changes])
             more = len(changes) == _EVALUATION_BATCH
             if more and hand_on:
                 await uow.outbox.add(

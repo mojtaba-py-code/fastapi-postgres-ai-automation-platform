@@ -33,9 +33,6 @@ _ACCESS = "access"
 _MFA = "mfa_challenge"
 
 
-_MAX_PRIOR_FAILURES = 1000
-
-
 def _invalid(code: str = "invalid_token") -> AuthenticationError:
     return AuthenticationError("The access token is invalid or expired.", code=code)
 
@@ -140,19 +137,11 @@ class JwtTokenCodec:
     # -------------------------------------------------------------------- mfa
 
     def issue_mfa_challenge(
-        self,
-        *,
-        user_id: UUID,
-        org_id: UUID | None,
-        now: datetime,
-        prior_failures: int = 0,
-        sso: bool = False,
+        self, *, user_id: UUID, org_id: UUID | None, now: datetime, sso: bool = False
     ) -> IssuedToken:
         claims: dict[str, Any] = {"sub": str(user_id)}
         if org_id is not None:
             claims["org"] = str(org_id)
-        if prior_failures > 0:
-            claims["pf"] = min(prior_failures, _MAX_PRIOR_FAILURES)
         if sso:
             if org_id is None:
                 raise ValueError("a single sign-on challenge names its organization")
@@ -162,9 +151,6 @@ class JwtTokenCodec:
     def decode_mfa_challenge(self, token: str, *, now: datetime) -> MfaChallengeClaims:
         payload = self._decode(token, token_use=_MFA, now=now)
         org_raw = payload.get("org")
-        prior = payload.get("pf", 0)
-        if not isinstance(prior, int) or isinstance(prior, bool) or not 0 <= prior <= 1000:
-            raise _invalid()
         sso = payload.get("sso", False)
         if not isinstance(sso, bool) or (sso and org_raw is None):
             raise _invalid()
@@ -173,7 +159,6 @@ class JwtTokenCodec:
             org_id=_uuid_claim(payload, "org") if org_raw is not None else None,
             challenge_id=str(payload["jti"]),
             expires_at=datetime.fromtimestamp(payload["exp"], tz=now.tzinfo),
-            prior_failures=prior,
             sso=sso,
         )
 

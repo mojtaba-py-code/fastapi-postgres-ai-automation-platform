@@ -72,8 +72,32 @@ _TEMPLATES: dict[str, tuple[str, str]] = {
     "mfa_disabled": (
         "Two-factor authentication disabled",
         (
-            "Two-factor authentication was turned off and all sessions were signed out. If "
-            "this was not you, reset your password now."
+            "Two-factor authentication was turned off - your authenticator app, passkeys and "
+            "recovery codes were removed - and all sessions were signed out. If this was not "
+            "you, reset your password now."
+        ),
+    ),
+    "passkey_added": (
+        "A passkey was added to your NexusFlow account",
+        (
+            "A new passkey was registered for signing in to your account. If this was not you, "
+            "reset your password now, sign out of all sessions and remove the passkey."
+        ),
+    ),
+    "passkey_removed": (
+        "A passkey was removed from your NexusFlow account",
+        (
+            "A passkey was removed from your account. If this was not you, reset your password "
+            "now and review your passkeys and sessions."
+        ),
+    ),
+    "passkey_clone_suspected": (
+        "A passkey sign-in was refused",
+        (
+            "A sign-in with one of your passkeys was refused: the passkey reported a use count "
+            "that was not higher than one seen before, which can mean it was copied. If you did "
+            "not just try to sign in, reset your password, remove that passkey and register a "
+            "new one."
         ),
     ),
     "signup_existing_account": (

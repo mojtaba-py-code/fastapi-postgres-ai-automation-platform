@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Form, Response, status
 
@@ -20,7 +21,10 @@ from nexusflow.apps.api.dependencies import (
 from nexusflow.apps.api.schemas.common import ERROR_RESPONSES
 from nexusflow.apps.api.schemas.identity import (
     AcceptInvitationRequest,
+    AuthenticatorSelection,
     CompleteRegistrationRequest,
+    CredentialDescriptorJson,
+    CredentialParameters,
     InvitedRegistrationRequest,
     LoginRequest,
     MfaChallengeResponse,
@@ -28,7 +32,18 @@ from nexusflow.apps.api.schemas.identity import (
     MfaDisableRequest,
     MfaEnrollResponse,
     MfaRecoveryCodesResponse,
+    MfaTokenRequest,
     MfaVerifyRequest,
+    PasskeyCreationOptions,
+    PasskeyCreationOptionsResponse,
+    PasskeyRegisteredResponse,
+    PasskeyRegistrationRequest,
+    PasskeyRenameRequest,
+    PasskeyRequestOptions,
+    PasskeyRequestOptionsResponse,
+    PasskeyResponse,
+    PasskeySignInRequest,
+    PasskeyUserEntity,
     PasswordChangeRequest,
     PasswordConfirmation,
     PasswordResetConfirmRequest,
@@ -36,13 +51,23 @@ from nexusflow.apps.api.schemas.identity import (
     RefreshRequest,
     RegisterRequest,
     RegistrationStartedResponse,
+    RelyingPartyEntity,
     SwitchOrganizationRequest,
     TokenResponse,
 )
 from nexusflow.apps.api.schemas.sso import SsoCallbackRequest, SsoStartRequest, SsoStartResponse
 from nexusflow.core.errors import AuthenticationError, InvalidInputError, NexusFlowError
+from nexusflow.domain.authorization.principal import Principal
 from nexusflow.domain.identity.auth_service import LoginResult, TokenPair, normalize_email
 from nexusflow.domain.identity.login_risk import LoginRisk
+from nexusflow.domain.identity.model import WebAuthnCredential
+from nexusflow.domain.identity.webauthn import (
+    ALGORITHM_NAMES,
+    AssertionResponse,
+    AttestationResponse,
+    CredentialDescriptor,
+    b64url,
+)
 from nexusflow.infrastructure.observability import metrics
 
 router = APIRouter(prefix="/auth", tags=["auth"], responses=ERROR_RESPONSES)
@@ -69,8 +94,12 @@ def _login_response(result: LoginResult) -> TokenResponse | MfaChallengeResponse
         return _tokens(result.tokens)
     if result.mfa_challenge is None or result.mfa_challenge_expires_in is None:
         raise AuthenticationError()
-    return MfaChallengeResponse(
-        mfa_token=result.mfa_challenge, expires_in=result.mfa_challenge_expires_in
+    return MfaChallengeResponse.model_validate(
+        {
+            "mfa_token": result.mfa_challenge,
+            "expires_in": result.mfa_challenge_expires_in,
+            "methods": list(result.mfa_methods),
+        }
     )
 
 
@@ -342,6 +371,197 @@ async def disable_mfa(
 ) -> Response:
     await container.auth.disable_mfa(principal, password=body.password, code=body.code, meta=meta)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ------------------------------------------------------------------ passkeys
+
+
+async def _limit_passkeys(state: StateDep, principal: Principal) -> None:
+    """Per person, whichever session or address the requests come from."""
+    rule = state.container.settings.rate_limits.rules["auth.webauthn.manage"]
+    await state.limiter.enforce("auth.webauthn.manage", budget_identity(principal), rule)
+
+
+def _descriptors(items: tuple[CredentialDescriptor, ...]) -> list[CredentialDescriptorJson]:
+    return [CredentialDescriptorJson(id=b64url(d.id), transports=list(d.transports)) for d in items]
+
+
+def _passkey(passkey: WebAuthnCredential) -> PasskeyResponse:
+    return PasskeyResponse(
+        id=passkey.id,
+        name=passkey.name,
+        algorithm=ALGORITHM_NAMES.get(passkey.algorithm, str(passkey.algorithm)),
+        transports=list(passkey.transports),
+        backup_eligible=passkey.backup_eligible,
+        backed_up=passkey.backed_up,
+        created_at=passkey.created_at,
+        last_used_at=passkey.last_used_at,
+    )
+
+
+@router.post(
+    "/webauthn/register/begin",
+    response_model=PasskeyCreationOptionsResponse,
+    summary="Start registering a passkey (password confirmation; options for the browser)",
+)
+async def begin_passkey_registration(
+    body: PasswordConfirmation,
+    principal: MfaSetupPrincipal,
+    container: ContainerDep,
+    state: StateDep,
+    meta: Meta,
+) -> PasskeyCreationOptionsResponse:
+    await _limit_passkeys(state, principal)
+    options = await container.passkeys.begin_registration(
+        principal, password=body.password, meta=meta
+    )
+    return PasskeyCreationOptionsResponse(
+        options=PasskeyCreationOptions(
+            rp=RelyingPartyEntity(id=options.rp.id, name=options.rp.name),
+            user=PasskeyUserEntity(
+                id=b64url(options.user_handle),
+                name=options.user_name,
+                display_name=options.user_display_name,
+            ),
+            challenge=b64url(options.challenge),
+            pub_key_cred_params=[CredentialParameters(alg=alg) for alg in options.algorithms],
+            timeout=options.timeout_ms,
+            exclude_credentials=_descriptors(options.exclude),
+            authenticator_selection=AuthenticatorSelection(),
+        ),
+        expires_in=options.timeout_ms // 1000,
+    )
+
+
+@router.post(
+    "/webauthn/register/finish",
+    response_model=PasskeyRegisteredResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Finish registering a passkey with the browser's attestation",
+)
+async def finish_passkey_registration(
+    body: PasskeyRegistrationRequest,
+    principal: MfaSetupPrincipal,
+    container: ContainerDep,
+    state: StateDep,
+    meta: Meta,
+) -> PasskeyRegisteredResponse:
+    await _limit_passkeys(state, principal)
+    credential = body.credential
+    registered = await container.passkeys.finish_registration(
+        principal,
+        response=AttestationResponse(
+            raw_id=credential.raw_id,
+            client_data_json=credential.response.client_data_json,
+            attestation_object=credential.response.attestation_object,
+        ),
+        transports=tuple(credential.response.transports),
+        name=body.name,
+        meta=meta,
+    )
+    metrics.AUTH_EVENTS.labels(event="passkey_registered", result="success").inc()
+    return PasskeyRegisteredResponse(
+        passkey=_passkey(registered.passkey), recovery_codes=registered.recovery_codes or None
+    )
+
+
+@router.get(
+    "/webauthn/credentials",
+    response_model=list[PasskeyResponse],
+    summary="My passkeys (no key material)",
+)
+async def list_passkeys(
+    principal: MfaSetupPrincipal, container: ContainerDep, state: StateDep
+) -> list[PasskeyResponse]:
+    await _limit_passkeys(state, principal)
+    return [_passkey(passkey) for passkey in await container.passkeys.list_passkeys(principal)]
+
+
+@router.patch(
+    "/webauthn/credentials/{passkey_id}",
+    response_model=PasskeyResponse,
+    summary="Rename one of my passkeys",
+)
+async def rename_passkey(
+    passkey_id: UUID,
+    body: PasskeyRenameRequest,
+    principal: MfaSetupPrincipal,
+    container: ContainerDep,
+    state: StateDep,
+    meta: Meta,
+) -> PasskeyResponse:
+    await _limit_passkeys(state, principal)
+    passkey = await container.passkeys.rename(principal, passkey_id, name=body.name, meta=meta)
+    return _passkey(passkey)
+
+
+@router.post(
+    "/webauthn/credentials/{passkey_id}/delete",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Remove one of my passkeys (password confirmation; never the last factor)",
+)
+async def remove_passkey(
+    passkey_id: UUID,
+    body: PasswordConfirmation,
+    principal: MfaSetupPrincipal,
+    container: ContainerDep,
+    state: StateDep,
+    meta: Meta,
+) -> Response:
+    await _limit_passkeys(state, principal)
+    await container.passkeys.remove(principal, passkey_id, password=body.password, meta=meta)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/mfa/webauthn/begin",
+    response_model=PasskeyRequestOptionsResponse,
+    dependencies=[Depends(rate_limited("auth.webauthn.sign_in"))],
+    summary="Second factor with a passkey: options for the browser (after the password step)",
+)
+async def begin_passkey_sign_in(
+    body: MfaTokenRequest, container: ContainerDep, meta: Meta
+) -> PasskeyRequestOptionsResponse:
+    options = await container.auth.begin_passkey_sign_in(challenge_token=body.mfa_token, meta=meta)
+    return PasskeyRequestOptionsResponse(
+        options=PasskeyRequestOptions(
+            challenge=b64url(options.challenge),
+            timeout=options.timeout_ms,
+            rp_id=options.rp_id,
+            allow_credentials=_descriptors(options.allow),
+        ),
+        expires_in=options.timeout_ms // 1000,
+    )
+
+
+@router.post(
+    "/mfa/webauthn/verify",
+    response_model=TokenResponse,
+    dependencies=[Depends(rate_limited("auth.webauthn.sign_in"))],
+    summary="Second factor with a passkey: the browser's assertion completes the sign-in",
+)
+async def verify_passkey_sign_in(
+    body: PasskeySignInRequest, container: ContainerDep, meta: Meta
+) -> TokenResponse:
+    credential = body.credential
+    try:
+        pair = await container.auth.verify_passkey_sign_in(
+            challenge_token=body.mfa_token,
+            response=AssertionResponse(
+                raw_id=credential.raw_id,
+                client_data_json=credential.response.client_data_json,
+                authenticator_data=credential.response.authenticator_data,
+                signature=credential.response.signature,
+                user_handle=credential.response.user_handle,
+            ),
+            meta=meta,
+        )
+    except AuthenticationError:
+        metrics.AUTH_EVENTS.labels(event="passkey_sign_in", result="failure").inc()
+        raise
+    metrics.AUTH_EVENTS.labels(event="passkey_sign_in", result="success").inc()
+    _count_risk(pair)
+    return _tokens(pair)
 
 
 @router.post("/invitations/accept", status_code=status.HTTP_204_NO_CONTENT)

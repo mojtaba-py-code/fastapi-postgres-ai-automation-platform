@@ -30,10 +30,15 @@ from nexusflow.bootstrap.container import build_container
 from nexusflow.bootstrap.messaging import attach_outbox_publisher
 from nexusflow.core.config import Settings
 from nexusflow.infrastructure.messaging.celery_app import beat_schedule, build_celery
+from nexusflow.infrastructure.security.vault import unwrap_keyring
 
 
 def create_worker_app(settings: Settings) -> tuple[Celery, ProcessRuntime[WorkerDeps]]:
     internal = settings.n8n.orchestration == "internal" or settings.n8n.webhook_jwt_secret is None
+    sec = settings.security
+    if sec.kek_provider == "vault-transit" and sec.encryption_keys is not None:
+        # In the parent, before the pool forks: the children inherit the keys.
+        unwrap_keyring(settings.vault, sec.encryption_keys.get_secret_value())
     app = build_celery(settings.broker, schedule=beat_schedule(internal_orchestration=internal))
 
     def build() -> WorkerDeps:

@@ -10,7 +10,8 @@ your roles, lawful bases and contracts are yours to decide and document.
 * Each **organization** (tenant) decides what business data it collects and why: it
   is the controller of that data. The **operator** of the deployment processes it on
   the organization's behalf, so an agreement under article 28 (a data processing
-  agreement) belongs between them.
+  agreement) belongs between them; [DPA_TEMPLATE.md](DPA_TEMPLATE.md) lists its
+  required terms with what NexusFlow provides for each.
 * **Account data** - the people who sign in, their sessions and their activity - is
   processed to run and secure the service. Whether the operator is its controller,
   or processes it for the organizations, depends on your arrangement; say so in your
@@ -21,6 +22,7 @@ your roles, lawful bases and contracts are yours to decide and document.
 | Data | Where | Why | Kept |
 |---|---|---|---|
 | Account: e-mail address, name, password hash (Argon2id), MFA secret (encrypted), status and timestamps | `users` | Signing in, security notices | Until the account is erased; erasure anonymises the row |
+| Passkeys: public key, credential ID, a random user handle, the name the person gave it, transports, backup flags, signature counter, times | `webauthn_credentials` | Second factor at sign-in | Until the person removes it, turns MFA off or the account is erased |
 | Sign-in sessions: IP address, browser string, times | `user_sessions` | Session management, revocation, sign-in risk | 90 days after the session expired (`retention.sessions_days`), then deleted |
 | Refresh, password-reset and sign-up tokens (keyed hashes only; reset and sign-up requests keep the requesting IP and the address) | `refresh_tokens`, `password_reset_tokens`, `signup_requests` | Sessions, account recovery, proof of address | A week after they expire, then deleted |
 | Invitations: the invited address and role | `invitations` | Joining an organization | While the organization exists (see section 7) |
@@ -43,9 +45,9 @@ opted in to external AI.
 
 | Right | How |
 |---|---|
-| Access and portability (art. 15, 20) | Self-service: `GET /api/v1/users/me/export` returns a JSON copy - profile, organizations, sessions, identity-provider links, directory (SCIM) entries, API keys, and the account's own actions in its organizations' audit trails. It needs a password sign-in: a single sign-on session reaches its organization only, so an account created by an identity provider sets a password first (reset link) or asks the operator. On a request received otherwise: `nexusflow user export --email <address>`, which also lists the account's entries in the platform's own audit chain. Both exports are audited. |
+| Access and portability (art. 15, 20) | Self-service: `GET /api/v1/users/me/export` returns a JSON copy - profile, organizations, sessions, passkeys (names, times, transports; no keys), identity-provider links, directory (SCIM) entries, API keys, and the account's own actions in its organizations' audit trails. It needs a password sign-in: a single sign-on session reaches its organization only, so an account created by an identity provider sets a password first (reset link) or asks the operator. On a request received otherwise: `nexusflow user export --email <address>`, which also lists the account's entries in the platform's own audit chain. Both exports are audited. |
 | Rectification (art. 16) | People change their name themselves (`PATCH /api/v1/users/me`). There is no self-service change of the e-mail address yet: the person can sign up with the new address and be invited again. |
-| Erasure (art. 17) | Self-service: `POST /api/v1/users/me/delete` (password required). On a request received otherwise: `nexusflow user erase --email <address> --reason <ticket>`. Either way the person leaves every organization, their API keys are revoked, their sessions end, their recovery codes, identity-provider links and directory (SCIM) entries are deleted and the account is anonymised (an organization's identity provider may provision the address again: that is the organization's decision as controller of its directory); the sessions themselves go with the identity retention (section 2). Refused while the person is the sole owner of an organization: ownership moves first, or the organization is deleted. Audit entries keep the now anonymous account ID. |
+| Erasure (art. 17) | Self-service: `POST /api/v1/users/me/delete` (password required). On a request received otherwise: `nexusflow user erase --email <address> --reason <ticket>`. Either way the person leaves every organization, their API keys are revoked, their sessions end, their recovery codes, passkeys, identity-provider links and directory (SCIM) entries are deleted and the account is anonymised (an organization's identity provider may provision the address again: that is the organization's decision as controller of its directory); the sessions themselves go with the identity retention (section 2). Refused while the person is the sole owner of an organization: ownership moves first, or the organization is deleted. Audit entries keep the now anonymous account ID. |
 | Business data about a person | Answered by the organization, which controls it (dataset exports, deletion of sources, datasets or the organization). |
 
 Record every request and its outcome in your own case log; the audit trail shows
@@ -113,7 +115,7 @@ A starting point, to complete with your own details:
 | Controller / processor | *You, or the organization* | The organization (controller); you (processor) |
 | Purposes | Authentication, access control, security monitoring | *The organization's own* |
 | Categories of people | Users of the platform | *Whoever the collected data is about* |
-| Categories of data | Section 2, rows 1-9 | *Per dataset* |
+| Categories of data | Section 2, rows 1-10 | *Per dataset* |
 | Recipients | Section 5 | Section 5, plus the organization's own integrations |
 | Transfers outside the UK/EEA | *If your hosting or relay is* | Anthropic, only with the opt-in (section 5) |
 | Retention | Section 4 | Per dataset (`retention_days`) |

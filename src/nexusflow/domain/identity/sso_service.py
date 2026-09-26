@@ -657,9 +657,11 @@ class SsoService:
                             ),
                             user_id=user.id,
                         )
-                    # The platform's own second factor, then a bound session.
+                    # The platform's own second factor (TOTP, a passkey or a
+                    # recovery code), then a bound session.
+                    challenge = await self._auth.sso_mfa_challenge(uow, user, org_id, now)
                     await uow.commit()
-                    return self._auth.sso_mfa_challenge(user, org_id, now)
+                    return challenge
                 tokens = await self._auth.complete_sso_sign_in(
                     uow,
                     user=user,

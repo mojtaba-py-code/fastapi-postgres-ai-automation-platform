@@ -165,6 +165,14 @@ jobs:
           sed 's/^NEXUSFLOW_DOMAIN=.*/NEXUSFLOW_DOMAIN=localhost/' .env.example > .env
       - name: Compose file is valid
         run: $COMPOSE config --quiet
+      - name: The Vault overlay is valid
+        env:
+          NEXUSFLOW_VAULT_ADDRESS: https://vault.example.com:8200
+          NEXUSFLOW_VAULT_ROLE_ID: ci
+        run: |
+          touch secrets/vault_secret_id secrets/vault_ca.pem
+          $COMPOSE -f docker-compose.vault.yml config --quiet
+          rm secrets/vault_secret_id secrets/vault_ca.pem
       - name: Edge configuration is valid (nginx -t)
         run: $COMPOSE run --rm --no-deps --entrypoint nginx nginx -t
       - name: Start the stack

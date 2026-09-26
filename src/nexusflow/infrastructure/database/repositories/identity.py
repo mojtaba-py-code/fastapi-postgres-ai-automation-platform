@@ -32,6 +32,7 @@ from nexusflow.domain.identity.model import (
     SignupRequest,
     User,
     UserSession,
+    WebAuthnCredential,
 )
 from nexusflow.domain.identity.sso import SsoConnection, SsoIdentity, SsoLoginState
 from nexusflow.domain.organizations.model import (
@@ -278,6 +279,74 @@ class SqlRecoveryCodeRepository:
             .where(t.mfa_recovery_codes.c.user_id == user_id)
             .execution_options(synchronize_session=False)
         )
+
+
+class SqlWebAuthnCredentialRepository:
+    """Passkeys. Every lookup names the account; the unique credential ID is
+    enforced by the database, across accounts, whatever RLS lets one see."""
+
+    _LIST_LIMIT = 100  # far above the per-account maximum; a bound all the same
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._s = session
+
+    async def add(self, credential: WebAuthnCredential) -> None:
+        self._s.add(credential)
+        try:
+            await self._s.flush()
+        except IntegrityError as exc:  # the credential ID, registered already
+            raise ConflictError(
+                "This passkey is registered already.",
+                code="passkey_exists",
+                internal_detail=str(exc.orig)[:300],
+            ) from exc
+
+    async def list_for_user(self, user_id: UUID) -> list[WebAuthnCredential]:
+        c = t.webauthn_credentials
+        statement = (
+            select(WebAuthnCredential)
+            .where(c.c.user_id == user_id)
+            .order_by(c.c.created_at, c.c.id)
+            .limit(self._LIST_LIMIT)
+        )
+        return list((await self._s.execute(statement)).scalars().all())
+
+    async def count_for_user(self, user_id: UUID) -> int:
+        c = t.webauthn_credentials
+        statement = select(func.count()).select_from(c).where(c.c.user_id == user_id)
+        return int((await self._s.execute(statement)).scalar_one())
+
+    async def get(
+        self, user_id: UUID, passkey_id: UUID, *, for_update: bool = False
+    ) -> WebAuthnCredential | None:
+        c = t.webauthn_credentials
+        statement = select(WebAuthnCredential).where(c.c.user_id == user_id, c.c.id == passkey_id)
+        if for_update:
+            statement = statement.with_for_update().execution_options(populate_existing=True)
+        return (await self._s.execute(statement)).scalar_one_or_none()
+
+    async def find(
+        self, user_id: UUID, credential_id: bytes, *, for_update: bool = False
+    ) -> WebAuthnCredential | None:
+        c = t.webauthn_credentials
+        statement = select(WebAuthnCredential).where(
+            c.c.user_id == user_id, c.c.credential_id == credential_id
+        )
+        if for_update:
+            statement = statement.with_for_update().execution_options(populate_existing=True)
+        return (await self._s.execute(statement)).scalar_one_or_none()
+
+    async def delete(self, credential: WebAuthnCredential) -> None:
+        await self._s.delete(credential)
+        await self._s.flush()
+
+    async def delete_for_user(self, user_id: UUID) -> int:
+        result = await self._s.execute(
+            delete(t.webauthn_credentials)
+            .where(t.webauthn_credentials.c.user_id == user_id)
+            .execution_options(synchronize_session=False)
+        )
+        return int(getattr(result, "rowcount", 0) or 0)
 
 
 class SqlApiKeyRepository:

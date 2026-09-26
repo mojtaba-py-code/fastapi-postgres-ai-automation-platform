@@ -31,6 +31,7 @@ if TYPE_CHECKING:
         SsoIdentityRepository,
         SsoLoginStateRepository,
         UserRepository,
+        WebAuthnCredentialRepository,
     )
     from nexusflow.domain.organizations.ports import (
         InvitationRepository,
@@ -82,6 +83,9 @@ class UnitOfWork(Protocol):
 
     @property
     def recovery_codes(self) -> RecoveryCodeRepository: ...
+
+    @property
+    def webauthn_credentials(self) -> WebAuthnCredentialRepository: ...
 
     @property
     def api_keys(self) -> ApiKeyRepository: ...
