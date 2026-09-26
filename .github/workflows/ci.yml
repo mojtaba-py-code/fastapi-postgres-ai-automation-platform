@@ -43,6 +43,10 @@ jobs:
         run: uv run python scripts/gen_config_reference.py --check
       - name: Every container image is pinned to a digest
         run: uv run python scripts/pin_images.py --check
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with: {node-version: "24"}
+      - name: Web console - unit tests (Node's own test runner, no dependencies)
+        run: node --test tests/web/*.test.mjs
 
   security:
     name: Security scanning
@@ -207,6 +211,28 @@ jobs:
           NEXUSFLOW_E2E_CA_BUNDLE: deploy/certs/dev-ca.pem
           NEXUSFLOW_E2E_MAILPIT_URL: http://127.0.0.1:8025
         run: uv run pytest tests/e2e -m e2e
+      - name: Web console in a real browser (Chromium, Playwright)
+        env:
+          # The base image of the browser service (docker/Dockerfile.browser), already built here.
+          PLAYWRIGHT_IMAGE: mcr.microsoft.com/playwright/python:v1.63.0-noble@sha256:72bd171a9ffc2b4b59532aaa6210e21014d07093120dc25528870c0b840da1f0
+          SHOTS_DIR: ${{ runner.temp }}/console
+        run: |
+          mkdir -p "$SHOTS_DIR" && chmod 777 "$SHOTS_DIR"
+          docker run --rm --network host --ipc=host \
+            -v "$PWD:/work:ro" -v "$SHOTS_DIR:/shots:rw" -w /work \
+            -e PYTHONDONTWRITEBYTECODE=1 \
+            -e NEXUSFLOW_E2E_BASE_URL=https://localhost \
+            -e NEXUSFLOW_E2E_MAILPIT_URL=http://127.0.0.1:8025 \
+            -e NEXUSFLOW_E2E_CA_BUNDLE=/work/deploy/certs/dev-ca.pem \
+            -e CONSOLE_SCREENSHOTS=/shots \
+            "$PLAYWRIGHT_IMAGE" python3 tests/e2e/console_smoke.py
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: console-screenshots
+          path: ${{ runner.temp }}/console/*.png
+          retention-days: 14
+          if-no-files-found: ignore
       - name: Back up, change the data, restore, verify
         env:
           BACKUP_AGE_IDENTITY: ${{ runner.temp }}/backup-age.key
