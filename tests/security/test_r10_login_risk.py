@@ -74,7 +74,7 @@ class TestControlNonMfa:
 
 
 class TestMfaPath:
-    # Fixed: the signed MFA challenge carries the wrong passwords that preceded it.
+    # Fixed: the failure counter keeps running across the password step (R13-6).
     async def test_success_from_a_new_network_after_failures_is_suspicious(
         self, container: Container
     ) -> None:

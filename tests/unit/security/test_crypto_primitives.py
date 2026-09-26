@@ -163,29 +163,6 @@ class TestJwt:
         with pytest.raises(AuthenticationError):
             codec.decode_access_token(challenge.token, now=clock.now())
 
-    def test_an_mfa_challenge_carries_the_failures_before_it(
-        self, codec: JwtTokenCodec, clock: FrozenClock
-    ) -> None:
-        fresh = codec.issue_mfa_challenge(user_id=uuid4(), org_id=None, now=clock.now())
-        assert codec.decode_mfa_challenge(fresh.token, now=clock.now()).prior_failures == 0
-        after = codec.issue_mfa_challenge(
-            user_id=uuid4(), org_id=None, now=clock.now(), prior_failures=4
-        )
-        assert codec.decode_mfa_challenge(after.token, now=clock.now()).prior_failures == 4
-
-    def test_a_client_cannot_change_the_failures_in_a_challenge(
-        self, codec: JwtTokenCodec, clock: FrozenClock
-    ) -> None:
-        issued = codec.issue_mfa_challenge(
-            user_id=uuid4(), org_id=None, now=clock.now(), prior_failures=4
-        ).token
-        header, payload, signature = issued.split(".")
-        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
-        claims["pf"] = 0  # hide the failures, to look like a familiar sign-in
-        forged_payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=").decode()
-        with pytest.raises(AuthenticationError):
-            codec.decode_mfa_challenge(f"{header}.{forged_payload}.{signature}", now=clock.now())
-
     def test_token_signed_by_unknown_key_rejected(
         self, codec: JwtTokenCodec, clock: FrozenClock
     ) -> None:

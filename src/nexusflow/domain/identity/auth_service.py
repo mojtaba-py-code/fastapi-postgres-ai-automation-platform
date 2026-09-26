@@ -526,13 +526,11 @@ class AuthService:
             if upgraded_hash is not None:
                 user.password_hash = upgraded_hash
             if user.mfa_enabled:
-                # The counter restarts for the second factor; the failures so far
-                # travel in the (signed) challenge to the risk assessment.
-                prior_failures = user.failed_login_attempts
-                user.failed_login_attempts = 0
-                challenge = self._codec.issue_mfa_challenge(
-                    user_id=user.id, org_id=org_id, now=now, prior_failures=prior_failures
-                )
+                # The failure counter keeps running until a sign-in completes:
+                # wrong passwords and wrong second factors add up to one lockout.
+                # (Restarting it here let whoever knew the password guess four
+                # codes per password step, for ever - review R13-6.)
+                challenge = self._codec.issue_mfa_challenge(user_id=user.id, org_id=org_id, now=now)
                 methods = await self._mfa_methods(uow, user)
                 await uow.commit()
                 return LoginResult(
@@ -562,7 +560,6 @@ class AuthService:
                 meta,
                 now,
                 mfa_verified=True,
-                prior_failures=claims.prior_failures,
                 mfa_method=method,
             )
             await uow.commit()
@@ -718,7 +715,6 @@ class AuthService:
                 meta,
                 now,
                 mfa_verified=True,
-                prior_failures=claims.prior_failures,
                 mfa_method="webauthn",
             )
             await uow.commit()
@@ -787,12 +783,11 @@ class AuthService:
         now: datetime,
         *,
         mfa_verified: bool,
-        prior_failures: int = 0,
         mfa_method: str | None = None,
     ) -> TokenPair:
         org_id, role = await self._resolve_login_org(uow, user, requested_org, meta)
         # Before the success resets the failure counters the assessment looks at.
-        assessment = await self._assess_login(uow, user, meta, now, prior_failures)
+        assessment = await self._assess_login(uow, user, meta, now)
         user.register_successful_login(now)
         await uow.switch_tenant(org_id)
         principal = Principal.for_user(user_id=user.id, org_id=org_id, role=role, session_id=None)
@@ -893,7 +888,6 @@ class AuthService:
         user: User,
         meta: RequestMeta,
         now: datetime,
-        prior_failures: int = 0,
     ) -> LoginAssessment:
         recent = await uow.sessions.list_recent_for_user(user.id, since=now - _FAMILIARITY_WINDOW)
         return assess_login(
@@ -901,7 +895,7 @@ class AuthService:
             user_agent=meta.user_agent,
             history=[(session.ip, session.user_agent) for session in recent],
             # With MFA, wrong passwords before the challenge plus wrong codes after it.
-            failed_attempts=user.failed_login_attempts + prior_failures,
+            failed_attempts=user.failed_login_attempts,
             lockouts=user.lockout_count,
         )
 
