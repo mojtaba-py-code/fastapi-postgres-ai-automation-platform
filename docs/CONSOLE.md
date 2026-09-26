@@ -26,7 +26,9 @@ identity provider's redirect). Before the console, those links led nowhere.
   as before ([deploy/nginx/nginx.conf](../deploy/nginx/nginx.conf),
   [snippets/console.conf](../deploy/nginx/snippets/console.conf)). Files are
   revalidated on every load (`Cache-Control: no-cache`, `ETag`), so an update
-  reaches browsers at once.
+  reaches browsers at once. They have a request budget of their own at the edge
+  (`zone=console`): a first load fetches every module at once, which must not
+  spend the API's.
 * **Pages in the URL fragment** (`/#/datasets/…`): one document serves them all.
 
 ## 2. Security model
@@ -89,7 +91,8 @@ uv run python scripts/dev_console.py
 
 It starts an embedded PostgreSQL, migrates it with the production roles, runs
 the worker tasks in-process, seeds a month of a competitor-pricing demo
-(`--empty` for none), and serves the console with the edge's headers at
+(`--empty` for none), and serves the console with the edge's headers (not its
+request limits: there is no nginx) at
 <http://localhost:8765/>. It prints the demo owner's credentials and a sign-up
 link. E-mails are kept in a local mailbox instead of sent: the links of sign-up,
 password-reset and invitation e-mails are printed as they go out, and

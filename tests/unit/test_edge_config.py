@@ -15,7 +15,8 @@ from pathlib import Path
 
 import pytest
 
-NGINX = Path(__file__).resolve().parents[2] / "deploy" / "nginx"
+ROOT = Path(__file__).resolve().parents[2]
+NGINX = ROOT / "deploy" / "nginx"
 
 # Directives nginx accepts more than once in one block (the rest take one value).
 _REPEATABLE = {
@@ -134,6 +135,22 @@ def test_responses_the_edge_generates_get_the_security_headers_once(config: Bloc
         if _serves_console(location):
             continue  # sets its own, complete set (next test)
         assert all(d[0] != "add_header" for d in location.directives), location.name
+
+
+def test_the_consoles_files_have_a_request_budget_of_their_own(config: Block) -> None:
+    """A first load fetches every file of the console at once (there is no
+    bundler). On the API's budget - 40 at once per address - that left the
+    overview's first API requests a 429 (CI's browser test, 2026-09-27)."""
+    api = _api_server(config)
+    files = sum(1 for path in (ROOT / "web" / "assets").rglob("*") if path.is_file())
+    [http] = [block for block in _blocks(config) if block.name == "http"]
+    zones = [d[2] for d in http.directives if d[0] == "limit_req_zone"]
+    assert "zone=console:10m" in zones
+    for location in (loc for loc in api.children if _serves_console(loc)):
+        [limit] = [d for d in location.directives if d[0] == "limit_req"]
+        assert limit[1] == "zone=console", location.name
+        burst = int(next(part for part in limit if part.startswith("burst=")).split("=", 1)[1])
+        assert burst >= 2 * (files + 1), (location.name, burst, files)  # room to grow
 
 
 def test_the_console_is_static_and_sets_every_security_header_itself(config: Block) -> None:
