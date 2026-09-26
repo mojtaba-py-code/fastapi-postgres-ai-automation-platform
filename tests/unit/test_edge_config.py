@@ -76,6 +76,13 @@ def _api_server(config: Block) -> Block:
     return api
 
 
+CONSOLE_ROOT = ["root", "/usr/share/nginx/console"]
+
+
+def _serves_console(location: Block) -> bool:
+    return CONSOLE_ROOT in location.directives
+
+
 @pytest.fixture(scope="module")
 def config() -> Block:
     return _parse(NGINX / "nginx.conf")
@@ -94,8 +101,8 @@ def test_every_api_location_proxies_through_the_shared_snippet(config: Block) ->
     api = _api_server(config)
     for location in api.children:
         directives = {d[0]: d[1:] for d in location.directives}
-        if "return" in directives:
-            continue  # the paths the edge never exposes
+        if "return" in directives or _serves_console(location):
+            continue  # the paths the edge never exposes; the web console's files
         assert directives.get("proxy_pass") == ["http://api"], location.name
         # The snippet overwrites X-Forwarded-For: a client cannot choose its own address.
         assert ["proxy_set_header", "X-Forwarded-For", "$remote_addr"] in location.directives
@@ -124,7 +131,44 @@ def test_responses_the_edge_generates_get_the_security_headers_once(config: Bloc
         # Added only when the application's response carries none of its own.
         assert maps[variable] == "$upstream_http_" + header.replace("-", "_"), header
     for location in api.children:  # an add_header there would drop these silently
+        if _serves_console(location):
+            continue  # sets its own, complete set (next test)
         assert all(d[0] != "add_header" for d in location.directives), location.name
+
+
+def test_the_console_is_static_and_sets_every_security_header_itself(config: Block) -> None:
+    api = _api_server(config)
+    console = [location for location in api.children if _serves_console(location)]
+    assert {location.name for location in console} == {
+        "location = /",
+        "location ~ ^/(complete-signup|reset-password|accept-invitation|sso/callback)$",
+        "location ^~ /assets/",
+    }
+    for location in console:
+        names = [d[0] for d in location.directives]
+        assert "proxy_pass" not in names and "try_files" in names, location.name
+        added = {d[1].lower(): d[2:] for d in location.directives if d[0] == "add_header"}
+        for header in (
+            "strict-transport-security",
+            "x-content-type-options",
+            "x-frame-options",
+            "referrer-policy",
+            "permissions-policy",
+            "cross-origin-opener-policy",
+            "cross-origin-resource-policy",
+            "cache-control",
+            "content-security-policy",
+        ):
+            assert header in added, (location.name, header)
+            assert added[header][-1] == "always", (location.name, header)
+        policy = added["content-security-policy"][0].strip('"')
+        directives = dict(part.strip().split(" ", 1) for part in policy.split(";"))
+        assert directives["default-src"] == "'none'"
+        for source in ("script-src", "style-src", "connect-src", "img-src"):
+            assert directives[source] == "'self'", source  # no inline code, no other origin
+        assert directives["frame-ancestors"] == "'none'"
+        assert directives["require-trusted-types-for"] == "'script'"
+        assert directives["trusted-types"] == "'none'"  # no policy: HTML sinks refused
 
 
 def test_errors_the_edge_answers_use_the_json_error_schema(config: Block) -> None:

@@ -105,6 +105,7 @@ services:
     volumes:
       - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./deploy/nginx/snippets:/etc/nginx/snippets:ro
+      - ./web:/usr/share/nginx/console:ro   # the web console (static files)
       - ${NEXUSFLOW_TLS_DIR:-./deploy/certs}:/etc/nginx/tls:ro
       - ./deploy/acme:/var/www/acme:ro      # certbot --webroot challenges
     environment:
