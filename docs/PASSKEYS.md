@@ -173,8 +173,12 @@ require its members to **sign in with a passkey**:
   MFA turned off, only from a session that signed in with one of its passkeys
   (`403 passkey_session_required`, "Add passkeys from a session that signed in with
   one of your passkeys."). A session that passed a TOTP or recovery code - what a
-  phishing site can relay - changes none of them. Setting up TOTP and using recovery
-  codes are unaffected: neither opens such an organization.
+  phishing site can relay - changes none of them. Nor, once the account has a
+  passkey, does it set up an authenticator app ("Set up an authenticator app from a
+  session that signed in with one of your passkeys."): a phished recovery code would
+  otherwise add the phisher's own factor and replace the member's recovery codes.
+  Using recovery codes is unaffected: a session that passed one opens no such
+  organization.
 * **The first passkey** of such an account - a new member's, or one whose factors an
   operator reset - is registered from the session it has (under the rule of section
   3: once the account has a second factor, a session that passed one). Each binding
@@ -296,6 +300,9 @@ member's passkeys once they have one.
   registration to certain models (an AAGUID without attestation proves nothing and
   is not stored). An authenticator that answers `attestation: "none"` with a
   self-attestation (`packed` without a certificate) is refused.
+* **Not yet tried with real authenticators** (platform authenticators, security
+  keys, phones) or browsers other than Chromium: the browser test uses Chromium's
+  virtual authenticator (section 9).
 * **The first passkey** of an account bound to passkeys comes from a session that did
   not sign in with one (it has none): announced to the organization, not prevented
   (section 4).
@@ -328,3 +335,9 @@ factor, the recovery path and single sign-on (`tests/integration/test_migration_
 takes its migration down and up). `tests/security/test_passkey_bound_accounts.py`
 covers accounts bound to passkeys: what a session that passed a code cannot change,
 the first passkey's announcement, and the operator reset.
+
+In a real browser, `tests/e2e/console_smoke.py` drives the web console in Chromium
+against the running stack in CI, with a virtual authenticator (Chromium's WebAuthn
+testing API): the browser's own `navigator.credentials` creates a passkey through
+the console and signs in with it, and the organization then requires passkeys - a
+password session having been refused first ([CONSOLE.md](CONSOLE.md), section 6).

@@ -14,8 +14,10 @@ All notable changes are documented here. The format follows
   rules, alerts and reports; the account's security, sessions and data. Static and
   dependency-free, served by the edge under a strict Content-Security-Policy with
   Trusted Types; tested with Node's own runner, static checks, through the edge,
-  and in a real Chromium in CI. `scripts/dev_console.py` runs it locally with demo
-  data, without Docker.
+  and in a real Chromium in CI - passkeys included, through the browser's own
+  WebAuthn with a virtual authenticator. `scripts/dev_console.py` runs it locally
+  with demo data, without Docker, keeping its e-mails in a local mailbox (the
+  browser test runs against it too).
 * Single sign-on with each organization's OpenID Connect provider (authorization
   code flow with PKCE and a client-bound state, strictly verified ID tokens), for
   the e-mail domains the organization proves with a DNS TXT record; accounts and
@@ -35,7 +37,8 @@ All notable changes are documented here. The format follows
   (`422 would_lock_you_out`); API keys are not affected. Each session records the
   second factor it passed (`mfa_method`, migration 0012), listed by
   `GET /users/me/sessions`. Members of such an organization add or remove
-  passkeys, and turn MFA off, only from a passkey session
+  passkeys, turn MFA off and - once they have a passkey - set up an authenticator
+  app only from a passkey session
   (`403 passkey_session_required`); a member's first passkey is announced in the
   organization's trail and to its owners and administrators; an operator resets
   the second factors of a member who lost them all

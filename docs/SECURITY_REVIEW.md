@@ -14,10 +14,11 @@ test or a reproduction before it was fixed, but they are **not** a substitute
 for an independent assessment:
 
 * no third-party penetration test or professional code audit has been done;
-* the container stack, a real n8n and a real Chromium were never run in the
-  development environment (Docker was not available there). CI's end-to-end job
-  runs the full Compose stack behind the TLS edge; a clean-host dry run should
-  precede any production use.
+* the container stack, a real n8n and the browser service's Chromium were never
+  run in the development environment (Docker was not available there); the web
+  console's browser test was, against the development server, in Microsoft Edge.
+  CI's end-to-end job runs the full Compose stack behind the TLS edge; a
+  clean-host dry run should precede any production use.
 
 | # | Review | Scope | Output |
 |---|---|---|---|
@@ -35,6 +36,7 @@ for an independent assessment:
 | R12 | Six parallel reviews | Identity and access; pipeline and data lifecycle; workers, sandbox and browser; alerting, AI, notifications and reports; the database (measured on PostgreSQL); the deployment (checked against upstream sources) | 53 unique findings: 5 High, 28 Medium, 20 Low |
 | R13 | What fixing R12 surfaced | The first weekly scan of the third-party images, CI coverage, DAST, the accepted sign-up enumeration, and the lockout on the MFA path | 1 High, 4 Medium, 1 Low |
 | R14 | Single sign-on and SCIM before release | The OpenID Connect relying party, domain proofs, account linking, organization-bound sessions and SCIM provisioning, checked against the identity providers' own documentation (Google, Microsoft Entra ID); its merge with passkeys | 3 Medium, 2 Low |
+| R15 | Organizations that require passkeys, before release | The `require_passkey` policy: the factor each session records, every enforcement point, the lock-out guard, recovery, single sign-on - against what a real-time phishing relay obtains (the password and a TOTP or recovery code); the console's passkey flows in a real browser | 1 High, 1 Low |
 
 In R4 and R5, every defect was first committed as a *strict expected failure*
 (the test fails because of the bug), then fixed, which turned the test into a
@@ -42,7 +44,7 @@ permanent regression test.
 
 ## 2. Findings and resolutions
 
-Severities in R1, R2 and R12 are the reviewers'; in R4-R11, R13 and R14 they were assigned when the defect was fixed. "Test" names the regression test that pins the fix.
+Severities in R1, R2 and R12 are the reviewers'; in R4-R11 and R13-R15 they were assigned when the defect was fixed. "Test" names the regression test that pins the fix.
 
 ### R1 - adversarial code review
 
@@ -338,6 +340,19 @@ R14-5):
 | R14-3 | Low | Changing only the client at the same issuer kept the identity links. Entra ID's subjects are per application, so after a new app registration every linked member would have been refused as an identity conflict | Any change of provider (issuer or client) forgets the links; members are linked again by their address at their next sign-in | `tests/integration/test_sso.py` |
 | R14-4 | Medium | A passkey that answered the second-factor step after a single sign-on opened an ordinary session, not one bound to the organization: the provider's word plus the passkey - without the password - would have reached every organization of the person | The step after a single sign-on completes, by code or passkey alike, into a session bound to that organization; a marked challenge without an organization is refused | `tests/integration/test_sso.py` (`TestMfa`) |
 | R14-5 | Medium | A session opened by an identity provider whose MFA the organization trusts counted as "a session that passed a second factor": whoever runs the provider and knows a member's password could have added a passkey of their own to the account - and then signed in to every organization of the person - or removed its factors, changed its password or deleted it | A session an identity provider opened cannot manage the account's second factors, change its password or delete the account (`403 sso_session_restricted`), as it already could not export its data | `tests/security/test_sso_enforcement.py` |
+
+### R15 - organizations that require passkeys, before release
+
+`require_passkey` was reviewed before it reached `main`, against what a phishing
+site relaying a sign-in in real time obtains: the password and a TOTP or recovery
+code - never a passkey, whose signature covers the origin. The enforcement held
+(every request, sign-in naming the organization, switching, single sign-on), but
+the account's own factors did not:
+
+| # | Severity | Finding | Resolution | Evidence |
+|---|---|---|---|---|
+| R15-1 | High | As first built, a session that had passed a TOTP or recovery code could still register a passkey - the way back for someone who lost theirs. Whoever relayed a member's password and a code could plant a passkey of their own and sign in with it: the policy would have admitted exactly the phisher it exists to stop | An account is bound to passkeys while it belongs to an active organization that requires them: it adds or removes passkeys, and turns MFA off, only from a session that signed in with one of its passkeys (`403 passkey_session_required`), checked when a registration starts and again when it finishes, and before any code is used up. Only its very first passkey comes from another session - announced in each binding organization's trail and to its owners and administrators. A member who lost every passkey comes back through an audited operator reset (`nexusflow user reset-second-factors`) | `tests/security/test_passkey_bound_accounts.py` |
+| R15-2 | Low | Still possible after R15-1: a session that passed a phished recovery code could set up an authenticator app for such an account - a factor of the phisher's own (which opens none of the organization's data) - and so replace the member's recovery codes | Once the account has a passkey, an authenticator app is set up only from a passkey session too, checked when it starts and again when it is confirmed | `tests/security/test_passkey_bound_accounts.py` |
 
 ## 3. Checklist (specification section 39)
 

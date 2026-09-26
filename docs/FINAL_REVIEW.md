@@ -2,7 +2,7 @@
 
 The specification asks for a final architecture, security, dependency, test and
 deployment review, and an honest list of remaining limitations. This is that
-review, as of 2026-09-26.
+review, as of 2026-09-27.
 
 **Verdict.** NexusFlow AI is a complete, well-tested reference implementation of
 a secure automation and intelligence platform, ready for a pilot. The whole stack
@@ -10,7 +10,8 @@ runs in CI on every change - end-to-end tests behind the TLS edge, a
 backup-and-restore round trip and a passive DAST scan - but it is not yet
 production-proven: it has not run on a customer-like host, no independent
 penetration test has been done, single sign-on and passkeys have not yet been
-tried with real identity providers, browsers and authenticators, and high
+tried with real identity providers and authenticators (CI runs them against a
+test provider and, in a real Chromium, a virtual authenticator), and high
 availability is on the roadmap (section 7). A web console covers the everyday
 flows ([CONSOLE.md](CONSOLE.md)).
 
@@ -19,7 +20,7 @@ flows ([CONSOLE.md](CONSOLE.md)).
 | Aspect | Assessment |
 |---|---|
 | Layering | Clean architecture `apps -> bootstrap -> infrastructure -> domain -> core`, enforced in CI by import-linter; the domain imports no framework (no FastAPI, SQLAlchemy, Celery, Redis, HTTP or AI SDK) |
-| Size | 220 modules, about 40,500 lines of Python; 11 migrations (the initial schema in two parts, and nine additive ones); 10 ADRs |
+| Size | 220 modules, about 41,000 lines of Python; 12 migrations (the initial schema in two parts, and ten additive ones); 10 ADRs; a web console of plain ES modules |
 | Components | Public API, internal API (n8n and sandbox), pipeline and integrations workers, sandbox worker, headless browser, beat, n8n (optional), PostgreSQL, Redis (two instances), RabbitMQ, nginx, Prometheus, Alertmanager, Grafana |
 | Trust boundaries | Edge (TLS, limits); tenant isolation (forced RLS plus `org_id` filters); sandbox (no DB, no secrets, per-run tickets); browser (pinning egress proxy); n8n (per-workflow service tokens, signed events); identity providers (trusted only for proven domains, sessions bound to their organization). Every entry point is enumerated in the [threat model](THREAT_MODEL.md) (section 3.1) |
 | Reliability | Transactional outbox; idempotent workers; quorum queues with dead-lettering, delayed retries held by the broker; reaper with bounded attempts and fencing; heartbeat health; one request ID from the API into every job it causes |
@@ -37,9 +38,10 @@ traceability, test-driven reviews of the adapters, the core chain and of hostile
 uploads and rate limits, a deployment startup review, two completion reviews, an
 adversarial review of the day's new code, six parallel reviews of the whole
 platform - identity, pipeline and data lifecycle, workers and sandbox, alerting
-and AI, the database, the deployment - and a review of single sign-on and SCIM
-before release), the first run of the full stack in CI, and what fixing the
-reviews surfaced produced 144 numbered findings plus smaller observations. All
+and AI, the database, the deployment - and reviews of single sign-on and SCIM,
+and of organizations that require passkeys, before release), the first run of
+the full stack in CI, and what fixing the reviews surfaced produced 146 numbered
+findings plus smaller observations. All
 are fixed with regression tests (or, for configuration, in the file named as
 evidence), except one accepted risk: a member who may read records can page
 through a whole dataset, where exports are audited and budgeted (D-n2). The full
@@ -90,13 +92,14 @@ and the remaining gaps, is in [ASVS.md](ASVS.md).
 
 | Layer | Tests | What they exercise |
 |---|---|---|
-| Unit | 1,915 | Crypto, tokens, the WebAuthn verifier and its CBOR decoder, the OpenID Connect client (discovery, key sets, ID tokens) and single sign-on rules, Vault transit wrapping, SSRF guard, log redaction, network allowlists, the edge configuration (nginx), alert rules against the exported metrics, the DAST gate, script modes in git, all adapters (scraping, robots.txt, collectors, senders, AI provider, ClamAV, n8n client), the core chain (detection, alert rules, offline analysis, property-based tests), pipeline stages, reports and analytics, sign-in risk, request correlation, hostile uploads (hand-built zip bombs, traversal, macros, XXE, sparse sheets), the rate limiter, TLS client configuration, worker policy and liveness, n8n generator and lint, configuration and broker consistency |
-| Integration | 320 | Real PostgreSQL with production roles (RLS really enforced): identity and sign-in risk, e-mail-verified sign-up, privacy (export, erasure, retention), single sign-on against an in-process identity provider, SCIM provisioning, migrations down and up again, database security, the business API and change analytics, the core chain end to end with the real worker handlers, crash recovery, data lifecycle, workflows, request correlation, backup and restore (`pg_dump`/`pg_restore` with the production roles), the CLI, and the demo walkthrough over real HTTP |
-| Security | 212 | Authentication, passkeys, second-factor guessing, single sign-on enforcement (organization-bound sessions, `sso_required`), authorization, an IDOR sweep over every resource route, API-key lifecycle, login locking, session management, network allowlists (members, API keys, sign-in, anti-lockout, operator recovery), every rate-limit scope and its failure policy, hostile uploads through the API, input handling, headers, error leakage |
-| End to end | 18 | The business scenario, the monitoring stack and the edge's security properties (headers on every response, JSON errors, hidden paths, body limits, tenant isolation) against the running Compose stack (CI), followed by a backup, restore and audit verification and a DAST scan; skipped without a stack |
+| Unit | 1,984 | Crypto, tokens, the WebAuthn verifier and its CBOR decoder, the OpenID Connect client (discovery, key sets, ID tokens) and single sign-on rules, Vault transit wrapping, SSRF guard, log redaction, network allowlists, the edge configuration (nginx), alert rules against the exported metrics, the DAST gate, script modes in git, all adapters (scraping, robots.txt, collectors, senders, AI provider, ClamAV, n8n client), the core chain (detection, alert rules, offline analysis, property-based tests), pipeline stages, reports and analytics, sign-in risk, request correlation, hostile uploads (hand-built zip bombs, traversal, macros, XXE, sparse sheets), the rate limiter, TLS client configuration, worker policy and liveness, n8n generator and lint, configuration and broker consistency |
+| Integration | 321 | Real PostgreSQL with production roles (RLS really enforced): identity and sign-in risk, e-mail-verified sign-up, privacy (export, erasure, retention), single sign-on against an in-process identity provider, SCIM provisioning, migrations down and up again, database security, the business API and change analytics, the core chain end to end with the real worker handlers, crash recovery, data lifecycle, workflows, request correlation, backup and restore (`pg_dump`/`pg_restore` with the production roles), the CLI, and the demo walkthrough over real HTTP |
+| Security | 226 | Authentication, passkeys and organizations that require them (every enforcement point, accounts bound to passkeys, the operator reset), second-factor guessing, single sign-on enforcement (organization-bound sessions, `sso_required`), authorization, an IDOR sweep over every resource route, API-key lifecycle, login locking, session management, network allowlists (members, API keys, sign-in, anti-lockout, operator recovery), every rate-limit scope and its failure policy, hostile uploads through the API, input handling, headers, error leakage |
+| End to end | 26 | The business scenario, the monitoring stack, the edge's security properties (headers on every response, JSON errors, hidden paths, body limits, tenant isolation) and the web console through the edge (its document, policy, headers and assets) against the running Compose stack (CI), followed by a backup, restore and audit verification and a DAST scan; skipped without a stack |
+| Web console | 36 + a browser run | Node's own runner: the API client (token refresh, errors, no cookies), routing and entry points, the session store, WebAuthn conversions, the QR encoder, page helpers. In CI, a real Chromium drives the console against the stack - sign-up from the e-mailed link, the main pages, and passkeys through the browser's own WebAuthn with a virtual authenticator - failing on any console error, CSP violation or failed request |
 
-* The last full run: 2,446 passed (the 18 end-to-end tests run in CI against the
-  stack); line and branch coverage 90 %, with a CI floor of 80 %.
+* The last full run: 2,531 passed (the 26 end-to-end tests and the browser run
+  in CI against the stack); line and branch coverage 89 %, with a CI floor of 80 %.
 * Defects found by writing tests were pinned as strict expected failures first,
   then fixed.
 * Not covered by automated tests: the workflows running inside a real n8n (CI
@@ -150,7 +153,8 @@ below.
 4. Single sign-on and provisioning: OpenID Connect and SCIM 2.0 are in
    ([SSO.md](SSO.md)) but not yet tried against real identity providers (Okta,
    Microsoft Entra ID, Google Workspace); no SAML, no front- or back-channel logout.
-   Passkeys still need an interop pass with real browsers and authenticators;
+   Passkeys run end to end in a real Chromium in CI with a virtual authenticator,
+   but still need an interop pass with real authenticators and other browsers;
    organizations can require them (`require_passkey`), but a member's first
    passkey can still come from a phished session (announced, not prevented).
 5. The web console covers sign-in, the organization's administration and the

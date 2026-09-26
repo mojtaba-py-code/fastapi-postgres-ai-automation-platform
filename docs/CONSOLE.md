@@ -13,6 +13,8 @@ It is also where the links the platform sends lead: `/complete-signup`,
 `/reset-password` and `/accept-invitation` (e-mails) and `/sso/callback` (the
 identity provider's redirect). Before the console, those links led nowhere.
 
+![The overview in the dark theme, with the development server's demo data](images/console-overview-dark.png)
+
 ## 1. How it is built and served
 
 * **No framework, no build step, no third-party code.** Plain ES modules
@@ -59,6 +61,13 @@ TOTP secret is never sent to a QR service.
 A session opened through an organization's identity provider cannot manage the
 account's password or second factors (the API refuses it, and the console says
 so): that needs a password sign-in.
+
+![A dataset: its records with their versions, the schema, AI analyses and sources](images/console-dataset.png)
+
+Where an organization requires passkeys, the sessions list shows which session
+passed one - the only kind the organization still opens to:
+
+![Account, Sessions: this session signed in with a passkey; the others passed no second factor](images/console-sessions.png)
 
 ## 4. Accessibility and themes
 

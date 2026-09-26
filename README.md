@@ -13,12 +13,17 @@ is authorized, tenant-isolated, idempotent and audited.
  (sandbox)   (schema)                                            (versions)  (diffs)    (AI, opt-in) (rules)  (JSON/CSV/XLSX/PDF)
 ```
 
+![The web console's overview: counts, changes per day with unusual days marked, open alerts and the latest changes](docs/images/console-overview.png)
+
+*The web console with the development server's month of demo data
+([CONSOLE.md](docs/CONSOLE.md); a dark theme follows the system's).*
+
 ## Why it is different
 
 | Concern | What NexusFlow does |
 |---|---|
 | **Tenant isolation** | PostgreSQL row-level security (`FORCE`d) enforced on a non-`BYPASSRLS` role, plus explicit `org_id` filters in every query. Cross-tenant IDs return `404`. |
-| **Authentication** | Sign-up proves the e-mail address first and answers alike for every address (no account enumeration). Argon2id passwords (breached passwords refused), 10-minute EdDSA access tokens, rotating refresh tokens with reuse detection, TOTP with replay prevention and phishing-resistant passkeys (WebAuthn) as second factors, progressive lockout, sign-in risk assessment (new device, new network, success after failures), a list of one's sessions with instant revocation, and scoped API keys hashed with a server-side pepper. Organizations can confine sessions and API keys to their own networks (IP allowlists), and sign their members in through their own OpenID Connect provider (optionally required), with SCIM 2.0 provisioning - trusted only for the e-mail domains they proved they own. |
+| **Authentication** | Sign-up proves the e-mail address first and answers alike for every address (no account enumeration). Argon2id passwords (breached passwords refused), 10-minute EdDSA access tokens, rotating refresh tokens with reuse detection, TOTP with replay prevention and phishing-resistant passkeys (WebAuthn) as second factors, progressive lockout, sign-in risk assessment (new device, new network, success after failures), a list of one's sessions with instant revocation, and scoped API keys hashed with a server-side pepper. Organizations can confine sessions and API keys to their own networks (IP allowlists), require passkeys of every session, and sign their members in through their own OpenID Connect provider (optionally required), with SCIM 2.0 provisioning - trusted only for the e-mail domains they proved they own. |
 | **Authorization** | Five roles (owner, admin, analyst, operator, viewer) and 38 permissions, checked at the route and again in the service. |
 | **Web console** | A first-party browser interface for everything above - sign-in with passkeys, TOTP or single sign-on, members, API keys, the audit log, the security policy, sources, datasets, alerts and reports - served by the edge under a strict Content-Security-Policy with Trusted Types. No framework, no build step, no third-party code; tokens held in memory. [CONSOLE.md](docs/CONSOLE.md) |
 | **SSRF** | Every outbound request passes a URL policy and a connect-time IP check against every DNS answer. Redirects are re-validated, bodies are size-capped and the decompressor is bounded. |
@@ -158,10 +163,11 @@ tests/             unit, integration (real PostgreSQL), security and end-to-end 
 
 ## Status and honest limitations
 
-A complete, tested reference implementation: 2,446 tests (unit,
+A complete, tested reference implementation: 2,531 tests (unit,
 integration against a real PostgreSQL, security, and a walkthrough over real
-HTTP) pass with 90 % line and branch coverage, plus 18 end-to-end tests that CI
-runs against the full stack; every quality gate is green - Ruff, mypy `--strict`,
+HTTP) pass with 89 % line and branch coverage, plus 26 end-to-end tests and a
+real-browser run of the web console (passkeys included) that CI runs against the
+full stack, and the console's 36 Node tests; every quality gate is green - Ruff, mypy `--strict`,
 import-linter, Bandit, pip-audit, zizmor, the n8n workflow lint, and the
 configuration and image-digest drift checks. A self-assessed mapping to OWASP ASVS
 5.0 is in [ASVS.md](docs/ASVS.md). Know the following before you deploy it:
@@ -186,8 +192,9 @@ configuration and image-digest drift checks. A self-assessed mapping to OWASP AS
 * Single-host reference topology: no high availability.
   Single sign-on is OpenID Connect only (no SAML), not yet tried against real
   identity providers, and it needs the public API to reach them (an opt-in Compose
-  overlay); its limitations are in [SSO.md](docs/SSO.md). Passkeys are not yet
-  tested with real browsers and authenticators ([PASSKEYS.md](docs/PASSKEYS.md)).
+  overlay); its limitations are in [SSO.md](docs/SSO.md). Passkeys run end to
+  end in a real Chromium in CI, but with its virtual authenticator: not yet with
+  real authenticators or other browsers ([PASSKEYS.md](docs/PASSKEYS.md)).
   See [FINAL_REVIEW.md](docs/FINAL_REVIEW.md) for the full list and a roadmap.
 
 ## License
