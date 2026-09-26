@@ -253,7 +253,7 @@ class SsoService:
                     issuer=issuer,
                     client_id=client_id,
                     client_secret_ciphertext=b"",  # sealed just below
-                    secret_key_id="",  # nosec B106 - a key id, set when sealed
+                    secret_key_id="",  # a key id, set when sealed  # nosec B106
                     allowed_domains=domains,
                     verified_domains=[],
                     default_role=role,
