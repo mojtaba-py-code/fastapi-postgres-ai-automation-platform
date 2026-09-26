@@ -20,7 +20,7 @@ import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import asyncpg
 import httpx2
@@ -38,7 +38,7 @@ from tests.conftest import make_settings
 from tests.support.api import ApiSession, signup
 from tests.support.business import expect_error, org_id_of, viewer_key
 from tests.support.database import ProvisionedDatabase
-from tests.support.fixtures import PASSWORD
+from tests.support.fixtures import META, PASSWORD
 from tests.support.oidc import (
     SSO,
     FakeIdp,
@@ -393,6 +393,38 @@ class TestSignIn:
         [success] = await _audit(owner, "auth.sso.succeeded")
         assert success["metadata"] == {"mfa": False, "idp_mfa": False, "new_account": True}
         assert success["actor_id"] == str(account["id"])
+
+    async def test_a_just_in_time_account_sets_a_password_with_a_reset(
+        self,
+        api: httpx2.AsyncClient,
+        network: FakeNetwork,
+        container: Container,
+        admin_conn: asyncpg.Connection,
+    ) -> None:
+        owner = await signup(api)
+        domain = fresh_domain()
+        idp = FakeIdp()
+        slug = await ready(owner, network, idp, domain)
+        email = f"no.password@{domain}"
+        session_of(api, await sign_in(api, idp, slug, email=email), email)
+
+        await container.auth.request_password_reset(email=email, meta=META)
+        reset_id = await admin_conn.fetchval(
+            "SELECT id FROM password_reset_tokens "
+            "WHERE user_id = (SELECT id FROM users WHERE email = $1) AND used_at IS NULL",
+            email,
+        )
+        assert reset_id is not None
+        # As the mail worker does: the token itself is mailed, only its hash stored.
+        raw_token = "reset-token-" + uuid4().hex
+        await admin_conn.execute(
+            "UPDATE password_reset_tokens SET token_hash = $1 WHERE id = $2",
+            container.token_hasher.hash(raw_token),
+            reset_id,
+        )
+        await container.auth.reset_password(token=raw_token, new_password=PASSWORD, meta=META)
+        login = await api.post("/api/v1/auth/login", json={"email": email, "password": PASSWORD})
+        assert login.status_code == 200, login.text
 
     async def test_an_existing_account_is_linked_then_found_by_its_subject(
         self, api: httpx2.AsyncClient, network: FakeNetwork
