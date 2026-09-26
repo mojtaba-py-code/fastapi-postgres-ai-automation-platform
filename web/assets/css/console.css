@@ -122,7 +122,7 @@ ul.plain { list-style: none; padding: 0; }
 .topbar-spacer { flex: 1; }
 .org-name { font-weight: 600; }
 .org-select { width: auto; min-width: 200px; font-weight: 600; }
-.menu-toggle { display: none; }
+.topbar .menu-toggle { display: none; } /* also a .button, declared later */
 .blocked { padding: 16px 24px 0; }
 .content { padding: 24px 32px 48px; width: 100%; max-width: 1240px; outline: none; }
 
@@ -143,7 +143,7 @@ ul.plain { list-style: none; padding: 0; }
   .shell { grid-template-columns: minmax(0, 1fr); }
   .sidebar { position: fixed; inset: 0 auto 0 0; width: 260px; z-index: 20; transform: translateX(-100%); transition: transform 0.2s ease; box-shadow: var(--shadow); }
   .nav-open .sidebar { transform: none; }
-  .menu-toggle { display: inline-flex; }
+  .topbar .menu-toggle { display: inline-flex; }
   .content { padding: 16px; }
   .topbar { padding: 0 12px; }
   .user-name { display: none; }
@@ -174,7 +174,7 @@ ul.plain { list-style: none; padding: 0; }
 .breadcrumb a { text-decoration: none; }
 
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
-.card-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; padding: 16px 18px 0; flex-wrap: wrap; }
+.card-header { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 16px 18px 0; flex-wrap: wrap; }
 .card-description { color: var(--ink-2); margin-top: 4px; max-width: 80ch; }
 .card-actions { display: flex; gap: 8px; }
 .card-body { padding: 16px 18px 18px; display: flex; flex-direction: column; gap: 14px; }
@@ -243,6 +243,8 @@ a.stat:hover { border-color: var(--border-strong); }
 .input.compact { width: auto; min-height: 30px; padding: 4px 8px; }
 textarea.input { resize: vertical; }
 select.input { padding-right: 28px; }
+/* The date control's content is 2px taller than a line of text: as tall as the rest. */
+.input[type="date"] { padding-block: 6px; }
 
 .form { display: flex; flex-direction: column; gap: 14px; }
 .form-inline { flex-direction: row; flex-wrap: wrap; align-items: flex-end; }
@@ -274,6 +276,9 @@ legend { font-weight: 600; padding: 0 4px; }
 .table { width: 100%; border-collapse: collapse; }
 .table th { text-align: left; font-weight: 600; font-size: 12.5px; color: var(--ink-2); background: var(--surface-2); padding: 8px 12px; white-space: nowrap; }
 .table td { padding: 10px 12px; border-top: 1px solid var(--border); vertical-align: top; }
+/* A button in a row or a card's header: its text on the first line, the row
+   or header no taller (7px = its border and padding above the text). */
+.table td .button, .card-header .button { margin-block: -7px; }
 .table tbody tr:hover { background: color-mix(in srgb, var(--surface-2) 60%, transparent); }
 .table .actions { text-align: right; white-space: nowrap; }
 .table.compact td, .table.compact th { padding: 6px 10px; }

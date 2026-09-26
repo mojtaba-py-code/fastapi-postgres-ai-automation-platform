@@ -188,11 +188,21 @@ function brandMark() {
   );
 }
 
+// A link to the page already shown reloads it, as people expect of a sidebar:
+// the address does not change, so no hashchange would. A click that opens a
+// new tab or window keeps its default.
+function reloadIfCurrent(event) {
+  if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  if (event.currentTarget.getAttribute("href") !== location.hash) return;
+  event.preventDefault();
+  render();
+}
+
 function sidebar(active) {
   return h(
     "nav",
     { class: "sidebar", "aria-label": "Main" },
-    h("a", { class: "brand", href: href("/overview") }, brandMark(), h("span", {}, "NexusFlow")),
+    h("a", { class: "brand", href: href("/overview"), onClick: reloadIfCurrent }, brandMark(), h("span", {}, "NexusFlow")),
     NAVIGATION.map((group) => {
       const items = group.items.filter((item) => !item.permission || app.can(item.permission));
       if (!items.length) return null;
@@ -200,7 +210,7 @@ function sidebar(active) {
         "div",
         { class: "nav-group" },
         group.group && h("p", { class: "nav-heading" }, group.group),
-        h("ul", {}, items.map((item) => h("li", {}, h("a", { href: href(item.path), class: ["nav-link", active === item.path && "active"], "aria-current": active === item.path ? "page" : null }, item.label)))),
+        h("ul", {}, items.map((item) => h("li", {}, h("a", { href: href(item.path), class: ["nav-link", active === item.path && "active"], "aria-current": active === item.path ? "page" : null, onClick: reloadIfCurrent }, item.label)))),
       );
     }),
   );
