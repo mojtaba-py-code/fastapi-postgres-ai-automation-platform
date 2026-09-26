@@ -63,6 +63,7 @@ from nexusflow.infrastructure.database.repositories.identity import (
     SqlSessionRepository,
     SqlSignupRequestRepository,
     SqlUserRepository,
+    SqlWebAuthnCredentialRepository,
 )
 from nexusflow.infrastructure.database.repositories.outbox import SqlOutboxRepository
 from nexusflow.infrastructure.database.sealing import CIPHER_KEY
@@ -135,6 +136,7 @@ class SqlUnitOfWork:
     password_resets: SqlPasswordResetRepository
     signup_requests: SqlSignupRequestRepository
     recovery_codes: SqlRecoveryCodeRepository
+    webauthn_credentials: SqlWebAuthnCredentialRepository
     api_keys: SqlApiKeyRepository
     service_accounts: SqlServiceAccountRepository
     organizations: SqlOrganizationRepository
@@ -179,6 +181,7 @@ class SqlUnitOfWork:
         self.password_resets = SqlPasswordResetRepository(session)
         self.signup_requests = SqlSignupRequestRepository(session)
         self.recovery_codes = SqlRecoveryCodeRepository(session)
+        self.webauthn_credentials = SqlWebAuthnCredentialRepository(session)
         self.api_keys = SqlApiKeyRepository(session)
         self.service_accounts = SqlServiceAccountRepository(session)
         self.organizations = SqlOrganizationRepository(session)

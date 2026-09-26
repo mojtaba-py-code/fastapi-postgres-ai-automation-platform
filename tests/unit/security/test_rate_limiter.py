@@ -41,6 +41,8 @@ FAIL_CLOSED_SCOPES = {
     "auth.register.account",
     "auth.register.complete",
     "auth.mfa",
+    "auth.webauthn.sign_in",
+    "auth.webauthn.manage",
     "auth.password_change",
     "api.export",
     "api.ai",

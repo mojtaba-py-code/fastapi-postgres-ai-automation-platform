@@ -39,6 +39,11 @@ async def _audit(owner: ApiSession, action: str) -> list[dict[str, Any]]:
     [
         ("/api/v1/auth/mfa/enroll", lambda pw: {"password": pw}, "mfa_enrollment"),
         ("/api/v1/users/me/delete", lambda pw: {"password": pw}, "account_deletion"),
+        (
+            "/api/v1/auth/webauthn/register/begin",
+            lambda pw: {"password": pw},
+            "passkey_registration",
+        ),
     ],
 )
 async def test_wrong_passwords_lock_the_account_as_at_sign_in(
@@ -96,7 +101,11 @@ async def test_an_api_key_cannot_confirm_its_creators_password(api: httpx2.Async
     owner = await signup(api)
     key = await viewer_key(owner, ["projects:read"])
 
-    for path in ("/api/v1/auth/mfa/enroll", "/api/v1/users/me/delete"):
+    for path in (
+        "/api/v1/auth/mfa/enroll",
+        "/api/v1/users/me/delete",
+        "/api/v1/auth/webauthn/register/begin",
+    ):
         response = await api.post(path, json={"password": PASSWORD}, headers=key)
         expect_error(response, 403, "session_required")
     assert (await owner.get("/api/v1/users/me")).status_code == 200  # nothing happened

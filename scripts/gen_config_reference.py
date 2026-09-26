@@ -48,7 +48,12 @@ SECTION_NOTES: dict[str, str] = {
         "isolated network."
     ),
     "broker": "RabbitMQ (Celery). Each worker pool has its own broker user; see deploy/rabbitmq.",
-    "security": "Key material, token lifetimes, password hashing and brute-force protection.",
+    "security": (
+        "Key material, token lifetimes, password hashing, brute-force protection and the "
+        "passkey (WebAuthn) relying party: its ID is the host of `app.public_base_url` unless "
+        "`webauthn_rp_id` names a parent domain of it, and passkey answers are accepted from "
+        "that URL's origin plus `webauthn_origins`. See [PASSKEYS.md](PASSKEYS.md)."
+    ),
     "scraping": (
         "Outbound HTTP for collection: SSRF policy, limits, politeness and the browser service."
     ),
@@ -81,6 +86,14 @@ ALWAYS_REQUIRED = [
     "`security.hmac_pepper` (at least 32 bytes)",
     "`security.encryption_keys` (JSON object of base64 32-byte keys)",
     "`ai.api_key` when `ai.provider=anthropic`",
+    (
+        "`security.webauthn_rp_id`, when set, to be a domain name that is the host of "
+        "`app.public_base_url` or a parent domain of it"
+    ),
+    (
+        "each of `security.webauthn_origins` to be an origin (`https://host[:port]`) within "
+        "the relying party ID; `http://localhost` only outside staging and production"
+    ),
 ]
 
 

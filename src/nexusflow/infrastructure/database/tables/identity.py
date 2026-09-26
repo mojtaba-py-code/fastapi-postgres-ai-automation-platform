@@ -73,7 +73,8 @@ users = Table(
     UniqueConstraint("email"),
     enum_check("status", UserStatus),
     CheckConstraint("email = lower(email)", name="email_lowercase"),
-    CheckConstraint("NOT mfa_enabled OR mfa_secret_encrypted IS NOT NULL", name="mfa_secret"),
+    # Migration 0010: MFA may rest on passkeys alone; a TOTP secret still means MFA is on.
+    CheckConstraint("mfa_enabled OR mfa_secret_encrypted IS NULL", name="mfa_secret"),
 )
 
 user_sessions = Table(
@@ -156,6 +157,34 @@ mfa_recovery_codes = Table(
     Column("created_at", TS, nullable=False),
     Column("used_at", TS),
     UniqueConstraint("user_id", "code_hash"),
+)
+
+# Passkeys (migration 0010): public keys only, owner-only under row-level
+# security like the recovery codes. A credential ID is unique across accounts.
+webauthn_credentials = Table(
+    "webauthn_credentials",
+    metadata,
+    Column("id", Uuid, primary_key=True),
+    Column("user_id", Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True),
+    Column("credential_id", LargeBinary, nullable=False),
+    Column("user_handle", LargeBinary, nullable=False),
+    Column("public_key", LargeBinary, nullable=False),
+    Column("algorithm", Integer, nullable=False),
+    Column("sign_count", BigInteger, nullable=False),
+    Column("transports", ARRAY(String(16)), nullable=False),
+    Column("name", String(64), nullable=False),
+    Column("backup_eligible", Boolean, nullable=False),
+    Column("backed_up", Boolean, nullable=False),
+    Column("created_at", TS, nullable=False),
+    Column("last_used_at", TS),
+    UniqueConstraint("credential_id"),
+    CheckConstraint("algorithm IN (-7, -8, -257)", name="algorithm"),
+    CheckConstraint("octet_length(credential_id) BETWEEN 16 AND 1023", name="credential_id_length"),
+    CheckConstraint("octet_length(user_handle) BETWEEN 1 AND 64", name="user_handle_length"),
+    CheckConstraint("octet_length(public_key) BETWEEN 32 AND 1024", name="public_key_length"),
+    CheckConstraint("sign_count BETWEEN 0 AND 4294967295", name="sign_count_range"),
+    CheckConstraint("backup_eligible OR NOT backed_up", name="backup_state"),
+    CheckConstraint("cardinality(transports) <= 6", name="transports_count"),
 )
 
 memberships = Table(

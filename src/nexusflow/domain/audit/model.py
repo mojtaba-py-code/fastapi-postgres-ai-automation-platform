@@ -59,6 +59,13 @@ class AuditAction(StrEnum):
     MFA_ENABLED = "auth.mfa.enabled"
     MFA_DISABLED = "auth.mfa.disabled"
     MFA_RECOVERY_USED = "auth.mfa.recovery_code_used"
+    # Passkeys (WebAuthn): a failed passkey sign-in is MFA_FAILED, with its reason.
+    WEBAUTHN_REGISTERED = "auth.webauthn.registered"
+    WEBAUTHN_REGISTRATION_FAILED = "auth.webauthn.registration_failed"
+    WEBAUTHN_RENAMED = "auth.webauthn.renamed"
+    WEBAUTHN_REMOVED = "auth.webauthn.removed"
+    # A passkey's signature counter did not move forward: a copied authenticator?
+    WEBAUTHN_CLONE_SUSPECTED = "auth.webauthn.clone_suspected"
     LOGOUT = "auth.logout"
     LOGOUT_ALL = "auth.logout_all"
     SESSION_REVOKED = "auth.session.revoked"
