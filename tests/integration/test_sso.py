@@ -301,28 +301,43 @@ class TestConfiguration:
         assert (await configure(owner, idp, [fresh_domain()])).status_code == 200
         org_id = await org_id_of(owner)
         current = json.loads(container.settings.security.encryption_keys.get_secret_value())
+        active = container.settings.security.encryption_active_key_id
         new_key = base64.b64encode(os.urandom(32)).decode()
+        both = {**current, "kek-2": new_key}
 
-        rotated = _platform(database, tmp_path, {**current, "kek-2": new_key}, "kek-2")
         try:
-            before = await rotated.maintenance.still_under_old_keys(org_id, active_key_id="kek-2")
-            assert before["sso_connections"] == 1
-            assert await rotated.sso.rewrap(org_id, active_key_id="kek-2") == 1
-            after = await rotated.maintenance.still_under_old_keys(org_id, active_key_id="kek-2")
-            assert "sso_connections" not in after
+            rotated = _platform(database, tmp_path, both, "kek-2")
+            try:
+                before = await rotated.maintenance.still_under_old_keys(
+                    org_id, active_key_id="kek-2"
+                )
+                assert before["sso_connections"] == 1
+                assert await rotated.sso.rewrap(org_id, active_key_id="kek-2") == 1
+                after = await rotated.maintenance.still_under_old_keys(
+                    org_id, active_key_id="kek-2"
+                )
+                assert "sso_connections" not in after
+            finally:
+                await rotated.aclose()
+            retired = _platform(database, tmp_path, {"kek-2": new_key}, "kek-2")
+            try:  # the old key is gone: the secret still opens
+                async with retired.uow_factory(TenantScope.system(org_id)) as uow:
+                    connection = await uow.sso_connections.get_for_org(org_id)
+                assert connection is not None
+                secret = retired.cipher.decrypt(
+                    connection.client_secret_ciphertext, context=connection.secret_context
+                )
+                assert secret == idp.client_secret
+            finally:
+                await retired.aclose()
         finally:
-            await rotated.aclose()
-        retired = _platform(database, tmp_path, {"kek-2": new_key}, "kek-2")
-        try:  # the old key is gone: the secret still opens
-            async with retired.uow_factory(TenantScope.system(org_id)) as uow:
-                connection = await uow.sso_connections.get_for_org(org_id)
-            assert connection is not None
-            secret = retired.cipher.decrypt(
-                connection.client_secret_ciphertext, context=connection.secret_context
-            )
-            assert secret == idp.client_secret
-        finally:
-            await retired.aclose()
+            # Back under the shared keyring's active key: the database outlives
+            # this test, and `nexusflow keys rewrap` (test_cli) walks every tenant.
+            restored = _platform(database, tmp_path, both, active)
+            try:
+                await restored.sso.rewrap(org_id, active_key_id=active)
+            finally:
+                await restored.aclose()
 
     async def test_removing_the_provider_ends_its_sessions(
         self, api: httpx2.AsyncClient, network: FakeNetwork
