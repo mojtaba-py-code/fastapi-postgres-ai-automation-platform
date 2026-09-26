@@ -13,9 +13,13 @@ from nexusflow.domain.authorization.roles import Role
 from nexusflow.domain.identity.directory import normalize_user_name
 from nexusflow.domain.identity.model import UserSession
 from nexusflow.domain.identity.sso import (
+    GOOGLE_ISSUER,
+    IdTokenClaims,
+    SsoConnection,
     email_domain,
     ensure_jit_role,
     idp_reported_mfa,
+    managed_by_organization,
     normalize_client_value,
     normalize_domain,
     normalize_domains,
@@ -186,3 +190,58 @@ class TestWhoReachesAnOrganizationThatRequiresSso:
         assert satisfies_sso(_session(mfa=True), org, Role.OWNER)
         assert not satisfies_sso(_session(mfa=False), org, Role.OWNER)
         assert not satisfies_sso(_session(mfa=True), org, Role.ADMIN)
+
+
+def _connection(issuer: str) -> SsoConnection:
+    now = datetime.now(UTC)
+    return SsoConnection(
+        id=uuid4(),
+        org_id=uuid4(),
+        issuer=issuer,
+        client_id="client",
+        client_secret_ciphertext=b"",
+        secret_key_id="k1",
+        allowed_domains=["example.com", "pending.example"],
+        verified_domains=["example.com"],
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def _signed_in(hosted_domain: str | None) -> IdTokenClaims:
+    return IdTokenClaims(
+        issuer="https://idp.example",
+        subject="subject",
+        nonce="nonce",
+        email="person@example.com",
+        email_verified=True,
+        hosted_domain=hosted_domain,
+    )
+
+
+class TestManagedAccounts:
+    """Review R14-1: Google's issuer serves personal accounts too."""
+
+    @pytest.mark.parametrize(
+        ("hosted_domain", "managed"),
+        [
+            ("example.com", True),
+            ("Example.COM", True),
+            (None, False),  # a personal Google account
+            ("pending.example", False),  # allowed, but not verified
+            ("gmail.com", False),
+            ("not a domain", False),
+        ],
+    )
+    def test_from_google_the_hosted_domain_must_be_a_verified_one(
+        self, hosted_domain: str | None, managed: bool
+    ) -> None:
+        connection = _connection(GOOGLE_ISSUER)
+        assert managed_by_organization(connection, _signed_in(hosted_domain)) is managed
+
+    @pytest.mark.parametrize("hosted_domain", [None, "gmail.com"])
+    def test_an_organizations_own_tenant_vouches_for_its_accounts(
+        self, hosted_domain: str | None
+    ) -> None:
+        connection = _connection("https://dev-123456.okta.com/oauth2/default")
+        assert managed_by_organization(connection, _signed_in(hosted_domain))

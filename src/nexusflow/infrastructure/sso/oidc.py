@@ -387,6 +387,11 @@ def _claims(payload: Mapping[str, Any]) -> IdTokenClaims:
     if not isinstance(subject, str) or not 0 < len(subject) <= 255:
         raise SsoProtocolError("id_token_invalid", internal_detail="sub")
     verified = payload.get("email_verified")
+    if verified is None:
+        # Microsoft Entra ID has no email_verified claim. Its optional xms_edov
+        # says the address is in a domain the account's own tenant verified -
+        # false for a guest whose home tenant set an address it does not own.
+        verified = payload.get("xms_edov")
     # Some providers send the JSON string "true"; nothing else counts.
     email_verified = verified is True or (isinstance(verified, str) and verified.lower() == "true")
     amr = payload.get("amr")
@@ -400,4 +405,5 @@ def _claims(payload: Mapping[str, Any]) -> IdTokenClaims:
         given_name=_text(payload, "given_name", 120),
         family_name=_text(payload, "family_name", 120),
         amr=_strings(amr, limit=20, max_length=32) if isinstance(amr, list) else (),
+        hosted_domain=_text(payload, "hd", 253),
     )

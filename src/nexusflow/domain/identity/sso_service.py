@@ -53,6 +53,7 @@ from nexusflow.domain.identity.sso import (
     email_domain,
     ensure_jit_role,
     idp_reported_mfa,
+    managed_by_organization,
     normalize_client_value,
     normalize_domain,
     normalize_domains,
@@ -216,8 +217,8 @@ class SsoService:
         The discovery document is fetched first (through the SSRF-safe client):
         a provider that does not publish one for exactly this issuer is refused.
         Changing the issuer or client ends every session the old provider
-        opened. ``sso_required`` needs a verified domain, and is refused when
-        it would lock the caller out."""
+        opened and forgets its identity links. ``sso_required`` needs a
+        verified domain, and is refused when it would lock the caller out."""
         org_id = _require_admin_session(principal)
         issuer = normalize_issuer(issuer)
         client_id = normalize_client_value(client_id, what="client id", max_length=255)
@@ -241,7 +242,6 @@ class SsoService:
             provider_changed = existing is not None and (
                 existing.issuer != issuer or existing.client_id != client_id
             )
-            previous_issuer = existing.issuer if existing is not None else None
             if existing is None:
                 if secret is None:
                     raise InvalidInputError(
@@ -286,8 +286,10 @@ class SsoService:
                     org_id, now=now, reason="sso_provider_changed"
                 )
                 await uow.sso_states.delete_for_org(org_id)
-                if previous_issuer != issuer:
-                    await uow.sso_identities.delete_for_org(org_id)
+                # Subjects can be pairwise per client - Microsoft Entra ID's are
+                # per application - so links to the old client's subjects would
+                # refuse every member as an identity conflict (review R14-3).
+                await uow.sso_identities.delete_for_org(org_id)
             await self._audit.record(
                 uow.audit,
                 action=AuditAction.SSO_UPDATED
@@ -569,6 +571,13 @@ class SsoService:
             raise PermissionDeniedError(
                 "Your e-mail domain is not allowed to sign in to this organization.",
                 code="sso_domain_not_allowed",
+            )
+        if not managed_by_organization(connection, claims):
+            # Google: a personal account with an address in the domain (review R14-1).
+            await self._fail(org_id, "account_not_managed", meta, detail=domain)
+            raise PermissionDeniedError(
+                "Sign in with the account your organization manages at its identity provider.",
+                code="sso_account_not_managed",
             )
         return await self._sign_in(connection, claims, email, meta)
 

@@ -313,6 +313,29 @@ class TestIdTokens:
         claims = await _verify(_client(net), idp, idp.sign(idp.claims("n", email_verified=value)))
         assert claims.email_verified is verified
 
+    @pytest.mark.parametrize(
+        ("overrides", "verified"),
+        [
+            ({"email_verified": None, "xms_edov": True}, True),
+            ({"email_verified": None, "xms_edov": "true"}, True),
+            ({"email_verified": None, "xms_edov": False}, False),
+            ({"email_verified": None}, False),
+            ({"email_verified": False, "xms_edov": True}, False),  # an explicit "no" wins
+        ],
+    )
+    async def test_entra_ids_domain_verified_claim_stands_in_for_email_verified(
+        self, net: FakeNetwork, idp: FakeIdp, overrides: dict[str, object], verified: bool
+    ) -> None:
+        # Review R14-2: Microsoft Entra ID sends xms_edov, never email_verified.
+        claims = await _verify(_client(net), idp, idp.sign(idp.claims("n", **overrides)))
+        assert claims.email_verified is verified
+
+    async def test_googles_hosted_domain_is_read(self, net: FakeNetwork, idp: FakeIdp) -> None:
+        client = _client(net)
+        managed = await _verify(client, idp, idp.sign(idp.claims("n", hd="example.com")))
+        personal = await _verify(client, idp, idp.sign(idp.claims("n")))
+        assert (managed.hosted_domain, personal.hosted_domain) == ("example.com", None)
+
     async def test_an_oversized_token_is_refused_before_parsing(
         self, net: FakeNetwork, idp: FakeIdp
     ) -> None:

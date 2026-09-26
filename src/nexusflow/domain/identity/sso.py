@@ -23,7 +23,12 @@ Trust model (docs/SSO.md explains it for administrators)
   data, whatever it asserts.
 * ID tokens are verified strictly: signature against the provider's JWKS with
   an algorithm allowlist (never ``none`` or HMAC), ``iss``, ``aud``/``azp``,
-  time claims with a small skew, the ``nonce`` and ``email_verified``.
+  time claims with a small skew, the ``nonce`` and ``email_verified`` (from
+  Microsoft Entra ID, which has no such claim, ``xms_edov``).
+* **Only accounts the organization manages.** An organization's own tenant at
+  its provider issues tokens for that tenant's accounts. Google's issuer serves
+  every Google account, managed or personal, so from Google the ``hd`` claim
+  must name one of the organization's verified domains.
 """
 
 from __future__ import annotations
@@ -72,6 +77,12 @@ VERIFICATION_RECORD_PREFIX = "_nexusflow-verification"
 VERIFICATION_VALUE_PREFIX = "nexusflow-verification="
 # Identity providers are reached over HTTPS on the standard port only.
 ISSUER_POLICY = UrlPolicy(allow_http=False, allowed_ports=frozenset({443}))
+# Google's issuer is shared by every Google account, managed or personal. Google
+# names the Workspace (or Cloud Identity) organization of a managed account in
+# the ``hd`` claim and requires that claim to be checked when access is limited
+# to a domain: a personal account registered with a work address - or kept by
+# a former employee - has a verified address in the domain, but no ``hd``.
+GOOGLE_ISSUER = "https://accounts.google.com"
 
 _LABEL = re.compile(r"^(?!-)[a-z0-9-]{1,63}(?<!-)$")
 _PRINTABLE = re.compile(r"^[\x21-\x7e]+$")
@@ -191,6 +202,8 @@ class IdTokenClaims:
     given_name: str | None = None
     family_name: str | None = None
     amr: tuple[str, ...] = ()
+    # Google's ``hd``: the Workspace domain of a managed account (else absent).
+    hosted_domain: str | None = None
 
 
 class OidcProvider(Protocol):
@@ -313,6 +326,21 @@ def email_domain(email: str) -> str | None:
         return normalize_domain(domain)
     except InvalidInputError:
         return None
+
+
+def managed_by_organization(connection: SsoConnection, claims: IdTokenClaims) -> bool:
+    """Whether the provider vouches for the account as one the organization
+    manages. An organization's own tenant (Okta, Entra ID, Keycloak, ...) issues
+    tokens for that tenant's accounts; Google's issuer serves every Google
+    account, so there the ``hd`` claim must name a verified domain."""
+    if connection.issuer != GOOGLE_ISSUER:
+        return True
+    if claims.hosted_domain is None:
+        return False
+    try:
+        return connection.accepts_domain(normalize_domain(claims.hosted_domain))
+    except InvalidInputError:
+        return False
 
 
 def verification_record_name(domain: str) -> str:

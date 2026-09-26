@@ -500,6 +500,25 @@ class TestSignIn:
         expect_error(response, 401, "sso_failed")
         assert await _failures(owner) == ["identity_conflict"]
 
+    async def test_a_new_client_at_the_same_provider_links_everyone_again(
+        self, api: httpx2.AsyncClient, network: FakeNetwork, admin_conn: asyncpg.Connection
+    ) -> None:
+        # Review R14-3: Microsoft Entra ID's subjects are per application, so a
+        # new app registration at the same issuer names every member anew.
+        owner = await signup(api)
+        domain = fresh_domain()
+        idp = FakeIdp()
+        slug = await ready(owner, network, idp, domain)
+        email = f"carol@{domain}"
+        session_of(api, await sign_in(api, idp, slug, email=email, sub="app-1-carol"), email)
+        idp.client_id, idp.client_secret = f"client-{uuid4().hex[:8]}", f"s3cret-{uuid4().hex}"
+        assert (await configure(owner, idp, [domain])).status_code == 200
+        session_of(api, await sign_in(api, idp, slug, email=email, sub="app-2-carol"), email)
+        subjects = await admin_conn.fetch(
+            "SELECT subject FROM sso_identities WHERE email = $1", email
+        )
+        assert [row["subject"] for row in subjects] == ["app-2-carol"]
+
     @pytest.mark.parametrize(
         ("forge", "reason"),
         [
@@ -564,6 +583,42 @@ class TestSignIn:
         response = await sign_in(api, idp, slug, email=f"x@{domain}", email_verified=False)
         expect_error(response, 403, "sso_email_not_verified")
         assert await _failures(owner) == ["email_not_verified"]
+
+    async def test_entra_ids_domain_verified_claim_proves_the_address(
+        self, api: httpx2.AsyncClient, network: FakeNetwork
+    ) -> None:
+        # Review R14-2: Microsoft Entra ID sends xms_edov, never email_verified.
+        owner = await signup(api)
+        domain = fresh_domain()
+        idp = FakeIdp()
+        slug = await ready(owner, network, idp, domain)
+        email = f"entra.member@{domain}"
+        response = await sign_in(api, idp, slug, email=email, email_verified=None, xms_edov=True)
+        session_of(api, response, email)
+        for claims in ({"xms_edov": False}, {}):  # a guest's address, or no claim at all
+            response = await sign_in(
+                api, idp, slug, email=f"guest@{domain}", email_verified=None, **claims
+            )
+            expect_error(response, 403, "sso_email_not_verified")
+
+    async def test_from_google_only_accounts_the_workspace_manages_sign_in(
+        self, api: httpx2.AsyncClient, network: FakeNetwork, admin_conn: asyncpg.Connection
+    ) -> None:
+        # Review R14-1: Google's issuer serves personal accounts too; a personal
+        # account registered with a work address has no "hd".
+        owner = await signup(api)
+        domain = fresh_domain()
+        idp = FakeIdp(host="accounts.google.com")
+        slug = await ready(owner, network, idp, domain)
+        personal = f"former.employee@{domain}"
+        for hosted_domain in (None, "gmail.com", f"sub.{domain}"):
+            response = await sign_in(api, idp, slug, email=personal, hd=hosted_domain)
+            expect_error(response, 403, "sso_account_not_managed")
+        assert await _failures(owner) == ["account_not_managed"] * 3
+        created = "SELECT count(*) FROM users WHERE email = $1"
+        assert await admin_conn.fetchval(created, personal) == 0
+        managed = f"employee@{domain}"
+        session_of(api, await sign_in(api, idp, slug, email=managed, hd=domain), managed)
 
     async def test_only_the_organizations_verified_domains_are_accepted(
         self, api: httpx2.AsyncClient, network: FakeNetwork, admin_conn: asyncpg.Connection
