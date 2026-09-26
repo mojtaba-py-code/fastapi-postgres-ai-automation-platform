@@ -42,6 +42,8 @@ FAIL_CLOSED_SCOPES = {
     "auth.register.complete",
     "auth.mfa",
     "auth.password_change",
+    "auth.sso.start",
+    "auth.sso.callback",
     "api.export",
     "api.ai",
     "webhook.endpoint",

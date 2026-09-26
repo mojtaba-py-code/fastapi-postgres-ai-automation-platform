@@ -80,9 +80,11 @@ async def internal_api(
         yield client
 
 
-async def signup(client: httpx2.AsyncClient, *, org: str | None = None) -> ApiSession:
+async def signup(
+    client: httpx2.AsyncClient, *, org: str | None = None, email: str | None = None
+) -> ApiSession:
     """A new owner, finishing a sign-up link through the API."""
-    email = unique_email()
+    email = email or unique_email()
     token, _ = await SESSION["container"].auth.issue_signup_link(email=email, meta=META)
     response = await client.post(
         "/api/v1/auth/register/complete",

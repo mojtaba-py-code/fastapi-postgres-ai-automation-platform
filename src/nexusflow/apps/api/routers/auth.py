@@ -39,7 +39,8 @@ from nexusflow.apps.api.schemas.identity import (
     SwitchOrganizationRequest,
     TokenResponse,
 )
-from nexusflow.core.errors import AuthenticationError, InvalidInputError
+from nexusflow.apps.api.schemas.sso import SsoCallbackRequest, SsoStartRequest, SsoStartResponse
+from nexusflow.core.errors import AuthenticationError, InvalidInputError, NexusFlowError
 from nexusflow.domain.identity.auth_service import LoginResult, TokenPair, normalize_email
 from nexusflow.domain.identity.login_risk import LoginRisk
 from nexusflow.infrastructure.observability import metrics
@@ -180,6 +181,42 @@ async def oauth2_token(
         raise InvalidInputError("username and password are required.", code="invalid_request")
     await _limit_account(state, username)
     result = await container.auth.login(email=username, password=password, org_id=None, meta=meta)
+    return _login_response(result)
+
+
+@router.post(
+    "/sso/start",
+    response_model=SsoStartResponse,
+    dependencies=[Depends(rate_limited("auth.sso.start"))],
+    summary="Start a sign-in at an organization's identity provider (OpenID Connect)",
+)
+async def start_sso(body: SsoStartRequest, container: ContainerDep, meta: Meta) -> SsoStartResponse:
+    started = await container.sso.start(organization=body.organization, meta=meta)
+    return SsoStartResponse(
+        authorization_url=started.authorization_url,
+        state=started.state,
+        binding=started.binding,
+        expires_in=started.expires_in,
+    )
+
+
+@router.post(
+    "/sso/callback",
+    response_model=TokenResponse | MfaChallengeResponse,
+    dependencies=[Depends(rate_limited("auth.sso.callback"))],
+    summary="Finish a single sign-on with the code and state of the redirect, and the binding",
+)
+async def complete_sso(
+    body: SsoCallbackRequest, container: ContainerDep, meta: Meta
+) -> TokenResponse | MfaChallengeResponse:
+    try:
+        result = await container.sso.complete(
+            code=body.code, state=body.state, binding=body.binding, meta=meta
+        )
+    except NexusFlowError:
+        metrics.AUTH_EVENTS.labels(event="sso_login", result="failure").inc()
+        raise
+    metrics.AUTH_EVENTS.labels(event="sso_login", result="success").inc()
     return _login_response(result)
 
 

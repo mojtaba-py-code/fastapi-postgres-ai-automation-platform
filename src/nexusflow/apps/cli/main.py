@@ -178,6 +178,24 @@ async def org_clear_network_allowlist(c: Container, args: argparse.Namespace) ->
     return {"organization_id": org.id, "allowed_ip_ranges": None}
 
 
+async def sso_verify_domain(c: Container, args: argparse.Namespace) -> dict[str, Any]:
+    """Confirm an organization owns an e-mail domain, checked outside the
+    platform (no DNS-over-HTTPS egress, or a demonstration). Audited in the
+    organization's trail and the platform's."""
+    configuration = await c.sso.confirm_domain(
+        UUID(args.org), args.domain, reason=args.reason, meta=CLI_META
+    )
+    await _platform_audit(
+        c,
+        AuditAction.SSO_DOMAIN_VERIFIED,
+        {"org_id": args.org, "domain": args.domain, "reason": args.reason},
+    )
+    return {
+        "organization_id": configuration.connection.org_id,
+        "verified_domains": configuration.connection.verified_domains,
+    }
+
+
 # ----------------------------------------------------------------- sign-up
 
 
@@ -227,6 +245,7 @@ async def keys_rewrap(c: Container, args: argparse.Namespace) -> dict[str, Any]:
             while True:  # batches until a pass re-wraps nothing
                 count = await c.integrations.rewrap(org_id, active_key_id=active)
                 count += await c.webhooks.rewrap(org_id, active_key_id=active)
+                count += await c.sso.rewrap(org_id, active_key_id=active)
                 count += await c.maintenance.rewrap_sealed(org_id, active_key_id=active)
                 total += count
                 if count == 0:
@@ -417,17 +436,7 @@ def build_parser() -> argparse.ArgumentParser:
     release.set_defaults(handler=kill_release)
     kill.add_parser("status").set_defaults(handler=kill_status)
 
-    org = sub.add_parser("org", help="organization recovery").add_subparsers(
-        dest="action", required=True
-    )
-    clear = org.add_parser(
-        "clear-network-allowlist",
-        help="remove an organization's network allowlist (it locked itself out)",
-    )
-    clear.add_argument("--org", required=True, help="organization ID")
-    clear.add_argument("--reason", required=True)
-    clear.set_defaults(handler=org_clear_network_allowlist)
-
+    _organization_commands(sub)
     _people_commands(sub)
 
     keys = sub.add_parser("keys", help="encryption key maintenance").add_subparsers(
@@ -457,6 +466,31 @@ def build_parser() -> argparse.ArgumentParser:
     deactivate.add_argument("--workflow-id", required=True)
     deactivate.set_defaults(handler=n8n_deactivate)
     return parser
+
+
+def _organization_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    """Organization recovery, and the operator's confirmation of a domain's
+    ownership for single sign-on."""
+    org = sub.add_parser("org", help="organization recovery").add_subparsers(
+        dest="action", required=True
+    )
+    clear = org.add_parser(
+        "clear-network-allowlist",
+        help="remove an organization's network allowlist (it locked itself out)",
+    )
+    clear.add_argument("--org", required=True, help="organization ID")
+    clear.add_argument("--reason", required=True)
+    clear.set_defaults(handler=org_clear_network_allowlist)
+
+    sso = sub.add_parser("sso", help="single sign-on").add_subparsers(dest="action", required=True)
+    verify_domain = sso.add_parser(
+        "verify-domain",
+        help="confirm an organization owns an allowed e-mail domain (checked out of band)",
+    )
+    verify_domain.add_argument("--org", required=True, help="organization ID")
+    verify_domain.add_argument("--domain", required=True)
+    verify_domain.add_argument("--reason", required=True)
+    verify_domain.set_defaults(handler=sso_verify_domain)
 
 
 def _people_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:

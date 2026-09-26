@@ -9,6 +9,7 @@ memory (a cheap denial-of-service against password endpoints).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 
 from argon2 import PasswordHasher as _Argon2Hasher
 from argon2 import Type
@@ -57,5 +58,15 @@ class Argon2idPasswordHasher:
     def _verify_sync(self, password_hash: str, password: str) -> bool:
         try:
             return self._hasher.verify(password_hash, password)
-        except (VerifyMismatchError, VerificationError, InvalidHashError):
+        except InvalidHashError:
+            # An account without a password (an identity provider created it):
+            # the same work as a real verification, so the response time does
+            # not tell such accounts apart.
+            self._burn(password)
             return False
+        except (VerifyMismatchError, VerificationError):
+            return False
+
+    def _burn(self, password: str) -> None:
+        with contextlib.suppress(VerifyMismatchError, VerificationError, InvalidHashError):
+            self._hasher.verify(self._dummy_hash, password)

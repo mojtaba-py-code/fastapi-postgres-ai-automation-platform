@@ -16,7 +16,12 @@ from nexusflow.core.config import Environment, Settings
 from nexusflow.infrastructure.observability.logging import configure_logging
 from nexusflow.infrastructure.security.jwt_tokens import generate_ed25519_private_key_pem
 
-pytest_plugins = ["tests.support.fixtures", "tests.support.api", "tests.support.bus"]
+pytest_plugins = [
+    "tests.support.fixtures",
+    "tests.support.api",
+    "tests.support.bus",
+    "tests.support.oidc",
+]
 
 configure_logging(level="WARNING", fmt="console", service="nexusflow-tests")
 

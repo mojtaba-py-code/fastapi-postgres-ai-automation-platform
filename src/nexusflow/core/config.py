@@ -145,6 +145,33 @@ class SecuritySettings(_Section):
     mfa_issuer: str = "NexusFlow AI"
 
 
+class SsoSettings(_Section):
+    """OpenID Connect single sign-on and SCIM provisioning (per organization).
+
+    Identity providers are configured by each organization; these settings
+    bound what the platform does with them.
+    """
+
+    # How long a started sign-in may take at the identity provider.
+    state_ttl_seconds: int = Field(default=600, ge=120, le=1800)
+    # Discovery documents and signing keys (JWKS) are cached this long per issuer.
+    metadata_cache_seconds: int = Field(default=300, ge=0, le=3600)
+    # Tolerated clock difference with the identity provider (exp, iat, nbf).
+    clock_skew_seconds: int = Field(default=60, ge=0, le=300)
+    http_timeout_seconds: float = Field(default=10.0, gt=0, le=30)
+    max_response_bytes: int = Field(default=512 * 1024, ge=16 * 1024, le=4 * 1024 * 1024)
+    # DNS-over-HTTPS (JSON API) resolver that checks domain-ownership TXT records.
+    dns_resolver_url: str = "https://cloudflare-dns.com/dns-query"
+
+    @field_validator("dns_resolver_url")
+    @classmethod
+    def _https_resolver(cls, value: str) -> str:
+        parts = urlsplit(value)
+        if parts.scheme != "https" or not parts.hostname or parts.username or parts.password:
+            raise ValueError("sso.dns_resolver_url must be an https URL without credentials")
+        return value
+
+
 class ScrapingSettings(_Section):
     user_agent: str = "NexusFlowBot/0.1 (+https://github.com/mojtaba-py-code/nexusflow-ai)"
     allow_http: bool = False
@@ -268,6 +295,10 @@ def _default_rate_limits() -> dict[str, RateLimitRule]:
         "auth.mfa": RateLimitRule(limit=10, period_seconds=300, fail_closed=True),
         # Per user: a stolen access token must not become a password oracle.
         "auth.password_change": RateLimitRule(limit=5, period_seconds=900, fail_closed=True),
+        # Single sign-on, per client address: starting stores a pending sign-in,
+        # finishing calls the identity provider.
+        "auth.sso.start": RateLimitRule(limit=30, period_seconds=60, fail_closed=True),
+        "auth.sso.callback": RateLimitRule(limit=30, period_seconds=60, fail_closed=True),
         "api.read": RateLimitRule(limit=600, period_seconds=60),
         "api.write": RateLimitRule(limit=120, period_seconds=60),
         "api.export": RateLimitRule(limit=20, period_seconds=3600, fail_closed=True),
@@ -358,6 +389,7 @@ class Settings(BaseSettings):
     redis: RedisSettings = Field(default_factory=RedisSettings)
     broker: BrokerSettings = Field(default_factory=BrokerSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
+    sso: SsoSettings = Field(default_factory=SsoSettings)
     scraping: ScrapingSettings = Field(default_factory=ScrapingSettings)
     ai: AISettings = Field(default_factory=AISettings)
     notifications: NotificationSettings = Field(default_factory=NotificationSettings)

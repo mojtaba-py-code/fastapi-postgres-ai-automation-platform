@@ -140,13 +140,23 @@ class JwtTokenCodec:
     # -------------------------------------------------------------------- mfa
 
     def issue_mfa_challenge(
-        self, *, user_id: UUID, org_id: UUID | None, now: datetime, prior_failures: int = 0
+        self,
+        *,
+        user_id: UUID,
+        org_id: UUID | None,
+        now: datetime,
+        prior_failures: int = 0,
+        sso: bool = False,
     ) -> IssuedToken:
         claims: dict[str, Any] = {"sub": str(user_id)}
         if org_id is not None:
             claims["org"] = str(org_id)
         if prior_failures > 0:
             claims["pf"] = min(prior_failures, _MAX_PRIOR_FAILURES)
+        if sso:
+            if org_id is None:
+                raise ValueError("a single sign-on challenge names its organization")
+            claims["sso"] = True
         return self._encode(claims, token_use=_MFA, now=now, ttl=self._mfa_ttl)
 
     def decode_mfa_challenge(self, token: str, *, now: datetime) -> MfaChallengeClaims:
@@ -155,12 +165,16 @@ class JwtTokenCodec:
         prior = payload.get("pf", 0)
         if not isinstance(prior, int) or isinstance(prior, bool) or not 0 <= prior <= 1000:
             raise _invalid()
+        sso = payload.get("sso", False)
+        if not isinstance(sso, bool) or (sso and org_raw is None):
+            raise _invalid()
         return MfaChallengeClaims(
             user_id=_uuid_claim(payload, "sub"),
             org_id=_uuid_claim(payload, "org") if org_raw is not None else None,
             challenge_id=str(payload["jti"]),
             expires_at=datetime.fromtimestamp(payload["exp"], tz=now.tzinfo),
             prior_failures=prior,
+            sso=sso,
         )
 
     # ---------------------------------------------------------------- helpers

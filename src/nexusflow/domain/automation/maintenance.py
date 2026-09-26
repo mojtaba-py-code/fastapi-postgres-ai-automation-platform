@@ -45,8 +45,9 @@ STUCK_INSIGHT_AFTER = timedelta(minutes=30)  # an analysis takes minutes, not ha
 MAX_RUN_ATTEMPTS = 3
 MAX_ANALYSIS_ATTEMPTS = 3
 ORG_PURGE_GRACE = timedelta(days=7)
-# Expired refresh, password-reset and sign-up tokens are kept a week (for an
-# investigation), then deleted: they can never be used again.
+# Expired refresh, password-reset and sign-up tokens (and started single
+# sign-ons) are kept a week (for an investigation), then deleted: they can
+# never be used again.
 EXPIRED_TOKENS_GRACE = timedelta(days=7)
 DELETE_BATCH = 1000
 # The large children of a dataset, deleted before the dataset row (whose
@@ -158,6 +159,9 @@ class MaintenanceService:
                 "webhook_endpoints": await uow.data.webhook_endpoints.count_stale(
                     org_id, active_key_id
                 ),
+                "sso_connections": await uow.sso_connections.count_needing_rewrap(
+                    org_id, active_key_id
+                ),
                 "records": records,
                 "record_versions": versions,
                 "changes": await uow.data.changes.count_stale_sealed(org_id, active_key_id),
@@ -248,7 +252,8 @@ class MaintenanceService:
     async def apply_identity_retention(self) -> dict[str, int]:
         """Delete sign-in data past its use (GDPR storage limitation): sessions -
         with their device and address - ``sessions_days`` after they expired,
-        and refresh, password-reset and sign-up tokens a week after. In
+        and refresh, password-reset and sign-up tokens and started single
+        sign-ons a week after. In
         batches, each its own transaction; the counts are audited."""
         now = self._clock.now()
         sessions_cutoff = now - timedelta(days=self._policy.sessions_days)
@@ -266,6 +271,10 @@ class MaintenanceService:
             (
                 "signup_requests",
                 lambda uow, n: uow.signup_requests.purge_expired(tokens_cutoff, limit=n),
+            ),
+            (
+                "sso_login_states",
+                lambda uow, n: uow.sso_states.purge_expired(tokens_cutoff, limit=n),
             ),
         )
         purged: dict[str, int] = {}

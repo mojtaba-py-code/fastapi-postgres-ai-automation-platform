@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from nexusflow.bootstrap.http import build_http_client, build_url_policy
+from nexusflow.bootstrap.http import build_http_client, build_idp_http_client, build_url_policy
 from nexusflow.core.clock import Clock, SystemClock
 from nexusflow.core.config import Settings, decode_key_bytes
 from nexusflow.core.resilience import CircuitBreaker
@@ -33,6 +33,7 @@ from nexusflow.domain.identity.password_policy import PasswordPolicy
 from nexusflow.domain.identity.privacy import PrivacyService
 from nexusflow.domain.identity.security_emails import SecurityEmailService
 from nexusflow.domain.identity.service_accounts import ServiceAccountService
+from nexusflow.domain.identity.sso_service import SsoPolicy, SsoService
 from nexusflow.domain.integrations.service import IntegrationService
 from nexusflow.domain.intelligence.ports import AIProvider
 from nexusflow.domain.intelligence.service import IntelligenceService
@@ -71,6 +72,8 @@ from nexusflow.infrastructure.security.hashing import HmacTokenHasher, SecureTok
 from nexusflow.infrastructure.security.jwt_tokens import JwtKeyRing, JwtTokenCodec
 from nexusflow.infrastructure.security.passwords import Argon2idPasswordHasher
 from nexusflow.infrastructure.security.totp import TotpService
+from nexusflow.infrastructure.sso.dns import DohTxtResolver
+from nexusflow.infrastructure.sso.oidc import OidcClient
 from nexusflow.infrastructure.storage.local import LocalFileStorage
 from nexusflow.infrastructure.storage.scanning import ClamdScanner, NoopScanner
 
@@ -122,6 +125,7 @@ class Container:
     maintenance: MaintenanceService
     security_emails: SecurityEmailService
     service_accounts: ServiceAccountService
+    sso: SsoService
     closers: list[Callable[[], Awaitable[None]]] = field(default_factory=list)
 
     async def aclose(self) -> None:
@@ -171,6 +175,7 @@ def build_container(
     redis: Redis | None = None,
     http: SafeHttpClient | None = None,
     ai_provider: AIProvider | None = None,
+    idp_http: SafeHttpClient | None = None,
 ) -> Container:
     register_mappings()
     clock = clock or SystemClock()
@@ -282,6 +287,27 @@ def build_container(
     )
     email_transport = SmtpEmailTransport(settings.notifications)
     rules = settings.rate_limits.rules
+    idp_client = idp_http or build_idp_http_client(settings.sso, settings.scraping)
+    sso = SsoService(
+        uow_factory=uow_factory,
+        clock=clock,
+        audit=audit,
+        cipher=cipher,
+        token_hasher=token_hasher,
+        token_generator=tokens,
+        oidc=OidcClient(
+            idp_client,
+            cache_seconds=settings.sso.metadata_cache_seconds,
+            leeway_seconds=settings.sso.clock_skew_seconds,
+            max_response_bytes=settings.sso.max_response_bytes,
+        ),
+        dns=DohTxtResolver(idp_client, resolver_url=settings.sso.dns_resolver_url),
+        auth=auth,
+        policy=SsoPolicy(
+            public_base_url=settings.app.public_base_url,
+            state_ttl_seconds=settings.sso.state_ttl_seconds,
+        ),
+    )
     container = Container(
         settings=settings,
         clock=clock,
@@ -432,9 +458,11 @@ def build_container(
         service_accounts=ServiceAccountService(
             uow_factory=uow_factory, clock=clock, audit=audit, token_hasher=token_hasher
         ),
+        sso=sso,
     )
     container.closers.append(engine.dispose)
     container.closers.append(http_client.aclose)
+    container.closers.append(idp_client.aclose)
     if redis is None:
         container.closers.append(redis_client.aclose)
     if n8n is not None:

@@ -32,6 +32,7 @@ from nexusflow.apps.api.routers import (
     auth,
     catalog,
     health,
+    identity_providers,
     intelligence,
     internal,
     sandbox_gateway,
@@ -66,7 +67,7 @@ def _body_limits(settings: Settings, mode: AppMode) -> dict[str, int]:
             )
         }
     return {
-        r"^/api/v1/sources/[^/]+/uploads$": settings.storage.max_upload_bytes + _MULTIPART_OVERHEAD
+        r"^/api/v1/sources/[^/]+/uploads$": settings.storage.max_upload_bytes + _MULTIPART_OVERHEAD,
     }
 
 
@@ -167,6 +168,7 @@ _PROTECTED_ROUTERS = (
     accounts.organizations,
     accounts.api_keys,
     accounts.audit,
+    identity_providers.router,
     catalog.projects,
     catalog.datasets,
     catalog.records,

@@ -49,6 +49,10 @@ SECTION_NOTES: dict[str, str] = {
     ),
     "broker": "RabbitMQ (Celery). Each worker pool has its own broker user; see deploy/rabbitmq.",
     "security": "Key material, token lifetimes, password hashing and brute-force protection.",
+    "sso": (
+        "Single sign-on (OpenID Connect) and SCIM provisioning. Each organization configures "
+        "its own identity provider (docs/SSO.md); these bound what the platform does with it."
+    ),
     "scraping": (
         "Outbound HTTP for collection: SSRF policy, limits, politeness and the browser service."
     ),

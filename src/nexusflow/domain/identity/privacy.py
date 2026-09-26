@@ -63,6 +63,15 @@ class PrivacyService:
             raise PermissionDeniedError(
                 "This action requires a signed-in user session.", code="session_required"
             )
+        if principal.sso_org_id is not None:
+            # The copy covers every organization of the person: an organization's
+            # identity provider does not hand it out. Sign in with the account's
+            # password (a reset link sets one) - or ask the operator.
+            raise PermissionDeniedError(
+                "Sign in with your password to export your data: a single sign-on session "
+                "reaches its organization only.",
+                code="sso_session_restricted",
+            )
         document = await self._export(principal.user_id, platform_chain=False)
         async with self._uow_factory(TenantScope(user_id=principal.user_id)) as uow:
             await self._audit.record(
@@ -158,6 +167,8 @@ class PrivacyService:
             if user is None:
                 raise NotFoundError()
             sessions = await uow.sessions.list_for_user(user_id, limit=MAX_SESSIONS)
+            identities = await uow.sso_identities.list_for_user(user_id, MAX_SESSIONS)
+            directory = await uow.scim_users.list_for_user(user_id, MAX_SESSIONS)
             org_ids = await uow.memberships.list_org_ids_for_user(user_id)
             organizations: list[JSONValue] = []
             api_keys: list[JSONValue] = []
@@ -210,8 +221,33 @@ class PrivacyService:
                     "device": describe_client(s.user_agent),
                     "user_agent": s.user_agent,
                     "mfa_verified": s.mfa_verified,
+                    "single_sign_on_organization_id": str(s.sso_org_id) if s.sso_org_id else None,
                 }
                 for s in sessions
+            ],
+            "identity_provider_links": [
+                {
+                    "organization_id": str(i.org_id),
+                    "issuer": i.issuer,
+                    "subject": i.subject,
+                    "email": i.email,
+                    "linked_at": _when(i.created_at),
+                    "last_sign_in_at": _when(i.last_login_at),
+                }
+                for i in identities
+            ],
+            "directory_entries": [
+                {
+                    "organization_id": str(d.org_id),
+                    "user_name": d.user_name,
+                    "external_id": d.external_id,
+                    "display_name": d.display_name,
+                    "given_name": d.given_name,
+                    "family_name": d.family_name,
+                    "active": d.active,
+                    "created_at": _when(d.created_at),
+                }
+                for d in directory
             ],
             "api_keys": api_keys,
             "activity": activity,

@@ -69,10 +69,15 @@ class OrganizationService:
             return org
 
     async def list_for_user(self, principal: Principal) -> list[OrganizationView]:
+        """The caller's organizations - from a session an identity provider
+        opened, only that provider's organization."""
         if principal.user_id is None:
             return []
         async with self._uow_factory(TenantScope(user_id=principal.user_id)) as uow:
-            return await uow.organizations.list_for_user(principal.user_id)
+            views = await uow.organizations.list_for_user(principal.user_id)
+        if principal.sso_org_id is not None:
+            return [view for view in views if view.org_id == principal.sso_org_id]
+        return views
 
     async def update(
         self,
@@ -86,7 +91,9 @@ class OrganizationService:
 
         ``automation_frozen`` is not accepted here: freezing has its own audited,
         reason-carrying operation, so a routine settings change can never lift
-        an incident freeze as a side effect.
+        an incident freeze as a side effect. Neither is ``sso_required``: it
+        belongs to the single sign-on configuration, which checks it cannot
+        lock the organization out.
         """
         principal.require(Permission.ORG_UPDATE)
         org_id = principal.require_org()
@@ -95,6 +102,11 @@ class OrganizationService:
             raise InvalidInputError(
                 "Use the automation-freeze operation to change automation_frozen.",
                 code="use_automation_freeze",
+            )
+        if settings is not None and "sso_required" in settings:
+            raise InvalidInputError(
+                "Use the single sign-on configuration to change sso_required.",
+                code="use_sso_configuration",
             )
         async with self._uow_factory(TenantScope.of(principal)) as uow:
             org = await uow.organizations.get_for_update(org_id)

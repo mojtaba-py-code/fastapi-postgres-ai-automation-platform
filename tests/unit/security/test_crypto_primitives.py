@@ -125,6 +125,24 @@ class TestPasswordHasher:
     async def test_dummy_verify_runs(self, hasher: Argon2idPasswordHasher) -> None:
         await hasher.dummy_verify("whatever")
 
+    async def test_an_account_without_a_password_costs_a_real_verification(
+        self, hasher: Argon2idPasswordHasher, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Accounts an identity provider created have the unusable hash "!": a
+        # sign-in attempt must take as long as for any account, or the response
+        # time would tell which accounts are single sign-on only.
+        verified: list[str] = []
+        inner = hasher._hasher
+
+        class Counting:
+            def verify(self, password_hash: str, password: str) -> bool:
+                verified.append(password_hash)
+                return inner.verify(password_hash, password)
+
+        monkeypatch.setattr(hasher, "_hasher", Counting())
+        assert not await hasher.verify("!", "any password at all")
+        assert verified == ["!", hasher._dummy_hash]
+
 
 class TestJwt:
     @pytest.fixture
@@ -162,6 +180,33 @@ class TestJwt:
         challenge = codec.issue_mfa_challenge(user_id=uuid4(), org_id=None, now=clock.now())
         with pytest.raises(AuthenticationError):
             codec.decode_access_token(challenge.token, now=clock.now())
+
+    def test_a_single_sign_on_challenge_is_marked_and_names_its_organization(
+        self, codec: JwtTokenCodec, clock: FrozenClock
+    ) -> None:
+        org = uuid4()
+        issued = codec.issue_mfa_challenge(user_id=uuid4(), org_id=org, now=clock.now(), sso=True)
+        claims = codec.decode_mfa_challenge(issued.token, now=clock.now())
+        assert (claims.sso, claims.org_id) == (True, org)
+        plain = codec.issue_mfa_challenge(user_id=uuid4(), org_id=org, now=clock.now())
+        assert codec.decode_mfa_challenge(plain.token, now=clock.now()).sso is False
+        with pytest.raises(ValueError, match="organization"):
+            codec.issue_mfa_challenge(user_id=uuid4(), org_id=None, now=clock.now(), sso=True)
+
+    def test_the_single_sign_on_mark_cannot_be_removed(
+        self, codec: JwtTokenCodec, clock: FrozenClock
+    ) -> None:
+        # Dropping "sso" would complete the challenge as an ordinary session,
+        # one not bound to the organization: the signature forbids it.
+        issued = codec.issue_mfa_challenge(
+            user_id=uuid4(), org_id=uuid4(), now=clock.now(), sso=True
+        )
+        header, payload, signature = issued.token.split(".")
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        del claims["sso"]
+        forged = base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=").decode()
+        with pytest.raises(AuthenticationError):
+            codec.decode_mfa_challenge(f"{header}.{forged}.{signature}", now=clock.now())
 
     def test_an_mfa_challenge_carries_the_failures_before_it(
         self, codec: JwtTokenCodec, clock: FrozenClock
