@@ -16,8 +16,18 @@ regex = '''\bwhsec_[A-Za-z0-9_-]{40,}\b'''
 keywords = ["whsec_"]
 
 [allowlist]
-description = "Test fixtures with deliberately fake or short values"
+description = "Test fixtures with deliberately fake or short values; type names read as values"
 paths = [
   '''tests/.*''',
   '''uv\.lock''',
+]
+# Matched against a finding's secret, whole. The default generic-api-key rule
+# reads the name after "key" in two lines of code as a value -
+# `key.curve, ec.SECP256R1` (infrastructure/security/webauthn.py) and
+# `private_key: Ed25519PrivateKey` (infrastructure/security/jwt_tokens.py):
+# names of the cryptography library's types, never secrets. Exact names only,
+# so that nothing else is let through.
+regexes = [
+  '''^ec\.SECP256R1$''',
+  '''^Ed25519PrivateKey$''',
 ]
