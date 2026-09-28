@@ -109,7 +109,10 @@ comes with the `browser` extra; `NEXUSFLOW_E2E_BROWSER_CHANNEL=msedge` (or
 
 ```bash
 uv run python scripts/dev_console.py --empty      # in one terminal
-NEXUSFLOW_E2E_BASE_URL=http://localhost:8765 NEXUSFLOW_E2E_MAILPIT_URL=http://localhost:8765/_dev/mail CONSOLE_SCREENSHOTS=var/console   uv run --extra browser python tests/e2e/console_smoke.py
+NEXUSFLOW_E2E_BASE_URL=http://localhost:8765 \
+NEXUSFLOW_E2E_MAILPIT_URL=http://localhost:8765/_dev/mail \
+CONSOLE_SCREENSHOTS=var/console \
+  uv run --extra browser python tests/e2e/console_smoke.py
 ```
 
 ## 6. Tests
