@@ -99,8 +99,8 @@ localdb = ["pgserver>=0.1.4"]
 nexusflow = "nexusflow.apps.cli.main:main"
 
 [project.urls]
-Documentation = "https://github.com/mojtaba-py-code/nexusflow-ai/tree/main/docs"
-Security = "https://github.com/mojtaba-py-code/nexusflow-ai/blob/main/SECURITY.md"
+Documentation = "https://github.com/mojtaba-py-code/fastapi-postgres-ai-automation-platform/tree/main/docs"
+Security = "https://github.com/mojtaba-py-code/fastapi-postgres-ai-automation-platform/blob/main/SECURITY.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/nexusflow"]

@@ -59,7 +59,7 @@ from nexusflow.infrastructure.observability.logging import get_logger
 # A SCIM request carries one User or one PatchOp: a few kilobytes.
 MAX_BODY_BYTES = 64 * 1024
 BODY_PATH = r"^/scim/v2/.*$"
-DOCUMENTATION = "https://github.com/mojtaba-py-code/nexusflow-ai/blob/main/docs/SSO.md"
+DOCUMENTATION = "https://github.com/mojtaba-py-code/fastapi-postgres-ai-automation-platform/blob/main/docs/SSO.md"
 _ACCEPTED_TYPES = frozenset({MEDIA_TYPE, "application/json"})
 _bearer = HTTPBearer(auto_error=False, description="A SCIM token (nxp_…)")
 _log = get_logger("nexusflow.api.scim")

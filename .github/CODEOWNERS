@@ -1,0 +1,11 @@
+# Every change is reviewed by the maintainer. The security-critical paths are named
+# as well, so that they keep a required reviewer when more maintainers join.
+*                                           @mojtaba-py-code
+
+/src/nexusflow/domain/identity/             @mojtaba-py-code
+/src/nexusflow/domain/authorization/        @mojtaba-py-code
+/src/nexusflow/infrastructure/security/     @mojtaba-py-code
+/migrations/                                @mojtaba-py-code
+/deploy/                                    @mojtaba-py-code
+/.github/                                   @mojtaba-py-code
+/SECURITY.md                                @mojtaba-py-code

@@ -1,5 +1,14 @@
 # NexusFlow AI
 
+[![CI](https://github.com/mojtaba-py-code/fastapi-postgres-ai-automation-platform/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mojtaba-py-code/fastapi-postgres-ai-automation-platform/actions/workflows/ci.yml)
+![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
+![PostgreSQL row-level security](https://img.shields.io/badge/PostgreSQL-row--level%20security-4169E1?logo=postgresql&logoColor=white)
+![Celery and RabbitMQ](https://img.shields.io/badge/Celery%20%2B%20RabbitMQ-workers-37814A?logo=celery&logoColor=white)
+![n8n](https://img.shields.io/badge/n8n-orchestration-EA4B71?logo=n8n&logoColor=white)
+![Passkeys, SSO, SCIM](https://img.shields.io/badge/identity-passkeys%20%C2%B7%20OIDC%20SSO%20%C2%B7%20SCIM-6E4AFF)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue)](LICENSE)
+
 **An enterprise automation and competitive-intelligence platform, built with security first.**
 
 NexusFlow AI collects business data from websites, REST APIs, signed webhooks and
@@ -163,7 +172,7 @@ tests/             unit, integration (real PostgreSQL), security and end-to-end 
 
 ## Status and honest limitations
 
-A complete, tested reference implementation: 2,531 tests (unit,
+A complete, tested reference implementation: 2,561 tests (unit,
 integration against a real PostgreSQL, security, and a walkthrough over real
 HTTP) pass with 90 % line and branch coverage (each platform skips one
 platform-specific test), plus 26 end-to-end tests and a

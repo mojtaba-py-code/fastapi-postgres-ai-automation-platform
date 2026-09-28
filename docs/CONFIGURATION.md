@@ -166,7 +166,7 @@ Outbound HTTP for collection: SSRF policy, limits, politeness and the browser se
 
 | Variable | Type | Default | Constraints |
 |---|---|---|---|
-| `NEXUSFLOW_SCRAPING__USER_AGENT` | str | `NexusFlowBot/0.1 (+https://github.com/mojtaba-py-code/nexusflow-ai)` |  |
+| `NEXUSFLOW_SCRAPING__USER_AGENT` | str | `NexusFlowBot/0.1 (+https://github.com/mojtaba-py-code/fastapi-postgres-ai-automation-platform)` |  |
 | `NEXUSFLOW_SCRAPING__ALLOW_HTTP` | bool | `false` |  |
 | `NEXUSFLOW_SCRAPING__ALLOWED_PORTS` | JSON list | `80, 443` |  |
 | `NEXUSFLOW_SCRAPING__CONNECT_TIMEOUT_SECONDS` | float | `5.0` | > 0; <= 30 |

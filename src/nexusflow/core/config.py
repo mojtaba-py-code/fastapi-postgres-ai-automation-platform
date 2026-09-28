@@ -203,7 +203,7 @@ class SsoSettings(_Section):
 
 
 class ScrapingSettings(_Section):
-    user_agent: str = "NexusFlowBot/0.1 (+https://github.com/mojtaba-py-code/nexusflow-ai)"
+    user_agent: str = "NexusFlowBot/0.1 (+https://github.com/mojtaba-py-code/fastapi-postgres-ai-automation-platform)"
     allow_http: bool = False
     allowed_ports: list[int] = Field(default_factory=lambda: [80, 443])
     connect_timeout_seconds: float = Field(default=5.0, gt=0, le=30)

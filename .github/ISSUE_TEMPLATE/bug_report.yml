@@ -1,0 +1,59 @@
+name: Bug report
+description: Something does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Thank you for reporting. **Security problems are not bugs to file here:**
+        follow [SECURITY.md](https://github.com/mojtaba-py-code/fastapi-postgres-ai-automation-platform/blob/main/SECURITY.md)
+        and report them privately.
+        Never paste secrets, tokens, personal data or tenant data into an issue.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: The smallest steps, request or configuration that shows it.
+      placeholder: |
+        1. docker compose up -d
+        2. POST /api/v1/...
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: The release tag or the commit you run (`git rev-parse --short HEAD`).
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Public API
+        - Web console
+        - Workers (pipeline, integrations, sandbox, browser)
+        - Identity (sign-in, MFA, passkeys, single sign-on, SCIM)
+        - Deployment (Compose, nginx, TLS, backups)
+        - n8n orchestration
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or request ID
+      description: >-
+        The request ID of a failed call (every error response carries one) and the
+        relevant log lines - with secrets and personal data removed.
+      render: text

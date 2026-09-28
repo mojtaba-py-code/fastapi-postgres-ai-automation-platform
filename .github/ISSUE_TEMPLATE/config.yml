@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/mojtaba-py-code/fastapi-postgres-ai-automation-platform/blob/main/SECURITY.md
+    about: Never in a public issue - SECURITY.md says how to report privately.
+  - name: Documentation
+    url: https://github.com/mojtaba-py-code/fastapi-postgres-ai-automation-platform/tree/main/docs
+    about: Architecture, API, deployment, security and operations guides.
