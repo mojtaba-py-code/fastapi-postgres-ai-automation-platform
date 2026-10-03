@@ -99,12 +99,14 @@ def test_scripts_import_only_the_consoles_own_modules(path: Path) -> None:
 
 def test_the_document_has_no_inline_code_or_foreign_resources() -> None:
     html = _source(WEB / "index.html")
-    assert re.findall(r"<script\b[^>]*>", html) == [
+    # Case-insensitive throughout: HTML tag and attribute names are, so an inline
+    # <SCRIPT>, <STYLE> or ONCLICK= must not slip past these checks.
+    assert re.findall(r"<script\b[^>]*>", html, flags=re.IGNORECASE) == [
         '<script type="module" src="/assets/js/main.js">'
     ]
-    assert "<style" not in html
-    assert not re.search(r"\son[a-z]+\s*=", html), "inline event handler"
-    assert not re.search(r"""(?:src|href)\s*=\s*["'](?:https?:)?//""", html), (
+    assert not re.search(r"<style\b", html, flags=re.IGNORECASE), "inline stylesheet"
+    assert not re.search(r"\son[a-z]+\s*=", html, flags=re.IGNORECASE), "inline event handler"
+    assert not re.search(r"""(?:src|href)\s*=\s*["'](?:https?:)?//""", html, flags=re.IGNORECASE), (
         "a resource from another origin"
     )
     css = _source(WEB / "assets" / "css" / "console.css")

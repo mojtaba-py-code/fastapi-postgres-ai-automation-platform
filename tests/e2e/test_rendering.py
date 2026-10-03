@@ -140,7 +140,8 @@ def test_a_javascript_source_is_rendered_by_the_real_browser(
     # What makes this a rendering test: without the script, the page has no quotes.
     _, html = _page_as_this_runner_gets_it()
     assert html, "the page could not be fetched to confirm it is rendered by its script"
-    markup = re.sub(r"<script\b.*?</script>", "", html, flags=re.DOTALL | re.IGNORECASE)
+    # `</script\b[^>]*>`: browsers also end a script at `</script >` or `</script foo>`.
+    markup = re.sub(r"<script\b.*?</script\b[^>]*>", "", html, flags=re.DOTALL | re.IGNORECASE)
     assert not re.search(r"""class=["']quote["']""", markup), (
         "the page's HTML carries its quotes now: pick a page only JavaScript fills"
     )

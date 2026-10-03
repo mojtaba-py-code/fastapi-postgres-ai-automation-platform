@@ -3,7 +3,9 @@
 ## Reporting a vulnerability
 
 Please **do not** open public issues for security problems. Report them privately
-through GitHub's *Report a vulnerability* (security advisories) on this repository.
+through GitHub's
+[*Report a vulnerability*](https://github.com/mojtaba-py-code/fastapi-postgres-ai-automation-platform/security/advisories/new)
+form (private security advisories) on this repository.
 Include affected versions, reproduction steps and impact. You will get an
 acknowledgement within 3 business days. We aim to ship a fix or mitigation for
 critical issues within 14 days, and we credit reporters who want to be named.
