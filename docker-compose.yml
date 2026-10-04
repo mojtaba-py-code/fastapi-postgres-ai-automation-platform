@@ -382,7 +382,7 @@ services:
 
   redis:
     <<: *hardened
-    image: ${REDIS_IMAGE:-redis:7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499}
+    image: ${REDIS_IMAGE:-redis:8.10-alpine@sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0}
     user: "999:1000"
     command: ["redis-server", "/usr/local/etc/redis/redis-tls.conf"]
     volumes:
@@ -403,7 +403,7 @@ services:
     # Disposable robots.txt / host-throttle cache for the sandbox pool only:
     # no persistence, LRU eviction, nothing the platform depends on.
     <<: *hardened
-    image: ${REDIS_IMAGE:-redis:7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499}
+    image: ${REDIS_IMAGE:-redis:8.10-alpine@sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0}
     user: "999:1000"
     command: ["redis-server", "/usr/local/etc/redis/redis-tls.conf"]
     volumes:
