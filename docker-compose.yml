@@ -447,7 +447,7 @@ services:
   clamav:
     <<: *hardened
     profiles: ["av"]              # enable: docker compose --profile av up -d
-    image: ${CLAMAV_IMAGE:-clamav/clamav:1.4@sha256:a5f03c12a79dbe9f6d8a527b6bb1ea053fa8dd061d3738a26897f055ee2d9303}
+    image: ${CLAMAV_IMAGE:-clamav/clamav:1.5@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0}
     read_only: false
     # Upstream's unprivileged mode: no root, no capabilities.
     user: clamav
