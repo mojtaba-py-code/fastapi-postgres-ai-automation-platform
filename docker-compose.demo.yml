@@ -13,7 +13,7 @@
 services:
   mailpit:
     user: "65534:65534"                 # the image would run as root
-    image: ${MAILPIT_IMAGE:-axllent/mailpit:v1.31.2@sha256:74d609a42ec279aa63c6b4622a6fa9b5408d1ad5b1d76a1c4be40a265ce0863d}
+    image: ${MAILPIT_IMAGE:-axllent/mailpit:v1.31.4@sha256:b68349e3a014b90c5610bfb26b2ae36f3892d7b8cf25ee140c6c71c98d2fcf48}
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
