@@ -34,7 +34,7 @@ services:
     ports: ["127.0.0.1:6379:6379"]
 
   rabbitmq:
-    image: ${RABBITMQ_IMAGE:-rabbitmq:4.3-alpine@sha256:2531fe16e1cb4ec4086d3eaa63118c8f074dd98620d55f022f453a397b18f037}
+    image: ${RABBITMQ_IMAGE:-rabbitmq:4.3-alpine@sha256:2cb43283d8bbd3caa6c0f0dc00e96c8de772df33df7fd8af6aee4d605aeb8ada}
     environment:
       RABBITMQ_CONFIG_FILES: /etc/rabbitmq/conf.d
     volumes:
