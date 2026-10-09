@@ -13,7 +13,7 @@
 FROM ghcr.io/astral-sh/uv:0.12.23@sha256:61d393e44e249f2e4b526b6c7ddcecce245946826e608e11c93ad4f5bba55b21 AS uv
 
 # ---------------------------------------------------------------- builder
-FROM python:3.12-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e AS builder
+FROM python:3.14-slim-bookworm@sha256:48b13b003dda20b16f9442b8475aa05fe21bf6579a8c881db92ffb4d8fd20f83 AS builder
 COPY --from=uv /uv /usr/local/bin/uv
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
@@ -32,7 +32,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
  && { /opt/venv/bin/python -m pip uninstall -y pip setuptools wheel 2>/dev/null || true; }
 
 # ---------------------------------------------------------------- runtime
-FROM python:3.12-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e AS runtime
+FROM python:3.14-slim-bookworm@sha256:48b13b003dda20b16f9442b8475aa05fe21bf6579a8c881db92ffb4d8fd20f83 AS runtime
 LABEL org.opencontainers.image.title="nexusflow-ai" \
       org.opencontainers.image.description="NexusFlow AI - automation & intelligence platform" \
       org.opencontainers.image.licenses="MIT"
