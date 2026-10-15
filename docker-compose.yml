@@ -92,7 +92,7 @@ services:
   # ------------------------------------------------------------------ edge
   nginx:
     <<: *hardened
-    image: ${NGINX_IMAGE:-nginxinc/nginx-unprivileged:1.30-alpine-slim@sha256:307ca0bded4dda86dade6f5bd2a2551601bec9bac3fd73a21613fabcd9eca66a}
+    image: ${NGINX_IMAGE:-nginxinc/nginx-unprivileged:1.30-alpine-slim@sha256:4ac59c85c8c46d9e91eaabd2122cda4923ba380cf11f4138e389f069bcdc77a3}
     tmpfs: ["/tmp:size=32m,noexec,nosuid,nodev"]
     ports:
       # IPv4 only: an IPv6 client would reach nginx through Docker's userland
@@ -293,7 +293,7 @@ services:
     # its owner set-up first. Set the owner up as soon as you enable it.
     profiles: ["n8n"]
     init: false                   # the image runs its own init (tini)
-    image: ${N8N_IMAGE:-n8nio/n8n:2.41.5@sha256:6f532d3b819cfe66c6a13c5375228f312c53df1abaa11a377eb8c3d3f105c363}   # keep current: n8n ships frequent security fixes
+    image: ${N8N_IMAGE:-n8nio/n8n:2.42.3@sha256:240eaa2a3d491adac5817aa4c3f1c521bb18ec79f6e448517158d5220ee0f37b}   # keep current: n8n ships frequent security fixes
     read_only: false              # n8n writes its settings/cache under /home/node
     tmpfs: ["/tmp:size=64m,noexec,nosuid,nodev"]
     environment:
@@ -420,7 +420,7 @@ services:
 
   rabbitmq:
     <<: *hardened
-    image: ${RABBITMQ_IMAGE:-rabbitmq:4.3-alpine@sha256:2531fe16e1cb4ec4086d3eaa63118c8f074dd98620d55f022f453a397b18f037}
+    image: ${RABBITMQ_IMAGE:-rabbitmq:4.3-alpine@sha256:60f9d5575c0a96f0df221fa55a9bd82118c0098f006ff08f7c8b797ef7fd0f50}
     # Start as the image's own user: its entrypoint only switches users when it
     # runs as root, which would need SETUID/SETGID (all capabilities are dropped).
     user: rabbitmq
@@ -447,7 +447,7 @@ services:
   clamav:
     <<: *hardened
     profiles: ["av"]              # enable: docker compose --profile av up -d
-    image: ${CLAMAV_IMAGE:-clamav/clamav:1.4@sha256:a5f03c12a79dbe9f6d8a527b6bb1ea053fa8dd061d3738a26897f055ee2d9303}
+    image: ${CLAMAV_IMAGE:-clamav/clamav:1.4@sha256:b5b910ce43d595bf8a2fe401e34db56434602b2c755b7c2b07f00c917d04d469}
     read_only: false
     # Upstream's unprivileged mode: no root, no capabilities.
     user: clamav
@@ -485,7 +485,7 @@ services:
 
   grafana:
     <<: *hardened
-    image: ${GRAFANA_IMAGE:-grafana/grafana:13.2.3@sha256:b28bae15e219c998fb0e0424ed724930cc61b1f61fb404d47c862f9a23f9e572}
+    image: ${GRAFANA_IMAGE:-grafana/grafana:13.2.4@sha256:dbbc38ea21103cefb50396340cd88afec779c7e070b0a7bf5a75b4ce46651d3f}
     tmpfs: ["/tmp:size=32m"]
     environment:
       GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_password
