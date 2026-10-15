@@ -45,7 +45,7 @@ vulnerabilities:
       OpenSSL QUIC listener.
     expired_at: 2026-10-31
 
-  # Grafana 12.4.11, the newest release of the maintained 12.4 line, reached
+  # Grafana 13.2.4, the newest release, reached
   # by operators only (SSH tunnel), with the Prometheus data source alone.
   - id: CVE-2026-43871
     paths:
@@ -58,6 +58,7 @@ vulnerabilities:
   - id: CVE-2026-21728
     paths:
       - usr/share/grafana/bin/grafana
+      - usr/share/grafana/data/plugins-bundled/tempo/gpx_grafana-tempo-datasource_linux_amd64
     statement: >-
       A Tempo server issue in the Tempo packages Grafana links for its Tempo
       data source, which is not configured.
@@ -69,3 +70,67 @@ vulnerabilities:
       Tempo's S3 credential disclosure concerns a Tempo server; Grafana links
       Tempo packages only for its Tempo data source, which is not configured.
     expired_at: 2026-10-31
+
+  # Go 1.26.9 / 1.27.2 and golang.org/x/net 0.60.0 fix two HTTP *server*
+  # denial-of-service bugs. Prometheus 3.15.0, Alertmanager 0.34.1 and
+  # Grafana 13.2.4 (the newest releases, re-checked 2026-10-15) were built
+  # before those fixes. Prometheus and Alertmanager listen only on the internal
+  # `monitoring` network (no published port, not behind the edge). In Grafana
+  # only the bundled data source plugin binaries carry them, and a plugin
+  # serves no HTTP: Grafana drives it over go-plugin on loopback, and only the
+  # Prometheus data source is provisioned. Drop these entries once the images
+  # ship Go 1.26.9 and x/net 0.60.0.
+  - id: CVE-2026-78667
+    paths:
+      - bin/alertmanager
+      - bin/amtool
+      - bin/prometheus
+      - bin/promtool
+      - usr/share/grafana/data/plugins-bundled/elasticsearch/gpx_grafana_elasticsearch_datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/grafana-postgresql-datasource/gpx_grafana_postgresql_datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/grafana-pyroscope-datasource/gpx_grafana-pyroscope-datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/influxdb/gpx_grafana_influxdb_datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/jaeger/gpx_grafana-jaeger-datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/loki/gpx_grafana-loki-datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/mssql/gpx_grafana-mssql-datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/mysql/gpx_grafana-mysql-datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/opentsdb/gpx_grafana-opentsdb-datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/prometheus/gpx_grafana-prometheus-datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/stackdriver/gpx_grafana_cloudmonitoring_datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/tempo/gpx_grafana-tempo-datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/zipkin/gpx_grafana-zipkin-datasource_linux_amd64
+    statement: >-
+      net/http Range-header denial of service, server side; Prometheus and
+      Alertmanager are reachable only on the internal monitoring network, and
+      the Grafana plugin binaries run no HTTP server.
+    expired_at: 2026-11-15
+  - id: CVE-2026-78669
+    paths:
+      - bin/alertmanager
+      - bin/amtool
+      - bin/prometheus
+      - bin/promtool
+      - usr/share/grafana/data/plugins-bundled/elasticsearch/gpx_grafana_elasticsearch_datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/grafana-postgresql-datasource/gpx_grafana_postgresql_datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/grafana-pyroscope-datasource/gpx_grafana-pyroscope-datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/influxdb/gpx_grafana_influxdb_datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/jaeger/gpx_grafana-jaeger-datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/loki/gpx_grafana-loki-datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/mssql/gpx_grafana-mssql-datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/mysql/gpx_grafana-mysql-datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/opentsdb/gpx_grafana-opentsdb-datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/prometheus/gpx_grafana-prometheus-datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/stackdriver/gpx_grafana_cloudmonitoring_datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/tempo/gpx_grafana-tempo-datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/zipkin/gpx_grafana-zipkin-datasource_linux_amd64
+    statement: >-
+      HTTP/2 server denial of service; same reach as CVE-2026-78667 (internal
+      monitoring network only, no HTTP server in the Grafana plugins).
+    expired_at: 2026-11-15
+  - id: CVE-2026-84304
+    paths:
+      - usr/share/grafana/data/plugins-bundled/stackdriver/gpx_grafana_cloudmonitoring_datasource_linux_amd64
+    statement: >-
+      Server-side gRPC memory exhaustion in the Cloud Monitoring data source
+      plugin, which is not configured (only Prometheus is provisioned).
+    expired_at: 2026-11-15

@@ -13,6 +13,11 @@ updates:
   - package-ecosystem: docker
     directory: /docker
     schedule: {interval: weekly}
+    ignore:
+      # the image stays on Python 3.12; moving to a new minor is a
+      # deliberate migration, not a routine bump
+      - dependency-name: "python"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
   - package-ecosystem: docker-compose
     directory: /
     schedule: {interval: weekly}
