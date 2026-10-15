@@ -18,10 +18,12 @@ vulnerabilities:
       - bin/amtool
       - bin/prometheus
       - bin/promtool
+      - usr/share/grafana/data/plugins-bundled/stackdriver/gpx_grafana_cloudmonitoring_datasource_linux_amd64
     statement: >-
       Server-side gRPC denial of service; Prometheus 3.13.3 and Alertmanager
       0.34.1 (the newest of their lines) use gRPC only as a trace-export
-      client, which is not configured.
+      client, which is not configured, and Grafana's Cloud Monitoring data
+      source plugin is not configured either.
     expired_at: 2026-11-30
   - id: CVE-2026-84304
     paths:
@@ -66,6 +68,7 @@ vulnerabilities:
   - id: CVE-2026-28377
     paths:
       - usr/share/grafana/bin/grafana
+      - usr/share/grafana/data/plugins-bundled/tempo/gpx_grafana-tempo-datasource_linux_amd64
     statement: >-
       Tempo's S3 credential disclosure concerns a Tempo server; Grafana links
       Tempo packages only for its Tempo data source, which is not configured.
@@ -133,4 +136,29 @@ vulnerabilities:
     statement: >-
       Server-side gRPC memory exhaustion in the Cloud Monitoring data source
       plugin, which is not configured (only Prometheus is provisioned).
+    expired_at: 2026-11-15
+  - id: CVE-2026-97031
+    paths:
+      - bin/alertmanager
+      - bin/amtool
+      - bin/prometheus
+      - bin/promtool
+      - usr/share/grafana/data/plugins-bundled/elasticsearch/gpx_grafana_elasticsearch_datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/grafana-postgresql-datasource/gpx_grafana_postgresql_datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/grafana-pyroscope-datasource/gpx_grafana-pyroscope-datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/influxdb/gpx_grafana_influxdb_datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/jaeger/gpx_grafana-jaeger-datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/loki/gpx_grafana-loki-datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/mssql/gpx_grafana-mssql-datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/mysql/gpx_grafana-mysql-datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/opentsdb/gpx_grafana-opentsdb-datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/prometheus/gpx_grafana-prometheus-datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/stackdriver/gpx_grafana_cloudmonitoring_datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/tempo/gpx_grafana-tempo-datasource_linux_amd64
+      - usr/share/grafana/data/plugins-bundled/zipkin/gpx_grafana-zipkin-datasource_linux_amd64
+    statement: >-
+      crypto/tls denial of service through Encrypted Client Hello outer
+      extensions, reached only by a Go TLS server with ECH keys configured;
+      none of these programs serves TLS here (Alertmanager uses TLS only as an
+      SMTP client).
     expired_at: 2026-11-15
