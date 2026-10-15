@@ -103,7 +103,7 @@ jobs:
         with: {python-version: "${{ env.PYTHON_VERSION }}", enable-cache: true}
       - run: uv sync --group dev
       - run: uv run pytest --cov=nexusflow --cov-report=xml --cov-report=term
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with: {name: coverage, path: coverage.xml, retention-days: 7}
 
   images:
@@ -138,7 +138,7 @@ jobs:
           image: ${{ matrix.image.name }}:ci
           format: cyclonedx-json
           output-file: ${{ matrix.image.name }}.cdx.json
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: sbom-${{ matrix.image.name }}
           path: ${{ matrix.image.name }}.cdx.json
@@ -226,7 +226,7 @@ jobs:
             -e NEXUSFLOW_E2E_CA_BUNDLE=/work/deploy/certs/dev-ca.pem \
             -e CONSOLE_SCREENSHOTS=/shots \
             nexusflow-browser:latest tests/e2e/console_smoke.py
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         if: ${{ !cancelled() }}
         with:
           name: console-screenshots
@@ -291,7 +291,7 @@ jobs:
             "$ZAP_IMAGE" zap-api-scan.py -t openapi.json -f openapi -O https://localhost -S -I \
             -P 18080 -r zap-report.html -J zap-report.json
           python3 scripts/zap_gate.py "$ZAP_DIR/zap-report.json"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         if: ${{ !cancelled() }}
         with:
           name: zap-report
