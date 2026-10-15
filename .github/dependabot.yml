@@ -10,6 +10,11 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule: {interval: weekly}
+    groups:
+      # CodeQL's init and analyze must run the same version: analyze refuses a
+      # config written by a different init, so separate bump PRs each fail.
+      codeql-action:
+        patterns: ["github/codeql-action*"]
   - package-ecosystem: docker
     directory: /docker
     schedule: {interval: weekly}
