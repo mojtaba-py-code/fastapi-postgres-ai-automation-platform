@@ -8,6 +8,7 @@
 ![n8n](https://img.shields.io/badge/n8n-orchestration-EA4B71?logo=n8n&logoColor=white)
 ![Passkeys, SSO, SCIM](https://img.shields.io/badge/identity-passkeys%20%C2%B7%20OIDC%20SSO%20%C2%B7%20SCIM-6E4AFF)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue)](LICENSE)
+[![Hire me on Freelancer](https://img.shields.io/badge/Hire%20me%20on-Freelancer-29B2FE?style=flat)](https://www.freelancer.com/hireme/mojtaba2025py)
 
 **An enterprise automation and competitive-intelligence platform, built with security first.**
 
