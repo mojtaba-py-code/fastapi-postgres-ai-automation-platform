@@ -293,7 +293,7 @@ services:
     # its owner set-up first. Set the owner up as soon as you enable it.
     profiles: ["n8n"]
     init: false                   # the image runs its own init (tini)
-    image: ${N8N_IMAGE:-n8nio/n8n:2.43.4@sha256:c34ee9107a42b837e25cec0c8a927ab90a45b776aa2ccbf15e5b9cda466fad2c}   # keep current: n8n ships frequent security fixes
+    image: ${N8N_IMAGE:-n8nio/n8n:2.45.4@sha256:80e23ced901f0e22597d4f3464e3aaf9d835372262ea6f08ef760d8ca35df25c}   # keep current: n8n ships frequent security fixes
     read_only: false              # n8n writes its settings/cache under /home/node
     tmpfs: ["/tmp:size=64m,noexec,nosuid,nodev"]
     environment:
