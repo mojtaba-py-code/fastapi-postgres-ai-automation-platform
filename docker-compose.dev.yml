@@ -44,7 +44,7 @@ services:
     ports: ["127.0.0.1:5672:5672"]
 
   n8n:
-    image: ${N8N_IMAGE:-n8nio/n8n:2.43.4@sha256:c34ee9107a42b837e25cec0c8a927ab90a45b776aa2ccbf15e5b9cda466fad2c}   # the version the workflows are built for
+    image: ${N8N_IMAGE:-n8nio/n8n:2.45.4@sha256:80e23ced901f0e22597d4f3464e3aaf9d835372262ea6f08ef760d8ca35df25c}   # the version the workflows are built for
     profiles: ["n8n"]
     environment:
       DB_TYPE: postgresdb
